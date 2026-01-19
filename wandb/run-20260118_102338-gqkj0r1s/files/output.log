@@ -1,0 +1,85 @@
+01/18/2026 10:23:46 - INFO - __main__ - ***** Running training *****
+01/18/2026 10:23:46 - INFO - __main__ -   Num examples = 48
+01/18/2026 10:23:46 - INFO - __main__ -   Num batches each epoch = 24
+01/18/2026 10:23:46 - INFO - __main__ -   Num Epochs = 250
+01/18/2026 10:23:46 - INFO - __main__ -   Instantaneous batch size per device = 1
+01/18/2026 10:23:46 - INFO - __main__ -   Total train batch size (w. parallel, distributed & accumulation) = 2
+01/18/2026 10:23:46 - INFO - __main__ -   Gradient Accumulation steps = 1
+01/18/2026 10:23:46 - INFO - __main__ -   Total optimization steps = 6000
+Steps:   0%|          | 0/6000 [00:00<?, ?it/s][rank0]:W0118 10:23:47.824000 823038 torch/_logging/_internal.py:1199] [0/0] Profiler function <class 'torch.autograd.profiler.record_function'> will be ignored
+Traceback (most recent call last):
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/scripts/train_dreambooth.py", line 1689, in <module>
+    main(args)
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/scripts/train_dreambooth.py", line 1481, in main
+    model_pred = unet(
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/_dynamo/eval_frame.py", line 414, in __call__
+    return super().__call__(*args, **kwargs)
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/_dynamo/eval_frame.py", line 832, in compile_wrapper
+    return fn(*args, **kwargs)
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/_dynamo/external_utils.py", line 68, in inner
+    return fn(*args, **kwargs)
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/parallel/distributed.py", line 1661, in forward
+    else self._run_ddp_forward(*inputs, **kwargs)
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/parallel/distributed.py", line 1487, in _run_ddp_forward
+    return self.module(*inputs, **kwargs)  # type: ignore[index]
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/accelerate/utils/operations.py", line 819, in forward
+    return model_forward(*args, **kwargs)
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/accelerate/utils/operations.py", line 807, in __call__
+    return convert_to_fp32(self.model_forward(*args, **kwargs))
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/amp/autocast_mode.py", line 44, in decorate_autocast
+    return func(*args, **kwargs)
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/diffusers/models/unets/unet_2d_condition.py", line 1089, in forward
+    aug_emb = self.get_aug_embed(
+  File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/diffusers/models/unets/unet_2d_condition.py", line 907, in get_aug_embed
+    if "text_embeds" not in added_cond_kwargs:
+TypeError: argument of type 'NoneType' is not iterable
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/scripts/train_dreambooth.py", line 1689, in <module>
+[rank0]:     main(args)
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/scripts/train_dreambooth.py", line 1481, in main
+[rank0]:     model_pred = unet(
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/_dynamo/eval_frame.py", line 414, in __call__
+[rank0]:     return super().__call__(*args, **kwargs)
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/_dynamo/eval_frame.py", line 832, in compile_wrapper
+[rank0]:     return fn(*args, **kwargs)
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/_dynamo/external_utils.py", line 68, in inner
+[rank0]:     return fn(*args, **kwargs)
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/parallel/distributed.py", line 1661, in forward
+[rank0]:     else self._run_ddp_forward(*inputs, **kwargs)
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/parallel/distributed.py", line 1487, in _run_ddp_forward
+[rank0]:     return self.module(*inputs, **kwargs)  # type: ignore[index]
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/accelerate/utils/operations.py", line 819, in forward
+[rank0]:     return model_forward(*args, **kwargs)
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/accelerate/utils/operations.py", line 807, in __call__
+[rank0]:     return convert_to_fp32(self.model_forward(*args, **kwargs))
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/torch/amp/autocast_mode.py", line 44, in decorate_autocast
+[rank0]:     return func(*args, **kwargs)
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/diffusers/models/unets/unet_2d_condition.py", line 1089, in forward
+[rank0]:     aug_emb = self.get_aug_embed(
+[rank0]:   File "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/lib/python3.10/site-packages/diffusers/models/unets/unet_2d_condition.py", line 907, in get_aug_embed
+[rank0]:     if "text_embeds" not in added_cond_kwargs:
+[rank0]: TypeError: argument of type 'NoneType' is not iterable

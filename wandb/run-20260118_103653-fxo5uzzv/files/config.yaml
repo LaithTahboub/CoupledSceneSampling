@@ -1,0 +1,263 @@
+_wandb:
+    value:
+        cli_version: 0.24.0
+        e:
+            0506mtjf65qxaa19ybo69kfx18fj5zx2:
+                args:
+                    - --pretrained_model_name_or_path=stabilityai/stable-diffusion-xl-base-1.0
+                    - --instance_data_dir=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/test_final/Mysore_Palace/images/commons/East_side_of_the_Mysore_Palace/0/pictures
+                    - --output_dir=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med
+                    - --instance_prompt=a photo of sks landmark
+                    - --resolution=1024
+                    - --train_batch_size=1
+                    - --gradient_accumulation_steps=1
+                    - --learning_rate=1e-4
+                    - --lr_scheduler=constant
+                    - --lr_warmup_steps=0
+                    - --max_train_steps=3000
+                    - --mixed_precision=fp16
+                    - --report_to=wandb
+                codePath: scripts/train_dreambooth_lora_sdxl.py
+                codePathLocal: scripts/train_dreambooth_lora_sdxl.py
+                cpu_count: 32
+                cpu_count_logical: 32
+                cudaVersion: "13.0"
+                disk:
+                    /:
+                        total: "41922560000"
+                        used: "24163696640"
+                email: tahboub.laith11@gmail.com
+                executable: /fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/bin/python3
+                git:
+                    commit: 7b9f36284c7f4313c411596d350f98caa3adfa17
+                    remote: git@github.com:LaithTahboub/CoupledSceneSampling.git
+                gpu: NVIDIA RTX A6000
+                gpu_count: 2
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX A6000
+                      uuid: GPU-2479d4b1-df2a-100f-31d1-7d03976099f5
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX A6000
+                      uuid: GPU-3dfd1060-57e7-70bb-aa9b-f96fad14ac7e
+                host: vulcan32.umiacs.umd.edu
+                memory:
+                    total: "269764763648"
+                os: Linux-4.18.0-553.89.1.el8_10.x86_64-x86_64-with-glibc2.28
+                program: /fs/nexus-scratch/ltahboub/CoupledSceneSampling/scripts/train_dreambooth_lora_sdxl.py
+                python: CPython 3.10.19
+                root: /fs/nexus-scratch/ltahboub/CoupledSceneSampling
+                slurm:
+                    cluster_name: nexus
+                    conf: /etc/slurm/slurm.conf
+                    cpus_on_node: "1"
+                    gpus_on_node: "2"
+                    gtids: "0"
+                    job_account: vulcan-jbhuang
+                    job_cpus_per_node: "1"
+                    job_end_time: "1768836922"
+                    job_gid: "17811"
+                    job_gpus: 2,3
+                    job_id: "6154448"
+                    job_name: finetuning_dreambooth
+                    job_nodelist: vulcan32
+                    job_num_nodes: "1"
+                    job_partition: vulcan-ampere
+                    job_qos: vulcan-medium
+                    job_start_time: "1768750522"
+                    job_uid: "17811"
+                    job_user: ltahboub
+                    jobid: "6154448"
+                    localid: "0"
+                    mem_per_node: "49152"
+                    nnodes: "1"
+                    nodeid: "0"
+                    nodelist: vulcan32
+                    nprocs: "1"
+                    ntasks: "1"
+                    oom_kill_step: "0"
+                    prio_process: "0"
+                    procid: "0"
+                    submit_dir: /fs/nexus-scratch/ltahboub/CoupledSceneSampling
+                    submit_host: vulcan24.umiacs.umd.edu
+                    task_pid: "3433610"
+                    tasks_per_node: "1"
+                    topology_addr: vulcan32
+                    topology_addr_pattern: node
+                startedAt: "2026-01-18T15:36:53.822197Z"
+                writerId: 0506mtjf65qxaa19ybo69kfx18fj5zx2
+        m: []
+        python_version: 3.10.19
+        t:
+            "1":
+                - 1
+                - 11
+                - 41
+                - 49
+                - 71
+                - 83
+                - 98
+            "2":
+                - 1
+                - 11
+                - 41
+                - 49
+                - 71
+                - 83
+                - 98
+            "3":
+                - 2
+                - 61
+            "4": 3.10.19
+            "5": 0.24.0
+            "6": 4.57.5
+            "12": 0.24.0
+            "13": linux-x86_64
+adam_beta1:
+    value: 0.9
+adam_beta2:
+    value: 0.999
+adam_epsilon:
+    value: 1e-08
+adam_weight_decay:
+    value: 0.0001
+adam_weight_decay_text_encoder:
+    value: 0.001
+allow_tf32:
+    value: false
+cache_dir:
+    value: null
+caption_column:
+    value: null
+center_crop:
+    value: false
+checkpointing_steps:
+    value: 500
+checkpoints_total_limit:
+    value: null
+class_data_dir:
+    value: null
+class_prompt:
+    value: null
+dataloader_num_workers:
+    value: 0
+dataset_config_name:
+    value: null
+dataset_name:
+    value: null
+do_edm_style_training:
+    value: false
+enable_xformers_memory_efficient_attention:
+    value: false
+gradient_accumulation_steps:
+    value: 1
+gradient_checkpointing:
+    value: false
+hub_model_id:
+    value: null
+hub_token:
+    value: null
+image_column:
+    value: image
+image_interpolation_mode:
+    value: lanczos
+instance_data_dir:
+    value: /fs/nexus-scratch/ltahboub/CoupledSceneSampling/test_final/Mysore_Palace/images/commons/East_side_of_the_Mysore_Palace/0/pictures
+instance_prompt:
+    value: a photo of sks landmark
+learning_rate:
+    value: 0.0001
+local_rank:
+    value: 0
+logging_dir:
+    value: logs
+lora_dropout:
+    value: 0
+lr_num_cycles:
+    value: 1
+lr_power:
+    value: 1
+lr_scheduler:
+    value: constant
+lr_warmup_steps:
+    value: 0
+max_grad_norm:
+    value: 1
+max_train_steps:
+    value: 3000
+mixed_precision:
+    value: fp16
+num_class_images:
+    value: 100
+num_train_epochs:
+    value: 125
+num_validation_images:
+    value: 4
+optimizer:
+    value: AdamW
+output_dir:
+    value: /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med
+output_kohya_format:
+    value: false
+pretrained_model_name_or_path:
+    value: stabilityai/stable-diffusion-xl-base-1.0
+pretrained_vae_model_name_or_path:
+    value: null
+prior_generation_precision:
+    value: null
+prior_loss_weight:
+    value: 1
+prodigy_beta3:
+    value: null
+prodigy_decouple:
+    value: true
+prodigy_safeguard_warmup:
+    value: true
+prodigy_use_bias_correction:
+    value: true
+push_to_hub:
+    value: false
+random_flip:
+    value: false
+rank:
+    value: 4
+repeats:
+    value: 1
+report_to:
+    value: wandb
+resolution:
+    value: 1024
+resume_from_checkpoint:
+    value: null
+revision:
+    value: null
+sample_batch_size:
+    value: 4
+scale_lr:
+    value: false
+seed:
+    value: null
+snr_gamma:
+    value: null
+text_encoder_lr:
+    value: 5e-06
+train_batch_size:
+    value: 1
+train_text_encoder:
+    value: false
+use_8bit_adam:
+    value: false
+use_dora:
+    value: false
+validation_epochs:
+    value: 50
+validation_prompt:
+    value: null
+variant:
+    value: null
+with_prior_preservation:
+    value: false

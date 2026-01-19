@@ -1,0 +1,25 @@
+2026-01-18 10:36:54,108 INFO    MainThread:3433623 [wandb_setup.py:_flush():81] Current SDK version is 0.24.0
+2026-01-18 10:36:54,108 INFO    MainThread:3433623 [wandb_setup.py:_flush():81] Configure stats pid to 3433623
+2026-01-18 10:36:54,108 INFO    MainThread:3433623 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-01-18 10:36:54,108 INFO    MainThread:3433623 [wandb_init.py:setup_run_log_directory():717] Logging user logs to /fs/nexus-scratch/ltahboub/CoupledSceneSampling/wandb/run-20260118_103653-fxo5uzzv/logs/debug.log
+2026-01-18 10:36:54,108 INFO    MainThread:3433623 [wandb_init.py:setup_run_log_directory():718] Logging internal logs to /fs/nexus-scratch/ltahboub/CoupledSceneSampling/wandb/run-20260118_103653-fxo5uzzv/logs/debug-internal.log
+2026-01-18 10:36:54,108 INFO    MainThread:3433623 [wandb_init.py:init():844] calling init triggers
+2026-01-18 10:36:54,108 INFO    MainThread:3433623 [wandb_init.py:init():849] wandb.init called with sweep_config: {}
+config: {'_wandb': {}}
+2026-01-18 10:36:54,108 INFO    MainThread:3433623 [wandb_init.py:init():892] starting backend
+2026-01-18 10:37:02,287 INFO    MainThread:3433623 [wandb_init.py:init():895] sending inform_init request
+2026-01-18 10:37:02,403 INFO    MainThread:3433623 [wandb_init.py:init():903] backend started and connected
+2026-01-18 10:37:02,410 INFO    MainThread:3433623 [wandb_init.py:init():973] updated telemetry
+2026-01-18 10:37:02,825 INFO    MainThread:3433623 [wandb_init.py:init():997] communicating run to backend with 90.0 second timeout
+2026-01-18 10:37:03,827 INFO    MainThread:3433623 [wandb_init.py:init():1044] starting run threads in backend
+2026-01-18 10:37:06,009 INFO    MainThread:3433623 [wandb_run.py:_console_start():2529] atexit reg
+2026-01-18 10:37:06,009 INFO    MainThread:3433623 [wandb_run.py:_redirect():2377] redirect: wrap_raw
+2026-01-18 10:37:06,009 INFO    MainThread:3433623 [wandb_run.py:_redirect():2446] Wrapping output streams.
+2026-01-18 10:37:06,009 INFO    MainThread:3433623 [wandb_run.py:_redirect():2469] Redirects installed.
+2026-01-18 10:37:06,180 INFO    MainThread:3433623 [wandb_init.py:init():1084] run started, returning control to user process
+2026-01-18 10:37:06,181 INFO    MainThread:3433623 [wandb_run.py:_config_callback():1404] config_cb None None {'pretrained_model_name_or_path': 'stabilityai/stable-diffusion-xl-base-1.0', 'pretrained_vae_model_name_or_path': None, 'revision': None, 'variant': None, 'dataset_name': None, 'dataset_config_name': None, 'instance_data_dir': '/fs/nexus-scratch/ltahboub/CoupledSceneSampling/test_final/Mysore_Palace/images/commons/East_side_of_the_Mysore_Palace/0/pictures', 'cache_dir': None, 'image_column': 'image', 'caption_column': None, 'repeats': 1, 'class_data_dir': None, 'instance_prompt': 'a photo of sks landmark', 'class_prompt': None, 'validation_prompt': None, 'num_validation_images': 4, 'validation_epochs': 50, 'do_edm_style_training': False, 'with_prior_preservation': False, 'prior_loss_weight': 1.0, 'num_class_images': 100, 'output_dir': '/fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med', 'output_kohya_format': False, 'seed': None, 'resolution': 1024, 'center_crop': False, 'random_flip': False, 'train_text_encoder': False, 'train_batch_size': 1, 'sample_batch_size': 4, 'num_train_epochs': 125, 'max_train_steps': 3000, 'checkpointing_steps': 500, 'checkpoints_total_limit': None, 'resume_from_checkpoint': None, 'gradient_accumulation_steps': 1, 'gradient_checkpointing': False, 'learning_rate': 0.0001, 'text_encoder_lr': 5e-06, 'scale_lr': False, 'lr_scheduler': 'constant', 'snr_gamma': None, 'lr_warmup_steps': 0, 'lr_num_cycles': 1, 'lr_power': 1.0, 'dataloader_num_workers': 0, 'optimizer': 'AdamW', 'use_8bit_adam': False, 'adam_beta1': 0.9, 'adam_beta2': 0.999, 'prodigy_beta3': None, 'prodigy_decouple': True, 'adam_weight_decay': 0.0001, 'adam_weight_decay_text_encoder': 0.001, 'adam_epsilon': 1e-08, 'prodigy_use_bias_correction': True, 'prodigy_safeguard_warmup': True, 'max_grad_norm': 1.0, 'push_to_hub': False, 'hub_token': None, 'hub_model_id': None, 'logging_dir': 'logs', 'allow_tf32': False, 'report_to': 'wandb', 'mixed_precision': 'fp16', 'prior_generation_precision': None, 'local_rank': 0, 'enable_xformers_memory_efficient_attention': False, 'rank': 4, 'lora_dropout': 0.0, 'use_dora': False, 'image_interpolation_mode': 'lanczos'}
+2026-01-18 11:24:33,556 INFO    MainThread:3433623 [wandb_run.py:_finish():2295] finishing run tahboub-laith11-university-of-maryland/dreambooth-lora-sd-xl/fxo5uzzv
+2026-01-18 11:24:33,558 INFO    MainThread:3433623 [wandb_run.py:_atexit_cleanup():2494] got exitcode: 0
+2026-01-18 11:24:33,558 INFO    MainThread:3433623 [wandb_run.py:_restore():2476] restore
+2026-01-18 11:24:33,558 INFO    MainThread:3433623 [wandb_run.py:_restore():2482] restore done
+2026-01-18 11:24:34,219 INFO    MainThread:3433623 [wandb_run.py:_footer_sync_info():3870] logging synced files

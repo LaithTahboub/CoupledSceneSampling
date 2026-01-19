@@ -1,0 +1,82 @@
+01/18/2026 10:37:06 - INFO - __main__ - ***** Running training *****
+01/18/2026 10:37:06 - INFO - __main__ -   Num examples = 48
+01/18/2026 10:37:06 - INFO - __main__ -   Num batches each epoch = 24
+01/18/2026 10:37:06 - INFO - __main__ -   Num Epochs = 125
+01/18/2026 10:37:06 - INFO - __main__ -   Instantaneous batch size per device = 1
+01/18/2026 10:37:06 - INFO - __main__ -   Total train batch size (w. parallel, distributed & accumulation) = 2
+01/18/2026 10:37:06 - INFO - __main__ -   Gradient Accumulation steps = 1
+01/18/2026 10:37:06 - INFO - __main__ -   Total optimization steps = 3000
+Steps:   0%|          | 0/3000 [00:00<?, ?it/s][rank0]:W0118 10:37:07.718000 3433623 torch/_logging/_internal.py:1199] [0/0] Profiler function <class 'torch.autograd.profiler.record_function'> will be ignored
+Steps:  17%|█▋        | 500/3000 [16:04<30:00,  1.39it/s, loss=0.0176, lr=0.0001]01/18/2026 10:53:10 - INFO - accelerate.accelerator - Saving current state to /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-500
+Model weights saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-500/pytorch_lora_weights.safetensors
+01/18/2026 10:53:11 - INFO - accelerate.checkpointing - Optimizer state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-500/optimizer.bin
+01/18/2026 10:53:11 - INFO - accelerate.checkpointing - Scheduler state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-500/scheduler.bin
+01/18/2026 10:53:11 - INFO - accelerate.checkpointing - Sampler state for dataloader 0 saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-500/sampler.bin
+01/18/2026 10:53:11 - INFO - accelerate.checkpointing - Gradient scaler state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-500/scaler.pt
+01/18/2026 10:53:11 - INFO - accelerate.checkpointing - Random states saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-500/random_states_0.pkl
+01/18/2026 10:53:11 - INFO - __main__ - Saved state to /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-500
+Steps:  33%|███▎      | 1000/3000 [22:18<24:16,  1.37it/s, loss=0.182, lr=0.0001]01/18/2026 10:59:24 - INFO - accelerate.accelerator - Saving current state to /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1000
+Model weights saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1000/pytorch_lora_weights.safetensors
+01/18/2026 10:59:25 - INFO - accelerate.checkpointing - Optimizer state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1000/optimizer.bin
+01/18/2026 10:59:25 - INFO - accelerate.checkpointing - Scheduler state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1000/scheduler.bin
+01/18/2026 10:59:25 - INFO - accelerate.checkpointing - Sampler state for dataloader 0 saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1000/sampler.bin
+01/18/2026 10:59:25 - INFO - accelerate.checkpointing - Gradient scaler state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1000/scaler.pt
+01/18/2026 10:59:25 - INFO - accelerate.checkpointing - Random states saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1000/random_states_0.pkl
+01/18/2026 10:59:25 - INFO - __main__ - Saved state to /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1000
+Steps:  50%|█████     | 1500/3000 [28:32<18:04,  1.38it/s, loss=0.0998, lr=0.0001]01/18/2026 11:05:38 - INFO - accelerate.accelerator - Saving current state to /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1500
+Model weights saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1500/pytorch_lora_weights.safetensors
+01/18/2026 11:05:39 - INFO - accelerate.checkpointing - Optimizer state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1500/optimizer.bin
+01/18/2026 11:05:39 - INFO - accelerate.checkpointing - Scheduler state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1500/scheduler.bin
+01/18/2026 11:05:39 - INFO - accelerate.checkpointing - Sampler state for dataloader 0 saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1500/sampler.bin
+01/18/2026 11:05:39 - INFO - accelerate.checkpointing - Gradient scaler state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1500/scaler.pt
+01/18/2026 11:05:39 - INFO - accelerate.checkpointing - Random states saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1500/random_states_0.pkl
+01/18/2026 11:05:39 - INFO - __main__ - Saved state to /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-1500
+Steps:  67%|██████▋   | 2000/3000 [34:50<13:52,  1.20it/s, loss=0.111, lr=0.0001]01/18/2026 11:11:56 - INFO - accelerate.accelerator - Saving current state to /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2000
+Model weights saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2000/pytorch_lora_weights.safetensors
+01/18/2026 11:11:57 - INFO - accelerate.checkpointing - Optimizer state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2000/optimizer.bin
+01/18/2026 11:11:57 - INFO - accelerate.checkpointing - Scheduler state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2000/scheduler.bin
+01/18/2026 11:11:57 - INFO - accelerate.checkpointing - Sampler state for dataloader 0 saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2000/sampler.bin
+01/18/2026 11:11:57 - INFO - accelerate.checkpointing - Gradient scaler state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2000/scaler.pt
+01/18/2026 11:11:57 - INFO - accelerate.checkpointing - Random states saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2000/random_states_0.pkl
+01/18/2026 11:11:57 - INFO - __main__ - Saved state to /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2000
+Steps:  83%|████████▎ | 2500/3000 [41:08<06:08,  1.36it/s, loss=0.377, lr=0.0001]01/18/2026 11:18:14 - INFO - accelerate.accelerator - Saving current state to /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2500
+Model weights saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2500/pytorch_lora_weights.safetensors
+01/18/2026 11:18:15 - INFO - accelerate.checkpointing - Optimizer state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2500/optimizer.bin
+01/18/2026 11:18:15 - INFO - accelerate.checkpointing - Scheduler state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2500/scheduler.bin
+01/18/2026 11:18:15 - INFO - accelerate.checkpointing - Sampler state for dataloader 0 saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2500/sampler.bin
+01/18/2026 11:18:15 - INFO - accelerate.checkpointing - Gradient scaler state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2500/scaler.pt
+01/18/2026 11:18:15 - INFO - accelerate.checkpointing - Random states saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2500/random_states_0.pkl
+01/18/2026 11:18:15 - INFO - __main__ - Saved state to /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-2500
+Steps: 100%|██████████| 3000/3000 [47:21<00:00,  1.38it/s, loss=0.00221, lr=0.0001]01/18/2026 11:24:28 - INFO - accelerate.accelerator - Saving current state to /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-3000
+Model weights saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-3000/pytorch_lora_weights.safetensors
+01/18/2026 11:24:29 - INFO - accelerate.checkpointing - Optimizer state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-3000/optimizer.bin
+01/18/2026 11:24:29 - INFO - accelerate.checkpointing - Scheduler state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-3000/scheduler.bin
+01/18/2026 11:24:29 - INFO - accelerate.checkpointing - Sampler state for dataloader 0 saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-3000/sampler.bin
+01/18/2026 11:24:29 - INFO - accelerate.checkpointing - Gradient scaler state saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-3000/scaler.pt
+01/18/2026 11:24:29 - INFO - accelerate.checkpointing - Random states saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-3000/random_states_0.pkl
+01/18/2026 11:24:29 - INFO - __main__ - Saved state to /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/checkpoint-3000
+Steps: 100%|██████████| 3000/3000 [47:22<00:00,  1.38it/s, loss=0.192, lr=0.0001]  Model weights saved in /fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med/pytorch_lora_weights.safetensors
+Instantiating AutoencoderKL model under default dtype torch.float16.
+{'latents_mean', 'mid_block_add_attention', 'latents_std', 'shift_factor', 'use_post_quant_conv', 'use_quant_conv'} was not found in config. Values will be initialized to default values.
+All model checkpoint weights were used when initializing AutoencoderKL.
+
+All the weights of AutoencoderKL were initialized from the model checkpoint at stabilityai/stable-diffusion-xl-base-1.0.
+If your task is similar to the task the model of the checkpoint was trained on, you can already use AutoencoderKL for predictions without further training.
+{'image_encoder', 'feature_extractor'} was not found in config. Values will be initialized to default values.
+                                                                     Loaded text_encoder as CLIPTextModel from `text_encoder` subfolder of stabilityai/stable-diffusion-xl-base-1.0.
+Loading pipeline components...:   0%|          | 0/7 [00:00<?, ?it/s]        Instantiating UNet2DConditionModel model under default dtype torch.float16.
+{'attention_type', 'dropout', 'reverse_transformer_layers_per_block'} was not found in config. Values will be initialized to default values.
+All model checkpoint weights were used when initializing UNet2DConditionModel.
+
+All the weights of UNet2DConditionModel were initialized from the model checkpoint at /fs/nexus-scratch/ltahboub/.hf-cache/hub/models--stabilityai--stable-diffusion-xl-base-1.0/snapshots/462165984030d82259a11f4367a4eed129e94a7b/unet.
+If your task is similar to the task the model of the checkpoint was trained on, you can already use UNet2DConditionModel for predictions without further training.
+Loaded unet as UNet2DConditionModel from `unet` subfolder of stabilityai/stable-diffusion-xl-base-1.0.
+{'final_sigmas_type', 'use_exponential_sigmas', 'sigma_min', 'use_beta_sigmas', 'sigma_max', 'timestep_type', 'rescale_betas_zero_snr'} was not found in config. Values will be initialized to default values.
+Loaded scheduler as EulerDiscreteScheduler from `scheduler` subfolder of stabilityai/stable-diffusion-xl-base-1.0.
+                                                                             Loaded tokenizer_2 as CLIPTokenizer from `tokenizer_2` subfolder of stabilityai/stable-diffusion-xl-base-1.0.
+Loaded text_encoder_2 as CLIPTextModelWithProjection from `text_encoder_2` subfolder of stabilityai/stable-diffusion-xl-base-1.0.
+                                                                             Loaded tokenizer as CLIPTokenizer from `tokenizer` subfolder of stabilityai/stable-diffusion-xl-base-1.0.
+Loading pipeline components...: 100%|██████████| 7/7 [00:03<00:00,  2.18it/s]
+Loading unet.
+No LoRA keys associated to CLIPTextModel found with the prefix='text_encoder'. This is safe to ignore if LoRA state dict didn't originally have any CLIPTextModel related params. You can also try specifying `prefix=None` to resolve the warning. Otherwise, open an issue if you think it's unexpected: https://github.com/huggingface/diffusers/issues/new
+No LoRA keys associated to CLIPTextModelWithProjection found with the prefix='text_encoder_2'. This is safe to ignore if LoRA state dict didn't originally have any CLIPTextModelWithProjection related params. You can also try specifying `prefix=None` to resolve the warning. Otherwise, open an issue if you think it's unexpected: https://github.com/huggingface/diffusers/issues/new

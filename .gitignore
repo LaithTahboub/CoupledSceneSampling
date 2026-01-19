@@ -1,5 +1,4 @@
 /test_final/Mysore_Palace/
 /train_ready_data/
 scripts/wandb/
-mysore_palace_dreambooth_sd2-1/
-mysore_palace_dreambooth_sd21/
+/mysore_palace_dreambooth_*

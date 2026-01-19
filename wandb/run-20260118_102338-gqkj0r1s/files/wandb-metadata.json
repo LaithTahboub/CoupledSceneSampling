@@ -1,0 +1,100 @@
+{
+  "os": "Linux-4.18.0-553.89.1.el8_10.x86_64-x86_64-with-glibc2.28",
+  "python": "CPython 3.10.19",
+  "startedAt": "2026-01-18T15:23:38.056974Z",
+  "args": [
+    "--pretrained_model_name_or_path=stabilityai/stable-diffusion-xl-base-1.0",
+    "--instance_data_dir=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/test_final/Mysore_Palace/images/commons/East_side_of_the_Mysore_Palace/0/pictures",
+    "--output_dir=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd3_med",
+    "--instance_prompt=a photo of sks landmark",
+    "--resolution=1024",
+    "--train_batch_size=1",
+    "--gradient_accumulation_steps=1",
+    "--learning_rate=1e-6",
+    "--lr_scheduler=constant",
+    "--lr_warmup_steps=0",
+    "--mixed_precision=fp16",
+    "--max_train_steps=6000",
+    "--report_to=wandb"
+  ],
+  "program": "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/scripts/train_dreambooth.py",
+  "codePath": "scripts/train_dreambooth.py",
+  "codePathLocal": "scripts/train_dreambooth.py",
+  "git": {
+    "remote": "git@github.com:LaithTahboub/CoupledSceneSampling.git",
+    "commit": "7b9f36284c7f4313c411596d350f98caa3adfa17"
+  },
+  "email": "tahboub.laith11@gmail.com",
+  "root": "/fs/nexus-scratch/ltahboub/CoupledSceneSampling",
+  "host": "vulcan31.umiacs.umd.edu",
+  "executable": "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/bin/python3",
+  "cpu_count": 32,
+  "cpu_count_logical": 32,
+  "gpu": "NVIDIA RTX A6000",
+  "gpu_count": 2,
+  "disk": {
+    "/": {
+      "total": "41922560000",
+      "used": "22620499968"
+    }
+  },
+  "memory": {
+    "total": "269764751360"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA RTX A6000",
+      "memoryTotal": "51527024640",
+      "cudaCores": 10752,
+      "architecture": "Ampere",
+      "uuid": "GPU-582c4b95-a909-a05e-8c9a-0eb97568b752"
+    },
+    {
+      "name": "NVIDIA RTX A6000",
+      "memoryTotal": "51527024640",
+      "cudaCores": 10752,
+      "architecture": "Ampere",
+      "uuid": "GPU-200d1967-faea-0146-3b78-ac3ea0e281dd"
+    }
+  ],
+  "cudaVersion": "13.0",
+  "slurm": {
+    "cluster_name": "nexus",
+    "conf": "/etc/slurm/slurm.conf",
+    "cpus_on_node": "1",
+    "gpus_on_node": "2",
+    "gtids": "0",
+    "job_account": "vulcan-jbhuang",
+    "job_cpus_per_node": "1",
+    "job_end_time": "1768836144",
+    "job_gid": "17811",
+    "job_gpus": "4,6",
+    "job_id": "6154443",
+    "job_name": "finetuning_dreambooth",
+    "job_nodelist": "vulcan31",
+    "job_num_nodes": "1",
+    "job_partition": "vulcan-ampere",
+    "job_qos": "vulcan-medium",
+    "job_start_time": "1768749744",
+    "job_uid": "17811",
+    "job_user": "ltahboub",
+    "jobid": "6154443",
+    "localid": "0",
+    "mem_per_node": "49152",
+    "nnodes": "1",
+    "nodeid": "0",
+    "nodelist": "vulcan31",
+    "nprocs": "1",
+    "ntasks": "1",
+    "oom_kill_step": "0",
+    "prio_process": "0",
+    "procid": "0",
+    "submit_dir": "/fs/nexus-scratch/ltahboub/CoupledSceneSampling",
+    "submit_host": "vulcan24.umiacs.umd.edu",
+    "task_pid": "823023",
+    "tasks_per_node": "1",
+    "topology_addr": "vulcan31",
+    "topology_addr_pattern": "node"
+  },
+  "writerId": "1z5ofu52ay6ialm7eiydhon7x6x9sdlj"
+}
