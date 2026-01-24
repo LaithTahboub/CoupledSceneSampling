@@ -1,4 +1,7 @@
-/test_final/Mysore_Palace/
+/MegaScenes/Mysore_Palace/
 /train_ready_data/
-scripts/wandb/
+wandb/
 /mysore_palace_dreambooth_*
+GEN3C/
+Coupled-Diffusion
+work_dirs/
