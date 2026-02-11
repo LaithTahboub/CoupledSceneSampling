@@ -2,9 +2,9 @@ import torch
 from diffusers import StableDiffusionPipeline, UNet2DConditionModel
 
 base_model_path = (
-    "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd21"
+    "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd15"
 )
-checkpoint_path = "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd21/unet"
+checkpoint_path = "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd15/unet"
 
 unet = UNet2DConditionModel.from_pretrained(checkpoint_path, torch_dtype=torch.float16)
 

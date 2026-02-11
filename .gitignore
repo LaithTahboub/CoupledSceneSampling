@@ -5,3 +5,9 @@ wandb/
 GEN3C/
 Coupled-Diffusion
 work_dirs/
+#stable-virtual-camera
+gradio_tmp
+.claude
+24*
+old
+pose*

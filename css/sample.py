@@ -1,0 +1,199 @@
+"""
+Sample from trained pose-conditioned SD checkpoint.
+Intelligently selects reference images based on position + viewing direction overlap.
+"""
+
+import argparse
+import numpy as np
+import torch
+from pathlib import Path
+from PIL import Image
+
+from css.data.colmap_reader import read_scene
+from css.models.pose_conditioned_sd import PoseConditionedSD
+from css.data.dataset import MegaScenesDataset
+
+
+def compute_viewing_direction(c2w: np.ndarray) -> np.ndarray:
+    """Get camera's forward direction (negative z-axis in camera frame)."""
+    return -c2w[:3, 2]  # Forward = -Z in camera coords
+
+
+def find_best_references(target_img, all_images, cameras,
+                         max_dist=2.0, min_dir_sim=0.3, min_ref_spacing=0.3):
+    """
+    Find 2 best reference images based on:
+    1. Camera position proximity
+    2. Viewing direction similarity (shared FOV)
+
+    Uses same algorithm as dataset triplet building.
+
+    Args:
+        max_dist: Max distance from target to references (default 2.0)
+        min_dir_sim: Min viewing direction similarity (default 0.3 ≈ 73° angle)
+        min_ref_spacing: Min distance between ref1 and ref2 (default 0.3)
+    """
+    target_pos = target_img.c2w[:3, 3]
+    target_dir = compute_viewing_direction(target_img.c2w)
+
+    # Score all candidates
+    candidates = []
+    for img in all_images:
+        if img.id == target_img.id:
+            continue
+
+        pos = img.c2w[:3, 3]
+        dir = compute_viewing_direction(img.c2w)
+
+        distance = np.linalg.norm(pos - target_pos)
+        if distance > max_dist:
+            continue
+
+        dir_sim = np.dot(target_dir, dir)
+        if dir_sim < min_dir_sim:  # Reject opposing directions
+            continue
+
+        # Combined score: lower is better
+        score = distance * (2.0 - dir_sim)
+        candidates.append((score, img, distance, dir_sim))
+
+    if len(candidates) < 2:
+        raise ValueError(f"Not enough valid references found for target {target_img.name}")
+
+    candidates.sort(key=lambda x: x[0])
+
+    # Pick ref1 (best score)
+    ref1_score, ref1, ref1_dist, ref1_sim = candidates[0]
+
+    # Pick ref2 (spatially diverse from ref1)
+    ref2 = None
+    ref2_score, ref2_dist, ref2_sim = None, None, None
+    for score, img, dist, sim in candidates[1:]:
+        ref1_to_ref2 = np.linalg.norm(img.c2w[:3, 3] - ref1.c2w[:3, 3])
+        if ref1_to_ref2 >= min_ref_spacing:
+            ref2 = img
+            ref2_score, ref2_dist, ref2_sim = score, dist, sim
+            break
+
+    # Fallback: take second best if all are too close
+    if ref2 is None:
+        ref2_score, ref2, ref2_dist, ref2_sim = candidates[1]
+
+    print(f"Selected references:")
+    print(f"  Ref1: {ref1.name} (dist={ref1_dist:.2f}, dir_sim={ref1_sim:.2f}, score={ref1_score:.2f})")
+    print(f"  Ref2: {ref2.name} (dist={ref2_dist:.2f}, dir_sim={ref2_sim:.2f}, score={ref2_score:.2f})")
+
+    return ref1, ref2
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", required=True, help="Path to UNet checkpoint (.pt file)")
+    parser.add_argument("--scene", default="MegaScenes/Mysore_Palace", help="Scene directory")
+    parser.add_argument("--target-idx", type=int, default=None, help="Target image index (or random if not set)")
+    parser.add_argument("--prompt", default="a photo of the Mysore palace", help="Text prompt")
+    parser.add_argument("--num-steps", type=int, default=50, help="Sampling steps")
+    parser.add_argument("--cfg-scale", type=float, default=7.5, help="CFG scale")
+    parser.add_argument("--output", default="sample.png", help="Output path")
+    parser.add_argument("--show-refs", action="store_true", help="Also save reference images")
+    args = parser.parse_args()
+
+    scene_dir = Path(args.scene)
+
+    # Load model
+    print("Loading model...")
+    model = PoseConditionedSD()
+    state = torch.load(args.checkpoint, map_location=model.device)
+    if isinstance(state, dict) and "unet" in state:
+        model.unet.load_state_dict(state["unet"])
+        model.ref_encoder.load_state_dict(state["ref_encoder"])
+    else:
+        model.unet.load_state_dict(state)
+    model.eval()
+    print(f"Loaded checkpoint: {args.checkpoint}")
+
+    # Load scene
+    print(f"Loading scene: {scene_dir}")
+    cameras, images = read_scene(scene_dir)
+    images_dir = scene_dir / "images"
+
+    # Filter to valid images
+    valid_images = [img for img in images.values() if (images_dir / img.name).exists()]
+    print(f"Found {len(valid_images)} valid images")
+
+    # Select target
+    if args.target_idx is not None:
+        target_img = valid_images[args.target_idx]
+    else:
+        # Random but avoid first/last (might be edge cases)
+        idx = np.random.randint(10, len(valid_images) - 10)
+        target_img = valid_images[idx]
+
+    print(f"\nTarget: {target_img.name} (image {target_img.id})")
+
+    # Find best references
+    ref1_img, ref2_img = find_best_references(target_img, valid_images, cameras)
+
+    # Create dataset to get proper preprocessing
+    dataset = MegaScenesDataset([str(scene_dir)], H=512, W=512, max_triplets_per_scene=1)
+
+    # Load and preprocess images
+    ref1_tensor = dataset._load_image(images_dir, ref1_img).unsqueeze(0)
+    ref2_tensor = dataset._load_image(images_dir, ref2_img).unsqueeze(0)
+    target_tensor = dataset._load_image(images_dir, target_img).unsqueeze(0)
+
+    # Compute Pluckers
+    cam_ref1 = cameras[ref1_img.camera_id]
+    cam_ref2 = cameras[ref2_img.camera_id]
+    cam_tgt = cameras[target_img.camera_id]
+
+    K_ref1 = dataset._build_K(cam_ref1)
+    K_ref2 = dataset._build_K(cam_ref2)
+    K_tgt = dataset._build_K(cam_tgt)
+
+    plucker_ref1 = dataset._compute_plucker(target_img.c2w, ref1_img.c2w, K_ref1).unsqueeze(0)
+    plucker_ref2 = dataset._compute_plucker(target_img.c2w, ref2_img.c2w, K_ref2).unsqueeze(0)
+    plucker_target = dataset._compute_plucker(target_img.c2w, target_img.c2w, K_tgt).unsqueeze(0)
+
+    # Generate
+    print(f"\nGenerating with {args.num_steps} steps, CFG={args.cfg_scale}...")
+    with torch.inference_mode():
+        generated = model.sample(
+            ref1_tensor, ref2_tensor,
+            plucker_ref1, plucker_ref2, plucker_target,
+            prompt=args.prompt, num_steps=args.num_steps, cfg_scale=args.cfg_scale,
+        )
+
+    # Convert to images
+    def to_pil(t):
+        arr = ((t.clamp(-1, 1) + 1) / 2 * 255).byte().permute(1, 2, 0).cpu().numpy()
+        return Image.fromarray(arr)
+
+    ref1_pil = to_pil(ref1_tensor[0])
+    ref2_pil = to_pil(ref2_tensor[0])
+    target_pil = to_pil(target_tensor[0])
+    generated_pil = to_pil(generated[0])
+
+    # Create comparison grid
+    grid = np.concatenate([
+        np.array(ref1_pil),
+        np.array(ref2_pil),
+        np.array(target_pil),
+        np.array(generated_pil),
+    ], axis=1)
+
+    output_path = Path(args.output)
+    Image.fromarray(grid).save(output_path)
+    print(f"Saved comparison: {output_path}")
+    print("  [Ref1 | Ref2 | Ground Truth | Generated]")
+
+    if args.show_refs:
+        ref1_pil.save(output_path.with_stem(output_path.stem + "_ref1"))
+        ref2_pil.save(output_path.with_stem(output_path.stem + "_ref2"))
+        target_pil.save(output_path.with_stem(output_path.stem + "_gt"))
+        generated_pil.save(output_path.with_stem(output_path.stem + "_gen"))
+        print(f"Saved individual images")
+
+
+if __name__ == "__main__":
+    main()

@@ -6,6 +6,7 @@ uv run /fs/nexus-scratch/ltahboub/CoupledSceneSampling/SEVA/demo.py \
     --cfg 4.0,2.0 \
     --guider 1,2 \
     --num_targets 111 \
-    --L_short 576 \
+    --L_short 320 \
     --use_traj_prior True \
     --chunk_strategy interp
+    

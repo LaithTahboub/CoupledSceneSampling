@@ -1,3 +1,0 @@
-/var/spool/slurm/slurmd.spool/job6140716/slurm_script: /fs/nexus-scratch/ltahboub/learning-diffusion/.venv/bin/accelerate: /fs/nexus-scratch/ltahboub/diffusion-playground/.venv/bin/python3: bad interpreter: No such file or directory
-/var/spool/slurm/slurmd.spool/job6140716/slurm_script: line 37: --output_dir=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/mysore_palace_dreambooth_sd21: No such file or directory
-/var/spool/slurm/slurmd.spool/job6140716/slurm_script: line 47: --push_to_hub: command not found
