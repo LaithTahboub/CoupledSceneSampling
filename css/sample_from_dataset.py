@@ -1,7 +1,4 @@
-"""
-Sample using pre-built dataset triplets (same as training visualization).
-This ensures we use the same high-quality reference pairs used during training.
-"""
+"""Sample with dataset triplets."""
 
 import argparse
 import numpy as np
@@ -10,11 +7,10 @@ from pathlib import Path
 from PIL import Image
 
 from css.data.dataset import MegaScenesDataset
-from css.models.pose_conditioned_sd import PoseConditionedSD
+from css.models.pose_conditioned_sd import PoseConditionedSD, load_pose_sd_checkpoint
 
 
 def _to_uint8(t: torch.Tensor) -> np.ndarray:
-    """Convert [-1,1] CHW tensor to uint8 HWC numpy."""
     return ((t.clamp(-1, 1) + 1) / 2 * 255).byte().permute(1, 2, 0).cpu().numpy()
 
 
@@ -25,29 +21,24 @@ def main():
     parser.add_argument("--triplet-idx", type=int, default=0, help="Which dataset triplet to use")
     parser.add_argument("--prompt", default="", help="Text prompt")
     parser.add_argument("--num-steps", type=int, default=50, help="Sampling steps")
-    parser.add_argument("--cfg-scale", type=float, default=2.0, help="CFG scale")
+    parser.add_argument("--cfg-scale", type=float, default=1.0, help="CFG scale")
+    parser.add_argument("--max-pair-dist", type=float, default=2.0)
+    parser.add_argument("--max-triplets", type=int, default=10000)
     parser.add_argument("--output", default="sample_ds.png", help="Output path")
     args = parser.parse_args()
 
-    # Load model
     print("Loading model...")
     model = PoseConditionedSD()
-    state = torch.load(args.checkpoint, map_location=model.device)
-    if isinstance(state, dict) and "unet" in state:
-        model.unet.load_state_dict(state["unet"])
-        model.ref_encoder.load_state_dict(state["ref_encoder"])
-    else:
-        model.unet.load_state_dict(state)
+    load_pose_sd_checkpoint(model, args.checkpoint, model.device)
     model.eval()
     print(f"Loaded checkpoint: {args.checkpoint}")
 
-    # Load dataset (this will use the same triplet building as training)
     print(f"Loading dataset from {args.scene}...")
     dataset = MegaScenesDataset(
         [args.scene],
         H=512, W=512,
-        max_pair_distance=2.0,
-        max_triplets_per_scene=10000,
+        max_pair_distance=args.max_pair_dist,
+        max_triplets_per_scene=args.max_triplets,
     )
     print(f"Dataset has {len(dataset)} triplets")
 
@@ -55,11 +46,9 @@ def main():
         print(f"Error: triplet_idx {args.triplet_idx} out of range (max: {len(dataset)-1})")
         return
 
-    # Get triplet from dataset
     sample = dataset[args.triplet_idx]
     print(f"\nUsing triplet {args.triplet_idx}")
 
-    # Generate
     print(f"Generating with {args.num_steps} steps, CFG={args.cfg_scale}...")
     with torch.inference_mode():
         generated = model.sample(
@@ -73,7 +62,6 @@ def main():
             cfg_scale=args.cfg_scale,
         )
 
-    # Create comparison grid
     grid = np.concatenate([
         _to_uint8(sample["ref1_img"]),
         _to_uint8(sample["ref2_img"]),

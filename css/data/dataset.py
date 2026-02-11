@@ -1,7 +1,4 @@
-"""
-MegaScenes dataset for pose-conditioned SD training.
-Precomputes all images and Pluckers at init; __getitem__ is pure indexing.
-"""
+"""MegaScenes dataset for pose-conditioned SD training."""
 
 import torch
 import numpy as np
@@ -26,12 +23,6 @@ class MegaScenesDataset(Dataset):
         min_dir_similarity: float = 0.3,
         min_ref_spacing: float = 0.3,
     ):
-        """
-        Args:
-            max_pair_distance: Max distance from target to references
-            min_dir_similarity: Min dot product of viewing directions (0.3 ≈ 73° angle)
-            min_ref_spacing: Min distance between ref1 and ref2 for diversity
-        """
         self.H, self.W = H, W
         self.latent_h, self.latent_w = H // 8, W // 8
 
@@ -49,7 +40,6 @@ class MegaScenesDataset(Dataset):
             print("MegaScenesDataset: 0 triplets found")
             return
 
-        # Preload unique images
         image_map = {}
         image_list = []
         for images_dir, ref1, _, ref2, _, tgt, _ in raw_triplets:
@@ -61,9 +51,7 @@ class MegaScenesDataset(Dataset):
 
         self.images = torch.stack(image_list)
 
-        # Precompute Pluckers (deduplicated)
-        # All Pluckers in a triplet are expressed in ref1's camera frame.
-        # This makes target pose conditioning non-degenerate.
+        # All Pluckers in a triplet are expressed in ref1 frame.
         plucker_cache = {}
         plucker_list = []
         ref1_img_idx, ref2_img_idx, tgt_img_idx = [], [], []
@@ -96,7 +84,7 @@ class MegaScenesDataset(Dataset):
         print(f"Dataset ready: {self.n} triplets, {len(image_list)} images, {len(plucker_list)} unique Pluckers")
 
     def _build_triplets(self, scene_dir, max_dist, max_triplets, min_dir_sim, min_ref_spacing):
-        """Build triplets where refs are closest to target with good FOV overlap."""
+        """Build target/ref pairs with close position and similar viewing direction."""
         cameras, images = read_scene(scene_dir)
         images_dir = scene_dir / "images"
 
@@ -106,7 +94,6 @@ class MegaScenesDataset(Dataset):
 
         triplets = []
 
-        # For each potential target, find best reference pairs
         for target in valid:
             if len(triplets) >= max_triplets:
                 break
@@ -114,7 +101,6 @@ class MegaScenesDataset(Dataset):
             target_pos = target.c2w[:3, 3]
             target_dir = self._get_viewing_direction(target.c2w)
 
-            # Score all other images as potential references
             candidates = []
             for ref in valid:
                 if ref.id == target.id:
@@ -128,10 +114,9 @@ class MegaScenesDataset(Dataset):
                     continue
 
                 dir_sim = np.dot(target_dir, ref_dir)
-                if dir_sim < min_dir_sim:  # Reject opposing directions
+                if dir_sim < min_dir_sim:
                     continue
 
-                # Combined score: lower is better
                 score = distance * (2.0 - dir_sim)
                 candidates.append((score, ref, distance, dir_sim))
 
@@ -140,15 +125,13 @@ class MegaScenesDataset(Dataset):
 
             candidates.sort(key=lambda x: x[0])
 
-            # Generate multiple reference pairs from top candidates
             top_k = min(20, len(candidates))
-            for i in range(min(top_k - 1, 5)):  # Up to 5 pairs per target
+            for i in range(min(top_k - 1, 5)):
                 if len(triplets) >= max_triplets:
                     break
 
-                ref1_score, ref1, ref1_dist, ref1_sim = candidates[i]
+                _, ref1, _, _ = candidates[i]
 
-                # Find ref2 that's spatially diverse from ref1
                 ref2 = None
                 for j in range(i + 1, top_k):
                     score, ref, dist, sim = candidates[j]
@@ -157,7 +140,6 @@ class MegaScenesDataset(Dataset):
                         ref2 = ref
                         break
 
-                # Fallback: take next best if all are too close
                 if ref2 is None and i + 1 < len(candidates):
                     ref2 = candidates[i + 1][1]
 

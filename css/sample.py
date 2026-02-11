@@ -1,7 +1,4 @@
-"""
-Sample from trained pose-conditioned SD checkpoint.
-Intelligently selects reference images based on position + viewing direction overlap.
-"""
+"""Sample from a pose-conditioned SD checkpoint."""
 
 import argparse
 import numpy as np
@@ -10,33 +7,18 @@ from pathlib import Path
 from PIL import Image
 
 from css.data.colmap_reader import read_scene
-from css.models.pose_conditioned_sd import PoseConditionedSD
+from css.models.pose_conditioned_sd import PoseConditionedSD, load_pose_sd_checkpoint
 from css.data.dataset import MegaScenesDataset
 
 
 def compute_viewing_direction(c2w: np.ndarray) -> np.ndarray:
-    """Get camera's forward direction (negative z-axis in camera frame)."""
-    return -c2w[:3, 2]  # Forward = -Z in camera coords
+    return -c2w[:3, 2]
 
 
-def find_best_references(target_img, all_images, cameras,
-                         max_dist=2.0, min_dir_sim=0.3, min_ref_spacing=0.3):
-    """
-    Find 2 best reference images based on:
-    1. Camera position proximity
-    2. Viewing direction similarity (shared FOV)
-
-    Uses same algorithm as dataset triplet building.
-
-    Args:
-        max_dist: Max distance from target to references (default 2.0)
-        min_dir_sim: Min viewing direction similarity (default 0.3 ≈ 73° angle)
-        min_ref_spacing: Min distance between ref1 and ref2 (default 0.3)
-    """
+def find_best_references(target_img, all_images, max_dist=2.0, min_dir_sim=0.3, min_ref_spacing=0.3):
     target_pos = target_img.c2w[:3, 3]
     target_dir = compute_viewing_direction(target_img.c2w)
 
-    # Score all candidates
     candidates = []
     for img in all_images:
         if img.id == target_img.id:
@@ -50,10 +32,9 @@ def find_best_references(target_img, all_images, cameras,
             continue
 
         dir_sim = np.dot(target_dir, dir)
-        if dir_sim < min_dir_sim:  # Reject opposing directions
+        if dir_sim < min_dir_sim:
             continue
 
-        # Combined score: lower is better
         score = distance * (2.0 - dir_sim)
         candidates.append((score, img, distance, dir_sim))
 
@@ -62,10 +43,8 @@ def find_best_references(target_img, all_images, cameras,
 
     candidates.sort(key=lambda x: x[0])
 
-    # Pick ref1 (best score)
     ref1_score, ref1, ref1_dist, ref1_sim = candidates[0]
 
-    # Pick ref2 (spatially diverse from ref1)
     ref2 = None
     ref2_score, ref2_dist, ref2_sim = None, None, None
     for score, img, dist, sim in candidates[1:]:
@@ -75,7 +54,6 @@ def find_best_references(target_img, all_images, cameras,
             ref2_score, ref2_dist, ref2_sim = score, dist, sim
             break
 
-    # Fallback: take second best if all are too close
     if ref2 is None:
         ref2_score, ref2, ref2_dist, ref2_sim = candidates[1]
 
@@ -93,56 +71,51 @@ def main():
     parser.add_argument("--target-idx", type=int, default=None, help="Target image index (or random if not set)")
     parser.add_argument("--prompt", default="a photo of the Mysore palace", help="Text prompt")
     parser.add_argument("--num-steps", type=int, default=50, help="Sampling steps")
-    parser.add_argument("--cfg-scale", type=float, default=2.0, help="CFG scale")
+    parser.add_argument("--cfg-scale", type=float, default=1.0, help="CFG scale")
+    parser.add_argument("--max-pair-dist", type=float, default=2.0, help="Max ref-target camera distance")
+    parser.add_argument("--min-dir-sim", type=float, default=0.3, help="Min view direction similarity")
+    parser.add_argument("--min-ref-spacing", type=float, default=0.3, help="Min distance between refs")
     parser.add_argument("--output", default="sample.png", help="Output path")
     parser.add_argument("--show-refs", action="store_true", help="Also save reference images")
     args = parser.parse_args()
 
     scene_dir = Path(args.scene)
 
-    # Load model
     print("Loading model...")
     model = PoseConditionedSD()
-    state = torch.load(args.checkpoint, map_location=model.device)
-    if isinstance(state, dict) and "unet" in state:
-        model.unet.load_state_dict(state["unet"])
-        model.ref_encoder.load_state_dict(state["ref_encoder"])
-    else:
-        model.unet.load_state_dict(state)
+    load_pose_sd_checkpoint(model, args.checkpoint, model.device)
     model.eval()
     print(f"Loaded checkpoint: {args.checkpoint}")
 
-    # Load scene
     print(f"Loading scene: {scene_dir}")
     cameras, images = read_scene(scene_dir)
     images_dir = scene_dir / "images"
 
-    # Filter to valid images
     valid_images = [img for img in images.values() if (images_dir / img.name).exists()]
     print(f"Found {len(valid_images)} valid images")
 
-    # Select target
     if args.target_idx is not None:
         target_img = valid_images[args.target_idx]
     else:
-        # Random but avoid first/last (might be edge cases)
         idx = np.random.randint(10, len(valid_images) - 10)
         target_img = valid_images[idx]
 
     print(f"\nTarget: {target_img.name} (image {target_img.id})")
 
-    # Find best references
-    ref1_img, ref2_img = find_best_references(target_img, valid_images, cameras)
+    ref1_img, ref2_img = find_best_references(
+        target_img,
+        valid_images,
+        max_dist=args.max_pair_dist,
+        min_dir_sim=args.min_dir_sim,
+        min_ref_spacing=args.min_ref_spacing,
+    )
 
-    # Create dataset to get proper preprocessing
     dataset = MegaScenesDataset([str(scene_dir)], H=512, W=512, max_triplets_per_scene=1)
 
-    # Load and preprocess images
     ref1_tensor = dataset._load_image(images_dir, ref1_img).unsqueeze(0)
     ref2_tensor = dataset._load_image(images_dir, ref2_img).unsqueeze(0)
     target_tensor = dataset._load_image(images_dir, target_img).unsqueeze(0)
 
-    # Compute Pluckers
     cam_ref1 = cameras[ref1_img.camera_id]
     cam_ref2 = cameras[ref2_img.camera_id]
     cam_tgt = cameras[target_img.camera_id]
@@ -151,12 +124,10 @@ def main():
     K_ref2 = dataset._build_K(cam_ref2)
     K_tgt = dataset._build_K(cam_tgt)
 
-    # Match training convention: all Pluckers are expressed in ref1 frame.
     plucker_ref1 = dataset._compute_plucker(ref1_img.c2w, ref1_img.c2w, K_ref1).unsqueeze(0)
     plucker_ref2 = dataset._compute_plucker(ref1_img.c2w, ref2_img.c2w, K_ref2).unsqueeze(0)
     plucker_target = dataset._compute_plucker(ref1_img.c2w, target_img.c2w, K_tgt).unsqueeze(0)
 
-    # Generate
     print(f"\nGenerating with {args.num_steps} steps, CFG={args.cfg_scale}...")
     with torch.inference_mode():
         generated = model.sample(
@@ -165,7 +136,6 @@ def main():
             prompt=args.prompt, num_steps=args.num_steps, cfg_scale=args.cfg_scale,
         )
 
-    # Convert to images
     def to_pil(t):
         arr = ((t.clamp(-1, 1) + 1) / 2 * 255).byte().permute(1, 2, 0).cpu().numpy()
         return Image.fromarray(arr)
@@ -175,7 +145,6 @@ def main():
     target_pil = to_pil(target_tensor[0])
     generated_pil = to_pil(generated[0])
 
-    # Create comparison grid
     grid = np.concatenate([
         np.array(ref1_pil),
         np.array(ref2_pil),

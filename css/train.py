@@ -1,7 +1,4 @@
-"""
-Training script for Pose-Conditioned SD.
-Auto-resumes from checkpoints. Signal save: scancel --signal=USR1 <job_id>
-"""
+"""Training script for Pose-Conditioned SD."""
 
 import argparse
 import re
@@ -15,7 +12,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from css.data.dataset import MegaScenesDataset
-from css.models.pose_conditioned_sd import PoseConditionedSD
+from css.models.pose_conditioned_sd import (
+    PoseConditionedSD,
+    load_pose_sd_checkpoint,
+    save_pose_sd_checkpoint,
+)
 
 _save_requested = False
 
@@ -30,7 +31,6 @@ signal.signal(signal.SIGUSR1, _handle_save_signal)
 
 
 def _find_latest_checkpoint(output_dir: Path) -> tuple[Path | None, int, int]:
-    """Find latest checkpoint, return (path, epoch, global_step)."""
     best_epoch, best_step, best_path = -1, 0, None
     for ckpt in output_dir.glob("unet_*.pt"):
         m = re.search(r"epoch[_]?(\d+)", ckpt.stem)
@@ -44,12 +44,10 @@ def _find_latest_checkpoint(output_dir: Path) -> tuple[Path | None, int, int]:
 
 
 def _to_uint8(t: torch.Tensor) -> np.ndarray:
-    """Convert [-1,1] CHW tensor to uint8 HWC numpy."""
     return ((t.clamp(-1, 1) + 1) / 2 * 255).byte().permute(1, 2, 0).cpu().numpy()
 
 
 def _log_sample(model, dataset, prompt, step, cfg_scale):
-    """Generate and log a comparison image: ref1 | ref2 | GT | generated."""
     try:
         sample = dataset[0]
         model.eval()
@@ -75,11 +73,7 @@ def _log_sample(model, dataset, prompt, step, cfg_scale):
 
 
 def _save_checkpoint(model, ckpt_path):
-    """Save checkpoint locally (UNet + ref_encoder)."""
-    torch.save({
-        "unet": model.unet.state_dict(),
-        "ref_encoder": model.ref_encoder.state_dict(),
-    }, ckpt_path)
+    save_pose_sd_checkpoint(model, ckpt_path)
     print(f"Saved {ckpt_path}")
 
 
@@ -94,27 +88,22 @@ def train(
     prompt="",
     cond_drop_prob=0.1,
     sample_cfg_scale=2.0,
+    min_timestep=0,
+    max_timestep=None,
 ):
     global _save_requested
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-    trained_params = list(model.unet.parameters()) + list(model.ref_encoder.parameters())
+    trained_params = [p for p in model.unet.parameters() if p.requires_grad] + list(model.ref_encoder.parameters())
     optimizer = torch.optim.AdamW(trained_params, lr=lr)
 
-    # Auto-resume
     start_epoch, global_step = 0, 0
     ckpt_path, resume_epoch, resume_step = _find_latest_checkpoint(output_path)
     if ckpt_path is not None:
         print(f"Resuming from {ckpt_path} (epoch {resume_epoch}, step {resume_step})")
-        state = torch.load(ckpt_path, map_location=model.device)
-        if isinstance(state, dict) and "unet" in state:
-            model.unet.load_state_dict(state["unet"])
-            model.ref_encoder.load_state_dict(state["ref_encoder"])
-        else:
-            # Backwards compat: old checkpoints only have UNet state_dict
-            model.unet.load_state_dict(state)
+        load_pose_sd_checkpoint(model, ckpt_path, model.device)
         start_epoch = resume_epoch
         global_step = resume_step
     else:
@@ -128,7 +117,13 @@ def train(
             pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
             for batch in pbar:
                 optimizer.zero_grad()
-                loss = model.training_step(batch, prompt, cond_drop_prob=cond_drop_prob)
+                loss = model.training_step(
+                    batch,
+                    prompt,
+                    cond_drop_prob=cond_drop_prob,
+                    min_timestep=min_timestep,
+                    max_timestep=max_timestep,
+                )
                 loss.backward()
                 grad_norm = torch.nn.utils.clip_grad_norm_(trained_params, max_norm=1.0)
                 optimizer.step()
@@ -181,7 +176,10 @@ def main():
     p.add_argument("--wandb-name", default=None)
     p.add_argument("--wandb-id", default=None)
     p.add_argument("--cond-drop-prob", type=float, default=0.1)
-    p.add_argument("--sample-cfg-scale", type=float, default=2.0)
+    p.add_argument("--sample-cfg-scale", type=float, default=1.0)
+    p.add_argument("--min-timestep", type=int, default=0)
+    p.add_argument("--max-timestep", type=int, default=None)
+    p.add_argument("--unet-train-mode", choices=["full", "cond"], default="full")
     args = p.parse_args()
 
     wandb.init(
@@ -196,6 +194,10 @@ def main():
 
     print("Loading model...")
     model = PoseConditionedSD()
+    model.configure_trainable(args.unet_train_mode)
+    n_trainable = sum(p.numel() for p in model.unet.parameters() if p.requires_grad) + \
+        sum(p.numel() for p in model.ref_encoder.parameters())
+    print(f"UNet train mode: {args.unet_train_mode} (trainable params incl. ref_encoder: {n_trainable:,})")
 
     print("Loading dataset...")
     dataset = MegaScenesDataset(
@@ -217,6 +219,8 @@ def main():
         args.prompt,
         cond_drop_prob=args.cond_drop_prob,
         sample_cfg_scale=args.sample_cfg_scale,
+        min_timestep=args.min_timestep,
+        max_timestep=args.max_timestep,
     )
 
     wandb.finish()

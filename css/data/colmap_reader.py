@@ -43,6 +43,15 @@ def _quat_to_rotation(qw, qx, qy, qz):
     ])
 
 
+def _read_c_string(f) -> str:
+    chars = bytearray()
+    while True:
+        ch = f.read(1)
+        if ch == b"\x00":
+            return chars.decode("utf-8")
+        chars.extend(ch)
+
+
 def read_cameras_bin(path: str | Path) -> dict[int, Camera]:
     cameras = {}
     with open(path, "rb") as f:
@@ -68,15 +77,8 @@ def read_images_bin(path: str | Path) -> dict[int, ImageData]:
             tx, ty, tz = struct.unpack("<3d", f.read(24))
             camera_id = struct.unpack("<I", f.read(4))[0]
 
-            name = b""
-            while True:
-                ch = f.read(1)
-                if ch == b"\x00":
-                    break
-                name += ch
-            name = name.decode("utf-8")
+            name = _read_c_string(f)
 
-            # Skip 2D points
             num_pts = struct.unpack("<Q", f.read(8))[0]
             f.read(num_pts * 24)
 
