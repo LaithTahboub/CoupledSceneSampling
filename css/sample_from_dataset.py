@@ -25,7 +25,7 @@ def main():
     parser.add_argument("--triplet-idx", type=int, default=0, help="Which dataset triplet to use")
     parser.add_argument("--prompt", default="", help="Text prompt")
     parser.add_argument("--num-steps", type=int, default=50, help="Sampling steps")
-    parser.add_argument("--cfg-scale", type=float, default=7.5, help="CFG scale")
+    parser.add_argument("--cfg-scale", type=float, default=2.0, help="CFG scale")
     parser.add_argument("--output", default="sample_ds.png", help="Output path")
     args = parser.parse_args()
 

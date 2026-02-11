@@ -179,17 +179,18 @@ class CoupledDiffusionSampler:
             ref1_latent = sd_ref_latents[input_indices.index(ref1_frame_idx)].unsqueeze(0)
             ref2_latent = sd_ref_latents[input_indices.index(ref2_frame_idx)].unsqueeze(0)
 
-            # Compute Pluckers relative to frame j (the target)
+            # Match training convention: express all Pluckers in ref1 frame.
+            src_w2c = w2c[ref1_frame_idx]
             plucker_ref1 = get_plucker_coordinates(
-                extrinsics_src=w2c[j], extrinsics=w2c[ref1_frame_idx].unsqueeze(0),
+                extrinsics_src=src_w2c, extrinsics=w2c[ref1_frame_idx].unsqueeze(0),
                 intrinsics=all_Ks[ref1_frame_idx].unsqueeze(0), target_size=[h, w]
             )
             plucker_ref2 = get_plucker_coordinates(
-                extrinsics_src=w2c[j], extrinsics=w2c[ref2_frame_idx].unsqueeze(0),
+                extrinsics_src=src_w2c, extrinsics=w2c[ref2_frame_idx].unsqueeze(0),
                 intrinsics=all_Ks[ref2_frame_idx].unsqueeze(0), target_size=[h, w]
             )
             plucker_target = get_plucker_coordinates(
-                extrinsics_src=w2c[j], extrinsics=w2c[j].unsqueeze(0),
+                extrinsics_src=src_w2c, extrinsics=w2c[j].unsqueeze(0),
                 intrinsics=all_Ks[j].unsqueeze(0), target_size=[h, w]
             )
 

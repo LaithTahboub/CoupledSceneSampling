@@ -48,7 +48,7 @@ def _to_uint8(t: torch.Tensor) -> np.ndarray:
     return ((t.clamp(-1, 1) + 1) / 2 * 255).byte().permute(1, 2, 0).cpu().numpy()
 
 
-def _log_sample(model, dataset, prompt, step):
+def _log_sample(model, dataset, prompt, step, cfg_scale):
     """Generate and log a comparison image: ref1 | ref2 | GT | generated."""
     try:
         sample = dataset[0]
@@ -59,7 +59,7 @@ def _log_sample(model, dataset, prompt, step):
             sample["plucker_ref1"].unsqueeze(0),
             sample["plucker_ref2"].unsqueeze(0),
             sample["plucker_target"].unsqueeze(0),
-            prompt=prompt, num_steps=20,
+            prompt=prompt, num_steps=20, cfg_scale=cfg_scale,
         )
         grid = np.concatenate([
             _to_uint8(sample["ref1_img"]),
@@ -83,7 +83,18 @@ def _save_checkpoint(model, ckpt_path):
     print(f"Saved {ckpt_path}")
 
 
-def train(model, dataset, output_dir, num_epochs=100, batch_size=4, lr=1e-5, save_every=5, prompt=""):
+def train(
+    model,
+    dataset,
+    output_dir,
+    num_epochs=100,
+    batch_size=4,
+    lr=1e-5,
+    save_every=5,
+    prompt="",
+    cond_drop_prob=0.1,
+    sample_cfg_scale=2.0,
+):
     global _save_requested
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -117,7 +128,7 @@ def train(model, dataset, output_dir, num_epochs=100, batch_size=4, lr=1e-5, sav
             pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
             for batch in pbar:
                 optimizer.zero_grad()
-                loss = model.training_step(batch, prompt)
+                loss = model.training_step(batch, prompt, cond_drop_prob=cond_drop_prob)
                 loss.backward()
                 grad_norm = torch.nn.utils.clip_grad_norm_(trained_params, max_norm=1.0)
                 optimizer.step()
@@ -142,7 +153,7 @@ def train(model, dataset, output_dir, num_epochs=100, batch_size=4, lr=1e-5, sav
             if (epoch + 1) % save_every == 0:
                 _save_checkpoint(model, output_path / f"unet_epoch_{epoch+1}.pt")
 
-            _log_sample(model, dataset, prompt, global_step)
+            _log_sample(model, dataset, prompt, global_step, cfg_scale=sample_cfg_scale)
 
     except KeyboardInterrupt:
         print("\n[Interrupted] Saving emergency checkpoint...")
@@ -169,6 +180,8 @@ def main():
     p.add_argument("--wandb-project", default="css-pose-sd")
     p.add_argument("--wandb-name", default=None)
     p.add_argument("--wandb-id", default=None)
+    p.add_argument("--cond-drop-prob", type=float, default=0.1)
+    p.add_argument("--sample-cfg-scale", type=float, default=2.0)
     args = p.parse_args()
 
     wandb.init(
@@ -193,7 +206,18 @@ def main():
     print(f"Found {len(dataset)} training triplets")
 
     print("Starting training...")
-    train(model, dataset, args.output, args.epochs, args.batch_size, args.lr, args.save_every, args.prompt)
+    train(
+        model,
+        dataset,
+        args.output,
+        args.epochs,
+        args.batch_size,
+        args.lr,
+        args.save_every,
+        args.prompt,
+        cond_drop_prob=args.cond_drop_prob,
+        sample_cfg_scale=args.sample_cfg_scale,
+    )
 
     wandb.finish()
 

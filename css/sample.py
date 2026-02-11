@@ -93,7 +93,7 @@ def main():
     parser.add_argument("--target-idx", type=int, default=None, help="Target image index (or random if not set)")
     parser.add_argument("--prompt", default="a photo of the Mysore palace", help="Text prompt")
     parser.add_argument("--num-steps", type=int, default=50, help="Sampling steps")
-    parser.add_argument("--cfg-scale", type=float, default=7.5, help="CFG scale")
+    parser.add_argument("--cfg-scale", type=float, default=2.0, help="CFG scale")
     parser.add_argument("--output", default="sample.png", help="Output path")
     parser.add_argument("--show-refs", action="store_true", help="Also save reference images")
     args = parser.parse_args()
@@ -151,9 +151,10 @@ def main():
     K_ref2 = dataset._build_K(cam_ref2)
     K_tgt = dataset._build_K(cam_tgt)
 
-    plucker_ref1 = dataset._compute_plucker(target_img.c2w, ref1_img.c2w, K_ref1).unsqueeze(0)
-    plucker_ref2 = dataset._compute_plucker(target_img.c2w, ref2_img.c2w, K_ref2).unsqueeze(0)
-    plucker_target = dataset._compute_plucker(target_img.c2w, target_img.c2w, K_tgt).unsqueeze(0)
+    # Match training convention: all Pluckers are expressed in ref1 frame.
+    plucker_ref1 = dataset._compute_plucker(ref1_img.c2w, ref1_img.c2w, K_ref1).unsqueeze(0)
+    plucker_ref2 = dataset._compute_plucker(ref1_img.c2w, ref2_img.c2w, K_ref2).unsqueeze(0)
+    plucker_target = dataset._compute_plucker(ref1_img.c2w, target_img.c2w, K_tgt).unsqueeze(0)
 
     # Generate
     print(f"\nGenerating with {args.num_steps} steps, CFG={args.cfg_scale}...")

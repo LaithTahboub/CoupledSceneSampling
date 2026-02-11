@@ -195,7 +195,7 @@ class PoseConditionedSD(nn.Module):
 
     @torch.inference_mode()
     def sample(self, ref1_img, ref2_img, plucker_ref1, plucker_ref2, plucker_target, 
-               prompt="", num_steps=50, cfg_scale=7.5):
+               prompt="", num_steps=50, cfg_scale=2.0):
         
         B = ref1_img.shape[0] # Handle batch size > 1
         

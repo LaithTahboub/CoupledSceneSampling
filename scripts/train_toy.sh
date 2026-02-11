@@ -23,6 +23,8 @@ python -m css.train \
     --max-pair-dist 2.0 \
     --max-triplets 50 \
     --save-every 50 \
+    --cond-drop-prob 0.0 \
+    --sample-cfg-scale 1.5 \
     --H 512 \
     --W 512 \
     --wandb-project CoupledSceneSampling \

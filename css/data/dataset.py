@@ -62,6 +62,8 @@ class MegaScenesDataset(Dataset):
         self.images = torch.stack(image_list)
 
         # Precompute Pluckers (deduplicated)
+        # All Pluckers in a triplet are expressed in ref1's camera frame.
+        # This makes target pose conditioning non-degenerate.
         plucker_cache = {}
         plucker_list = []
         ref1_img_idx, ref2_img_idx, tgt_img_idx = [], [], []
@@ -72,15 +74,16 @@ class MegaScenesDataset(Dataset):
             ref2_img_idx.append(image_map[str(images_dir / ref2.name)])
             tgt_img_idx.append(image_map[str(images_dir / tgt.name)])
 
+            src = ref1
             for img, cam in [(ref1, cam1), (ref2, cam2), (tgt, cam_tgt)]:
-                pkey = (tgt.id, img.id, img.camera_id)
+                pkey = (src.id, img.id, img.camera_id)
                 if pkey not in plucker_cache:
                     plucker_cache[pkey] = len(plucker_list)
-                    plucker_list.append(self._compute_plucker(tgt.c2w, img.c2w, self._build_K(cam)))
+                    plucker_list.append(self._compute_plucker(src.c2w, img.c2w, self._build_K(cam)))
 
-            ref1_plk_idx.append(plucker_cache[(tgt.id, ref1.id, ref1.camera_id)])
-            ref2_plk_idx.append(plucker_cache[(tgt.id, ref2.id, ref2.camera_id)])
-            tgt_plk_idx.append(plucker_cache[(tgt.id, tgt.id, tgt.camera_id)])
+            ref1_plk_idx.append(plucker_cache[(src.id, ref1.id, ref1.camera_id)])
+            ref2_plk_idx.append(plucker_cache[(src.id, ref2.id, ref2.camera_id)])
+            tgt_plk_idx.append(plucker_cache[(src.id, tgt.id, tgt.camera_id)])
 
         self.pluckers = torch.stack(plucker_list)
         self.ref1_img_idx = torch.tensor(ref1_img_idx, dtype=torch.long)
@@ -198,7 +201,7 @@ class MegaScenesDataset(Dataset):
         return K
 
     def _compute_plucker(self, c2w_src: np.ndarray, c2w_tgt: np.ndarray, K_tgt: np.ndarray) -> torch.Tensor:
-        """Plucker coordinates for tgt view relative to src."""
+        """Plucker coordinates for tgt-view rays represented in src camera frame."""
         c2w_s = to_hom_pose(torch.from_numpy(c2w_src).float().unsqueeze(0))
         c2w_t = to_hom_pose(torch.from_numpy(c2w_tgt).float().unsqueeze(0))
         w2c_s = torch.linalg.inv(c2w_s)
