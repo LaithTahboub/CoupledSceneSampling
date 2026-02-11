@@ -10,4 +10,6 @@ gradio_tmp
 .claude
 24*
 old
-pose*
+pose_sd*/
+logs
+stable-virtual-camera
