@@ -31,4 +31,4 @@ python -m css.train \
     --W 512 \
     --wandb-project CoupledSceneSampling \
     --wandb-name toy-overfit-v4 \
-    --prompt ""
+    --prompt "a photo of the Mysore palace"
