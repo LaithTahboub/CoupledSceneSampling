@@ -192,6 +192,9 @@ class PoseConditionedSD(nn.Module):
         if target is not None:
             target_latent = self.encode_image(target.to(self.device))
             noise = torch.randn_like(target_latent)
+            start_t = int(start_t)
+            max_t = int(self.scheduler.config.num_train_timesteps) - 1
+            start_t = max(0, min(max_t, start_t))
             timestep = torch.tensor([start_t], device=self.device, dtype=torch.long)
             latent = self.scheduler.add_noise(target_latent, noise, timestep)
             timesteps = self.scheduler.timesteps[self.scheduler.timesteps <= start_t]

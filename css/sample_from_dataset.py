@@ -26,7 +26,7 @@ def main():
     parser.add_argument("--max-triplets", type=int, default=10000)
     parser.add_argument("--output", default="sample_ds.png", help="Output path")
     parser.add_argument("--show-refs", action="store_true", help="Also save reference images")
-    parser.add_argument("--start-t", type=int, default=500, help="t value to start with when starting from a noisy targget")
+    parser.add_argument("--start-t", type=int, default=500, help="t value for noisy-target start")
     parser.add_argument("--noisy-target-start", action="store_true")
     args = parser.parse_args()
 
