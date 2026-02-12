@@ -76,7 +76,9 @@ def main():
     parser.add_argument("--min-dir-sim", type=float, default=0.3, help="Min view direction similarity")
     parser.add_argument("--min-ref-spacing", type=float, default=0.3, help="Min distance between refs")
     parser.add_argument("--output", default="sample.png", help="Output path")
+    parser.add_argument("--noisy-target-start", action="store_true")
     parser.add_argument("--show-refs", action="store_true", help="Also save reference images")
+    parser.add_argument("--start-t", default=500, help="t value to start with when starting from a noisy targget")
     args = parser.parse_args()
 
     scene_dir = Path(args.scene)
@@ -130,10 +132,12 @@ def main():
 
     print(f"\nGenerating with {args.num_steps} steps, CFG={args.cfg_scale}...")
     with torch.inference_mode():
+        
         generated = model.sample(
             ref1_tensor, ref2_tensor,
             plucker_ref1, plucker_ref2, plucker_target,
-            prompt=args.prompt, num_steps=args.num_steps, cfg_scale=args.cfg_scale,
+            prompt=args.prompt, num_steps=args.num_steps, cfg_scale=args.cfg_scale, 
+            target=(target_tensor if args.noisy_target_start else None), start_t=args.start_t
         )
 
     def to_pil(t):

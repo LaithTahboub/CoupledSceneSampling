@@ -164,7 +164,7 @@ class PoseConditionedSD(nn.Module):
 
     @torch.inference_mode()
     def sample(self, ref1_img, ref2_img, plucker_ref1, plucker_ref2, plucker_target, 
-               prompt="", num_steps=50, cfg_scale=1.0):
+               prompt="", num_steps=50, cfg_scale=1.0, target=None, start_t=1000):
         
         B = ref1_img.shape[0]
         
@@ -187,10 +187,19 @@ class PoseConditionedSD(nn.Module):
         null_ref_batch = self.null_ref_tokens.expand(B, -1, -1)
         uncond_context = torch.cat([null_text_batch, null_ref_batch], dim=1)
 
-        latent = torch.randn_like(ref1_latent)
         self.scheduler.set_timesteps(num_steps)
-
-        for t in tqdm(self.scheduler.timesteps, desc="Sampling"):
+        
+        if target is not None:
+            target_latent = self.encode_image(target.to(self.device))
+            noise = torch.randn_like(target_latent)
+            timestep = torch.tensor([start_t], device=self.device, dtype=torch.long)
+            latent = self.scheduler.add_noise(target_latent, noise, timestep)
+            timesteps = self.scheduler.timesteps[self.scheduler.timesteps <= start_t]
+        else:
+            latent = torch.randn_like(ref1_latent)
+            timesteps = self.scheduler.timesteps
+    
+        for t in tqdm(timesteps, desc="Sampling"):
             unet_input = torch.cat([latent, plucker_target], dim=1)
             eps_uncond = self.unet(unet_input, t, encoder_hidden_states=uncond_context).sample
             eps_cond = self.unet(unet_input, t, encoder_hidden_states=cond_context).sample

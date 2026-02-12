@@ -25,6 +25,9 @@ def main():
     parser.add_argument("--max-pair-dist", type=float, default=2.0)
     parser.add_argument("--max-triplets", type=int, default=10000)
     parser.add_argument("--output", default="sample_ds.png", help="Output path")
+    parser.add_argument("--show-refs", action="store_true", help="Also save reference images")
+    parser.add_argument("--start-t", type=int, default=500, help="t value to start with when starting from a noisy targget")
+    parser.add_argument("--noisy-target-start", action="store_true")
     args = parser.parse_args()
 
     print("Loading model...")
@@ -60,7 +63,9 @@ def main():
             prompt=args.prompt,
             num_steps=args.num_steps,
             cfg_scale=args.cfg_scale,
-        )
+            target=(sample["target_img"].unsqueeze(0) if args.noisy_target_start else None), 
+            start_t=args.start_t
+        )   
 
     grid = np.concatenate([
         _to_uint8(sample["ref1_img"]),
