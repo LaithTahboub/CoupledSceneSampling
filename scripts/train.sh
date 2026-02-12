@@ -22,7 +22,7 @@ python -m css.train \
     --lr 1e-5 \
     --max-pair-dist 2.0 \
     --max-triplets 1000000 \
-    --save-every 10 \
+    --save-every 20 \
     --prompt "a photo of the Mysore palace" \
     --unet-train-mode cond \
     --cond-drop-prob 0.1 \
