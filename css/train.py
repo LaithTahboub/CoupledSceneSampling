@@ -57,7 +57,7 @@ def _log_sample(model, dataset, prompt, step, cfg_scale):
             sample["plucker_ref1"].unsqueeze(0),
             sample["plucker_ref2"].unsqueeze(0),
             sample["plucker_target"].unsqueeze(0),
-            prompt=prompt, num_steps=20, cfg_scale=cfg_scale,
+            prompt=prompt, num_steps=50, cfg_scale=cfg_scale,
         )
         grid = np.concatenate([
             _to_uint8(sample["ref1_img"]),

@@ -30,5 +30,5 @@ python -m css.train \
     --H 512 \
     --W 512 \
     --wandb-project CoupledSceneSampling \
-    --wandb-name toy-overfit-v3 \
+    --wandb-name toy-overfit-v4 \
     --prompt ""
