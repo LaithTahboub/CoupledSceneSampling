@@ -8,7 +8,7 @@ from PIL import Image
 
 from css.data.colmap_reader import read_scene
 from css.models.pose_conditioned_sd import PoseConditionedSD, load_pose_sd_checkpoint
-from css.data.dataset import MegaScenesDataset
+from css.data.dataset import MegaScenesDataset, load_image_name_set
 
 
 def compute_viewing_direction(c2w: np.ndarray) -> np.ndarray:
@@ -75,6 +75,9 @@ def main():
     parser.add_argument("--max-pair-dist", type=float, default=2.0, help="Max ref-target camera distance")
     parser.add_argument("--min-dir-sim", type=float, default=0.3, help="Min view direction similarity")
     parser.add_argument("--min-ref-spacing", type=float, default=0.3, help="Min distance between refs")
+    parser.add_argument("--exclude-image-list", type=str, default=None)
+    parser.add_argument("--target-include-image-list", type=str, default=None)
+    parser.add_argument("--reference-include-image-list", type=str, default=None)
     parser.add_argument("--output", default="sample.png", help="Output path")
     parser.add_argument("--noisy-target-start", action="store_true")
     parser.add_argument("--show-refs", action="store_true", help="Also save reference images")
@@ -93,20 +96,44 @@ def main():
     cameras, images = read_scene(scene_dir)
     images_dir = scene_dir / "images"
 
+    exclude_image_names = load_image_name_set(args.exclude_image_list)
+    target_include_image_names = load_image_name_set(args.target_include_image_list)
+    reference_include_image_names = load_image_name_set(args.reference_include_image_list)
+
     valid_images = [img for img in images.values() if (images_dir / img.name).exists()]
+    valid_images.sort(key=lambda x: x.id)
+    if exclude_image_names is not None:
+        valid_images = [img for img in valid_images if img.name not in exclude_image_names]
     print(f"Found {len(valid_images)} valid images")
 
+    target_images = valid_images
+    if target_include_image_names is not None:
+        target_images = [img for img in target_images if img.name in target_include_image_names]
+        print(f"Target pool after filter: {len(target_images)}")
+
+    reference_images = valid_images
+    if reference_include_image_names is not None:
+        reference_images = [img for img in reference_images if img.name in reference_include_image_names]
+        print(f"Reference pool after filter: {len(reference_images)}")
+
+    if len(target_images) == 0:
+        raise ValueError("No target images available after filtering")
+    if len(reference_images) < 2:
+        raise ValueError("Need at least 2 reference images after filtering")
+
     if args.target_idx is not None:
-        target_img = valid_images[args.target_idx]
+        if args.target_idx < 0 or args.target_idx >= len(target_images):
+            raise ValueError(f"target_idx {args.target_idx} out of range [0, {len(target_images)-1}]")
+        target_img = target_images[args.target_idx]
     else:
-        idx = np.random.randint(10, len(valid_images) - 10)
-        target_img = valid_images[idx]
+        idx = np.random.randint(0, len(target_images))
+        target_img = target_images[idx]
 
     print(f"\nTarget: {target_img.name} (image {target_img.id})")
 
     ref1_img, ref2_img = find_best_references(
         target_img,
-        valid_images,
+        reference_images,
         max_dist=args.max_pair_dist,
         min_dir_sim=args.min_dir_sim,
         min_ref_spacing=args.min_ref_spacing,

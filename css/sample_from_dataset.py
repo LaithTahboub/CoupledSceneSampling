@@ -6,7 +6,7 @@ import torch
 from pathlib import Path
 from PIL import Image
 
-from css.data.dataset import MegaScenesDataset
+from css.data.dataset import MegaScenesDataset, load_image_name_set
 from css.models.pose_conditioned_sd import PoseConditionedSD, load_pose_sd_checkpoint
 
 
@@ -24,6 +24,9 @@ def main():
     parser.add_argument("--cfg-scale", type=float, default=1.0, help="CFG scale")
     parser.add_argument("--max-pair-dist", type=float, default=2.0)
     parser.add_argument("--max-triplets", type=int, default=10000)
+    parser.add_argument("--exclude-image-list", type=str, default=None)
+    parser.add_argument("--target-include-image-list", type=str, default=None)
+    parser.add_argument("--reference-include-image-list", type=str, default=None)
     parser.add_argument("--output", default="sample_ds.png", help="Output path")
     parser.add_argument("--show-refs", action="store_true", help="Also save reference images")
     parser.add_argument("--start-t", type=int, default=500, help="t value for noisy-target start")
@@ -37,13 +40,22 @@ def main():
     print(f"Loaded checkpoint: {args.checkpoint}")
 
     print(f"Loading dataset from {args.scene}...")
+    exclude_image_names = load_image_name_set(args.exclude_image_list)
+    target_include_image_names = load_image_name_set(args.target_include_image_list)
+    reference_include_image_names = load_image_name_set(args.reference_include_image_list)
+
     dataset = MegaScenesDataset(
         [args.scene],
         H=512, W=512,
         max_pair_distance=args.max_pair_dist,
         max_triplets_per_scene=args.max_triplets,
+        exclude_image_names=exclude_image_names,
+        target_include_image_names=target_include_image_names,
+        reference_include_image_names=reference_include_image_names,
     )
     print(f"Dataset has {len(dataset)} triplets")
+    if len(dataset) == 0:
+        raise ValueError("Dataset has 0 triplets. Check split files and triplet constraints.")
 
     if args.triplet_idx >= len(dataset):
         print(f"Error: triplet_idx {args.triplet_idx} out of range (max: {len(dataset)-1})")

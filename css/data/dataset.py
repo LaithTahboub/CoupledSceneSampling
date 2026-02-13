@@ -11,6 +11,19 @@ from css.data.colmap_reader import read_scene, Camera, ImageData
 from seva.geometry import get_plucker_coordinates, to_hom_pose
 
 
+def load_image_name_set(path: str | None) -> set[str] | None:
+    if path is None:
+        return None
+    names: set[str] = set()
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            name = line.strip()
+            if not name or name.startswith("#"):
+                continue
+            names.add(name)
+    return names
+
+
 class MegaScenesDataset(Dataset):
 
     def __init__(
@@ -22,16 +35,22 @@ class MegaScenesDataset(Dataset):
         max_triplets_per_scene: int = 10000,
         min_dir_similarity: float = 0.3,
         min_ref_spacing: float = 0.3,
+        exclude_image_names: set[str] | None = None,
+        target_include_image_names: set[str] | None = None,
+        reference_include_image_names: set[str] | None = None,
     ):
         self.H, self.W = H, W
         self.latent_h, self.latent_w = H // 8, W // 8
+        self.exclude_image_names = exclude_image_names
+        self.target_include_image_names = target_include_image_names
+        self.reference_include_image_names = reference_include_image_names
 
         raw_triplets = []
         for scene_dir in scene_dirs:
             raw_triplets.extend(
                 self._build_triplets(
                     Path(scene_dir), max_pair_distance, max_triplets_per_scene,
-                    min_dir_similarity, min_ref_spacing
+                    min_dir_similarity, min_ref_spacing,
                 )
             )
 
@@ -89,12 +108,29 @@ class MegaScenesDataset(Dataset):
         images_dir = scene_dir / "images"
 
         valid = [img for img in images.values() if (images_dir / img.name).exists()]
-        if len(valid) < 3:
+        valid.sort(key=lambda x: x.id)
+        if self.exclude_image_names is not None:
+            valid = [img for img in valid if img.name not in self.exclude_image_names]
+
+        targets = valid
+        if self.target_include_image_names is not None:
+            targets = [img for img in targets if img.name in self.target_include_image_names]
+
+        refs_pool = valid
+        if self.reference_include_image_names is not None:
+            refs_pool = [img for img in refs_pool if img.name in self.reference_include_image_names]
+
+        print(
+            f"{scene_dir.name}: usable images={len(valid)}, "
+            f"target_pool={len(targets)}, ref_pool={len(refs_pool)}"
+        )
+
+        if len(targets) == 0 or len(refs_pool) < 2:
             return []
 
         triplets = []
 
-        for target in valid:
+        for target in targets:
             if len(triplets) >= max_triplets:
                 break
 
@@ -102,7 +138,7 @@ class MegaScenesDataset(Dataset):
             target_dir = self._get_viewing_direction(target.c2w)
 
             candidates = []
-            for ref in valid:
+            for ref in refs_pool:
                 if ref.id == target.id:
                     continue
 

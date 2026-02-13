@@ -59,7 +59,7 @@ class PoseConditionedSD(nn.Module):
         with torch.no_grad():
             new_conv_in.weight[:, :4] = old_conv_in.weight
             new_conv_in.weight[:, 4:] = 0
-            new_conv_in.bias = old_conv_in.bias
+            new_conv_in.bias.copy_(old_conv_in.bias)
             
         self.unet.conv_in = new_conv_in.to(device)
         self.ref_encoder = ReferenceEncoder().to(device)
@@ -86,7 +86,6 @@ class PoseConditionedSD(nn.Module):
         with torch.no_grad():
             tokens = self.tokenizer([""], padding="max_length", max_length=77, return_tensors="pt")
             self.null_text_emb = self.text_encoder(tokens.input_ids.to(self.device))[0]
-            self.null_ref_tokens = torch.zeros(1, 512, 1024, device=self.device)
 
     @torch.no_grad()
     def get_text_embedding(self, prompt: str) -> torch.Tensor:
@@ -148,12 +147,20 @@ class PoseConditionedSD(nn.Module):
 
         text_emb = self.get_text_embedding(prompt).expand(B, -1, -1)
 
-        if self.training and torch.rand(1).item() < cond_drop_prob:
-            text_emb = self.null_text_emb.expand(B, -1, -1)
-            ref1_latent = torch.zeros_like(ref1_latent)
-            ref2_latent = torch.zeros_like(ref2_latent)
-            plucker_ref1 = torch.zeros_like(plucker_ref1)
-            plucker_ref2 = torch.zeros_like(plucker_ref2)
+        if self.training and cond_drop_prob > 0:
+            drop_mask = torch.rand(B, device=self.device) < cond_drop_prob
+            if drop_mask.any():
+                num_drop = int(drop_mask.sum().item())
+                text_emb = text_emb.clone()
+                text_emb[drop_mask] = self.null_text_emb.expand(num_drop, -1, -1)
+                ref1_latent = ref1_latent.clone()
+                ref2_latent = ref2_latent.clone()
+                plucker_ref1 = plucker_ref1.clone()
+                plucker_ref2 = plucker_ref2.clone()
+                ref1_latent[drop_mask] = 0
+                ref2_latent[drop_mask] = 0
+                plucker_ref1[drop_mask] = 0
+                plucker_ref2[drop_mask] = 0
 
         loss = F.mse_loss(
             self.forward(noisy_target, timesteps, ref1_latent, ref2_latent,
@@ -184,7 +191,7 @@ class PoseConditionedSD(nn.Module):
         cond_context = torch.cat([text_cond, ref_tokens], dim=1)
 
         null_text_batch = self.null_text_emb.expand(B, -1, -1)
-        null_ref_batch = self.null_ref_tokens.expand(B, -1, -1)
+        null_ref_batch = torch.zeros_like(ref_tokens)
         uncond_context = torch.cat([null_text_batch, null_ref_batch], dim=1)
 
         self.scheduler.set_timesteps(num_steps)

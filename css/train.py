@@ -11,7 +11,7 @@ import wandb
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from css.data.dataset import MegaScenesDataset
+from css.data.dataset import MegaScenesDataset, load_image_name_set
 from css.models.pose_conditioned_sd import (
     PoseConditionedSD,
     load_pose_sd_checkpoint,
@@ -96,6 +96,8 @@ def train(
     output_path.mkdir(parents=True, exist_ok=True)
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    if len(dataloader) == 0:
+        raise ValueError("No training batches available. Check scene/split filters and triplet constraints.")
     trained_params = [p for p in model.unet.parameters() if p.requires_grad] + list(model.ref_encoder.parameters())
     optimizer = torch.optim.AdamW(trained_params, lr=lr)
 
@@ -180,6 +182,9 @@ def main():
     p.add_argument("--min-timestep", type=int, default=0)
     p.add_argument("--max-timestep", type=int, default=None)
     p.add_argument("--unet-train-mode", choices=["full", "cond"], default="full")
+    p.add_argument("--exclude-image-list", type=str, default=None)
+    p.add_argument("--target-include-image-list", type=str, default=None)
+    p.add_argument("--reference-include-image-list", type=str, default=None)
     args = p.parse_args()
 
     wandb.init(
@@ -200,12 +205,28 @@ def main():
     print(f"UNet train mode: {args.unet_train_mode} (trainable params incl. ref_encoder: {n_trainable:,})")
 
     print("Loading dataset...")
+    exclude_image_names = load_image_name_set(args.exclude_image_list)
+    target_include_image_names = load_image_name_set(args.target_include_image_list)
+    reference_include_image_names = load_image_name_set(args.reference_include_image_list)
+
+    if exclude_image_names is not None:
+        print(f"Excluding {len(exclude_image_names)} images from all roles")
+    if target_include_image_names is not None:
+        print(f"Restricting targets to {len(target_include_image_names)} images")
+    if reference_include_image_names is not None:
+        print(f"Restricting references to {len(reference_include_image_names)} images")
+
     dataset = MegaScenesDataset(
         args.scenes, H=args.H, W=args.W,
         max_pair_distance=args.max_pair_dist,
         max_triplets_per_scene=args.max_triplets,
+        exclude_image_names=exclude_image_names,
+        target_include_image_names=target_include_image_names,
+        reference_include_image_names=reference_include_image_names,
     )
     print(f"Found {len(dataset)} training triplets")
+    if len(dataset) == 0:
+        raise ValueError("Dataset has 0 triplets. Relax triplet constraints or adjust split files.")
 
     print("Starting training...")
     train(
