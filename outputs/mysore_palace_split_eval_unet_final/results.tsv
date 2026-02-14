@@ -1,0 +1,2 @@
+target_idx	image_id	image_name	status	output	error
+32	606	commons/Mysore_Palace_illuminated/0/pictures/Mysore_Palace_(8113482036).jpg	ok	/fs/nexus-scratch/ltahboub/CoupledSceneSampling/outputs/mysore_palace_split_eval_unet_final/test_idx_00032.png	

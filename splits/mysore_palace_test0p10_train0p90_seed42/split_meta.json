@@ -1,0 +1,11 @@
+{
+  "scene": "MegaScenes/Mysore_Palace",
+  "seed": 42,
+  "test_ratio": 0.1,
+  "train_ratio": 0.9,
+  "total_valid_images": 451,
+  "train_images": 365,
+  "test_images": 45,
+  "train_images_file": "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/splits/mysore_palace_test0p10_train0p90_seed42/train_images.txt",
+  "test_images_file": "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/splits/mysore_palace_test0p10_train0p90_seed42/test_images.txt"
+}
