@@ -108,6 +108,9 @@ def train(
         load_pose_sd_checkpoint(model, ckpt_path, model.device)
         start_epoch = resume_epoch
         global_step = resume_step
+        if start_epoch >= num_epochs:
+            print(f"Latest checkpoint is epoch {start_epoch}; requested --epochs={num_epochs}. Nothing to train.")
+            return
     else:
         print("Starting from scratch")
 

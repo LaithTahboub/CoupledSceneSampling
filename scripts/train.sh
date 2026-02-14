@@ -10,25 +10,43 @@
 #SBATCH --output=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/train.out
 #SBATCH --error=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/train.err
 
-source /fs/nexus-scratch/ltahboub/CoupledSceneSampling/.venv/bin/activate
+set -euo pipefail
 
-cd /fs/nexus-scratch/ltahboub/CoupledSceneSampling
+ROOT=/fs/nexus-scratch/ltahboub/CoupledSceneSampling
+SCENE=MegaScenes/Mysore_Palace
+EPOCHS=${EPOCHS:-100}
+OUTPUT=${OUTPUT:-checkpoints/pose_sd_mysore_full_v1}
+RUN_NAME=${RUN_NAME:-mysore-palace-full-v1}
+PROMPT=${PROMPT:-"a photo of the Mysore palace"}
+MAX_PAIR_DIST=${MAX_PAIR_DIST:-2.0}
+MAX_TRIPLETS=${MAX_TRIPLETS:-1000000}
+BATCH_SIZE=${BATCH_SIZE:-4}
+LR=${LR:-1e-5}
+SAVE_EVERY=${SAVE_EVERY:-20}
+COND_DROP_PROB=${COND_DROP_PROB:-0.1}
+SAMPLE_CFG_SCALE=${SAMPLE_CFG_SCALE:-1.0}
+H=${H:-512}
+W=${W:-512}
+
+source $ROOT/.venv/bin/activate
+
+cd $ROOT
 
 python -m css.train \
-    --scenes MegaScenes/Mysore_Palace \
-    --output checkpoints/pose_sd_mysore_full_v1 \
-    --epochs 100 \
-    --batch-size 4 \
-    --lr 1e-5 \
-    --max-pair-dist 2.0 \
-    --max-triplets 1000000 \
-    --save-every 20 \
-    --prompt "a photo of the Mysore palace" \
+    --scenes "$SCENE" \
+    --output "$OUTPUT" \
+    --epochs "$EPOCHS" \
+    --batch-size "$BATCH_SIZE" \
+    --lr "$LR" \
+    --max-pair-dist "$MAX_PAIR_DIST" \
+    --max-triplets "$MAX_TRIPLETS" \
+    --save-every "$SAVE_EVERY" \
+    --prompt "$PROMPT" \
     --unet-train-mode cond \
-    --cond-drop-prob 0.1 \
-    --sample-cfg-scale 1.0 \
+    --cond-drop-prob "$COND_DROP_PROB" \
+    --sample-cfg-scale "$SAMPLE_CFG_SCALE" \
     --min-timestep 0 \
-    --H 512 \
-    --W 512 \
+    --H "$H" \
+    --W "$W" \
     --wandb-project CoupledSceneSampling \
-    --wandb-name mysore-palace-full-v1
+    --wandb-name "$RUN_NAME"

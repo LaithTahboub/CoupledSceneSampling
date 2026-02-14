@@ -24,6 +24,39 @@ def load_image_name_set(path: str | None) -> set[str] | None:
     return names
 
 
+def load_image_tensor(images_dir: Path, image_name: str, H: int, W: int) -> torch.Tensor:
+    pil = Image.open(images_dir / image_name).convert("RGB").resize((W, H))
+    return torch.from_numpy(np.array(pil, dtype=np.float32) / 255.0).permute(2, 0, 1) * 2 - 1
+
+
+def build_scaled_intrinsics(cam: Camera, H: int, W: int) -> np.ndarray:
+    K = cam.K.copy()
+    K[0] *= W / cam.width
+    K[1] *= H / cam.height
+    return K
+
+
+def compute_plucker_tensor(
+    c2w_src: np.ndarray,
+    c2w_tgt: np.ndarray,
+    K_tgt: np.ndarray,
+    latent_h: int,
+    latent_w: int,
+) -> torch.Tensor:
+    c2w_s = to_hom_pose(torch.from_numpy(c2w_src).float().unsqueeze(0))
+    c2w_t = to_hom_pose(torch.from_numpy(c2w_tgt).float().unsqueeze(0))
+    w2c_s = torch.linalg.inv(c2w_s)
+    w2c_t = torch.linalg.inv(c2w_t)
+    K_t = torch.from_numpy(K_tgt).float().unsqueeze(0)
+    plucker = get_plucker_coordinates(
+        extrinsics_src=w2c_s[0],
+        extrinsics=w2c_t,
+        intrinsics=K_t,
+        target_size=[latent_h, latent_w],
+    )
+    return plucker[0]
+
+
 class MegaScenesDataset(Dataset):
 
     def __init__(
@@ -208,25 +241,12 @@ class MegaScenesDataset(Dataset):
 
     def _load_image(self, images_dir: Path, img: ImageData) -> torch.Tensor:
         """Load image to [-1, 1] tensor."""
-        pil = Image.open(images_dir / img.name).convert("RGB").resize((self.W, self.H))
-        return torch.from_numpy(np.array(pil, dtype=np.float32) / 255.0).permute(2, 0, 1) * 2 - 1
+        return load_image_tensor(images_dir, img.name, self.H, self.W)
 
     def _build_K(self, cam: Camera) -> np.ndarray:
         """Scale intrinsics to target resolution."""
-        K = cam.K.copy()
-        K[0] *= self.W / cam.width
-        K[1] *= self.H / cam.height
-        return K
+        return build_scaled_intrinsics(cam, self.H, self.W)
 
     def _compute_plucker(self, c2w_src: np.ndarray, c2w_tgt: np.ndarray, K_tgt: np.ndarray) -> torch.Tensor:
         """Plucker coordinates for tgt-view rays represented in src camera frame."""
-        c2w_s = to_hom_pose(torch.from_numpy(c2w_src).float().unsqueeze(0))
-        c2w_t = to_hom_pose(torch.from_numpy(c2w_tgt).float().unsqueeze(0))
-        w2c_s = torch.linalg.inv(c2w_s)
-        w2c_t = torch.linalg.inv(c2w_t)
-        K_t = torch.from_numpy(K_tgt).float().unsqueeze(0)
-        plucker = get_plucker_coordinates(
-            extrinsics_src=w2c_s[0], extrinsics=w2c_t,
-            intrinsics=K_t, target_size=[self.latent_h, self.latent_w]
-        )
-        return plucker[0]
+        return compute_plucker_tensor(c2w_src, c2w_tgt, K_tgt, self.latent_h, self.latent_w)
