@@ -21,7 +21,10 @@ def main():
     parser.add_argument("--triplet-idx", type=int, default=0, help="Which dataset triplet to use")
     parser.add_argument("--prompt", default="", help="Text prompt")
     parser.add_argument("--num-steps", type=int, default=50, help="Sampling steps")
-    parser.add_argument("--cfg-scale", type=float, default=1.0, help="CFG scale")
+    parser.add_argument("--cfg-scale", type=float, default=1.0, help="Guidance scale (APG)")
+    parser.add_argument("--apg-eta", type=float, default=0.0, help="APG parallel component weight")
+    parser.add_argument("--apg-momentum", type=float, default=-0.5, help="APG momentum term")
+    parser.add_argument("--apg-norm-threshold", type=float, default=0.0, help="APG norm clipping threshold (0 disables)")
     parser.add_argument("--max-pair-dist", type=float, default=2.0)
     parser.add_argument("--max-triplets", type=int, default=10000)
     parser.add_argument("--exclude-image-list", type=str, default=None)
@@ -64,7 +67,10 @@ def main():
     sample = dataset[args.triplet_idx]
     print(f"\nUsing triplet {args.triplet_idx}")
 
-    print(f"Generating with {args.num_steps} steps, CFG={args.cfg_scale}...")
+    print(
+        f"Generating with {args.num_steps} steps, "
+        f"guidance={args.cfg_scale}, eta={args.apg_eta}, momentum={args.apg_momentum}..."
+    )
     with torch.inference_mode():
         generated = model.sample(
             sample["ref1_img"].unsqueeze(0),
@@ -75,6 +81,9 @@ def main():
             prompt=args.prompt,
             num_steps=args.num_steps,
             cfg_scale=args.cfg_scale,
+            apg_eta=args.apg_eta,
+            apg_momentum=args.apg_momentum,
+            apg_norm_threshold=args.apg_norm_threshold,
             target=(sample["target_img"].unsqueeze(0) if args.noisy_target_start else None), 
             start_t=args.start_t
         )   

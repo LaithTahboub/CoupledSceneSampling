@@ -36,6 +36,9 @@ OUT_DIR=${OUT_DIR:-$ROOT/outputs/mysore_palace_split_eval_$(basename "${CHECKPOI
 PROMPT=${PROMPT:-"a photo of the Mysore palace"}
 NUM_STEPS=${NUM_STEPS:-50}
 CFG_SCALE=${CFG_SCALE:-1.0}
+APG_ETA=${APG_ETA:-0.0}
+APG_MOMENTUM=${APG_MOMENTUM:--0.5}
+APG_NORM_THRESHOLD=${APG_NORM_THRESHOLD:-0.0}
 MAX_PAIR_DIST=${MAX_PAIR_DIST:-2.0}
 MIN_DIR_SIM=${MIN_DIR_SIM:-0.3}
 MIN_REF_SPACING=${MIN_REF_SPACING:-0.3}
@@ -72,6 +75,9 @@ ARGS=(
     --prompt "$PROMPT"
     --num-steps "$NUM_STEPS"
     --cfg-scale "$CFG_SCALE"
+    --apg-eta "$APG_ETA"
+    --apg-momentum "$APG_MOMENTUM"
+    --apg-norm-threshold "$APG_NORM_THRESHOLD"
     --max-pair-dist "$MAX_PAIR_DIST"
     --min-dir-sim "$MIN_DIR_SIM"
     --min-ref-spacing "$MIN_REF_SPACING"

@@ -25,6 +25,9 @@ python -m css.train \
     --save-every 50 \
     --cond-drop-prob 0.0 \
     --sample-cfg-scale 1.0 \
+    --sample-apg-eta 0.0 \
+    --sample-apg-momentum -0.5 \
+    --sample-apg-norm-threshold 0.0 \
     --min-timestep 300 \
     --unet-train-mode cond \
     --H 512 \

@@ -47,7 +47,7 @@ def _to_uint8(t: torch.Tensor) -> np.ndarray:
     return ((t.clamp(-1, 1) + 1) / 2 * 255).byte().permute(1, 2, 0).cpu().numpy()
 
 
-def _log_sample(model, dataset, prompt, step, cfg_scale):
+def _log_sample(model, dataset, prompt, step, cfg_scale, apg_eta, apg_momentum, apg_norm_threshold):
     try:
         sample = dataset[0]
         model.eval()
@@ -58,6 +58,9 @@ def _log_sample(model, dataset, prompt, step, cfg_scale):
             sample["plucker_ref2"].unsqueeze(0),
             sample["plucker_target"].unsqueeze(0),
             prompt=prompt, num_steps=50, cfg_scale=cfg_scale,
+            apg_eta=apg_eta,
+            apg_momentum=apg_momentum,
+            apg_norm_threshold=apg_norm_threshold,
         )
         grid = np.concatenate([
             _to_uint8(sample["ref1_img"]),
@@ -88,6 +91,9 @@ def train(
     prompt="",
     cond_drop_prob=0.1,
     sample_cfg_scale=2.0,
+    sample_apg_eta=0.0,
+    sample_apg_momentum=-0.5,
+    sample_apg_norm_threshold=0.0,
     min_timestep=0,
     max_timestep=None,
 ):
@@ -98,7 +104,12 @@ def train(
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
     if len(dataloader) == 0:
         raise ValueError("No training batches available. Check scene/split filters and triplet constraints.")
-    trained_params = [p for p in model.unet.parameters() if p.requires_grad] + list(model.ref_encoder.parameters())
+    trained_params = (
+        [p for p in model.unet.parameters() if p.requires_grad]
+        + list(model.ref_encoder.parameters())
+        + list(model.target_pose_encoder.parameters())
+        + list(model.epipolar_attn.parameters())
+    )
     optimizer = torch.optim.AdamW(trained_params, lr=lr)
 
     start_epoch, global_step = 0, 0
@@ -153,7 +164,16 @@ def train(
             if (epoch + 1) % save_every == 0:
                 _save_checkpoint(model, output_path / f"unet_epoch_{epoch+1}.pt")
 
-            _log_sample(model, dataset, prompt, global_step, cfg_scale=sample_cfg_scale)
+            _log_sample(
+                model,
+                dataset,
+                prompt,
+                global_step,
+                cfg_scale=sample_cfg_scale,
+                apg_eta=sample_apg_eta,
+                apg_momentum=sample_apg_momentum,
+                apg_norm_threshold=sample_apg_norm_threshold,
+            )
 
     except KeyboardInterrupt:
         print("\n[Interrupted] Saving emergency checkpoint...")
@@ -182,6 +202,9 @@ def main():
     p.add_argument("--wandb-id", default=None)
     p.add_argument("--cond-drop-prob", type=float, default=0.1)
     p.add_argument("--sample-cfg-scale", type=float, default=1.0)
+    p.add_argument("--sample-apg-eta", type=float, default=0.0)
+    p.add_argument("--sample-apg-momentum", type=float, default=-0.5)
+    p.add_argument("--sample-apg-norm-threshold", type=float, default=0.0)
     p.add_argument("--min-timestep", type=int, default=0)
     p.add_argument("--max-timestep", type=int, default=None)
     p.add_argument("--unet-train-mode", choices=["full", "cond"], default="full")
@@ -203,9 +226,16 @@ def main():
     print("Loading model...")
     model = PoseConditionedSD()
     model.configure_trainable(args.unet_train_mode)
-    n_trainable = sum(p.numel() for p in model.unet.parameters() if p.requires_grad) + \
-        sum(p.numel() for p in model.ref_encoder.parameters())
-    print(f"UNet train mode: {args.unet_train_mode} (trainable params incl. ref_encoder: {n_trainable:,})")
+    n_trainable = (
+        sum(p.numel() for p in model.unet.parameters() if p.requires_grad)
+        + sum(p.numel() for p in model.ref_encoder.parameters())
+        + sum(p.numel() for p in model.target_pose_encoder.parameters())
+        + sum(p.numel() for p in model.epipolar_attn.parameters())
+    )
+    print(
+        f"UNet train mode: {args.unet_train_mode} "
+        f"(trainable params incl. conditioning modules: {n_trainable:,})"
+    )
 
     print("Loading dataset...")
     exclude_image_names = load_image_name_set(args.exclude_image_list)
@@ -243,6 +273,9 @@ def main():
         args.prompt,
         cond_drop_prob=args.cond_drop_prob,
         sample_cfg_scale=args.sample_cfg_scale,
+        sample_apg_eta=args.sample_apg_eta,
+        sample_apg_momentum=args.sample_apg_momentum,
+        sample_apg_norm_threshold=args.sample_apg_norm_threshold,
         min_timestep=args.min_timestep,
         max_timestep=args.max_timestep,
     )

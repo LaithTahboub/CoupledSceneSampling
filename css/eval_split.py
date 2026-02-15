@@ -34,7 +34,10 @@ def main():
     p.add_argument("--all-targets", action="store_true", help="Evaluate all test targets")
     p.add_argument("--prompt", default="a photo of the Mysore palace")
     p.add_argument("--num-steps", type=int, default=50)
-    p.add_argument("--cfg-scale", type=float, default=1.0)
+    p.add_argument("--cfg-scale", type=float, default=1.0, help="Guidance scale (APG)")
+    p.add_argument("--apg-eta", type=float, default=0.0)
+    p.add_argument("--apg-momentum", type=float, default=-0.5)
+    p.add_argument("--apg-norm-threshold", type=float, default=0.0)
     p.add_argument("--max-pair-dist", type=float, default=2.0)
     p.add_argument("--min-dir-sim", type=float, default=0.3)
     p.add_argument("--min-ref-spacing", type=float, default=0.3)
@@ -119,6 +122,9 @@ def main():
                         prompt=args.prompt,
                         num_steps=args.num_steps,
                         cfg_scale=args.cfg_scale,
+                        apg_eta=args.apg_eta,
+                        apg_momentum=args.apg_momentum,
+                        apg_norm_threshold=args.apg_norm_threshold,
                         target=(sample["target_img"] if args.noisy_target_start else None),
                         start_t=args.start_t,
                     )
