@@ -243,8 +243,9 @@ class CoupledDiffusionSampler:
             ).sample.float()
 
         eps_uc, eps_c = eps.chunk(2)
-        eps_guided = self.sd_guider.guide(eps_c, eps_uc)
-        return (x - (1 - alpha_bar).sqrt() * eps_guided) / alpha_bar.sqrt()
+        x0_uc = self.pose_sd._x0_from_eps(x, eps_uc, alpha_bar)
+        x0_c = self.pose_sd._x0_from_eps(x, eps_c, alpha_bar)
+        return self.sd_guider.guide(x0_c, x0_uc)
 
     def _sigma_to_sd_t(self, sigma):
         if sigma <= 0:

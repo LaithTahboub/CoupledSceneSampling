@@ -224,6 +224,18 @@ class PoseConditionedSD(nn.Module):
     def decode_latent(self, latent: torch.Tensor) -> torch.Tensor:
         return self.vae.decode(latent / self.vae.config.scaling_factor).sample
 
+    @staticmethod
+    def _x0_from_eps(latent: torch.Tensor, eps: torch.Tensor, alpha_bar: torch.Tensor) -> torch.Tensor:
+        sqrt_alpha = alpha_bar.sqrt()
+        sqrt_one_minus = (1.0 - alpha_bar).clamp_min(0.0).sqrt()
+        return (latent - sqrt_one_minus * eps) / sqrt_alpha
+
+    @staticmethod
+    def _eps_from_x0(latent: torch.Tensor, x0: torch.Tensor, alpha_bar: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+        sqrt_alpha = alpha_bar.sqrt()
+        sqrt_one_minus = (1.0 - alpha_bar).clamp_min(0.0).sqrt().clamp_min(eps)
+        return (latent - sqrt_alpha * x0) / sqrt_one_minus
+
     def _build_pose_and_ref_tokens(
         self,
         ref1_latent: torch.Tensor,
@@ -400,7 +412,14 @@ class PoseConditionedSD(nn.Module):
             t_pair = torch.full((2 * B,), t_val, device=self.device, dtype=torch.long)
             eps_pair = self.unet(unet_pair, t_pair, encoder_hidden_states=context_pair).sample
             eps_uncond, eps_cond = eps_pair.chunk(2)
-            eps = guider.guide(eps_cond, eps_uncond)
+            alpha_bar = self.scheduler.alphas_cumprod[t_val].to(device=latent.device, dtype=latent.dtype)
+            if float((1.0 - alpha_bar).item()) <= 1e-8:
+                eps = eps_cond
+            else:
+                x0_uncond = self._x0_from_eps(latent, eps_uncond, alpha_bar)
+                x0_cond = self._x0_from_eps(latent, eps_cond, alpha_bar)
+                x0_guided = guider.guide(x0_cond, x0_uncond)
+                eps = self._eps_from_x0(latent, x0_guided, alpha_bar)
             latent = self.scheduler.step(eps, t, latent).prev_sample
 
         return self.decode_latent(latent)
