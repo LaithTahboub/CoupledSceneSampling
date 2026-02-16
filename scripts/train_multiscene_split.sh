@@ -17,7 +17,14 @@ set -euo pipefail
 ROOT=${ROOT:-/fs/nexus-scratch/ltahboub/CoupledSceneSampling}
 MEGASCENES_ROOT=${MEGASCENES_ROOT:-$ROOT/MegaScenes}
 SCENES_FILE=${SCENES_FILE:-$ROOT/scene_lists/megascenes_downloaded.txt}
+REFRESH_SCENES_FILE=${REFRESH_SCENES_FILE:-1}
 MIN_SCENES=${MIN_SCENES:-100}
+POSE_QUALITY_FILTER=${POSE_QUALITY_FILTER:-1}
+QUALITY_MAX_ROT_ORTH_ERR=${QUALITY_MAX_ROT_ORTH_ERR:-0.05}
+QUALITY_MAX_DET_ERR=${QUALITY_MAX_DET_ERR:-0.10}
+QUALITY_MIN_POSE_VALID_RATIO=${QUALITY_MIN_POSE_VALID_RATIO:-0.95}
+QUALITY_MIN_COVERED_TARGETS=${QUALITY_MIN_COVERED_TARGETS:-20}
+QUALITY_MIN_COVERAGE=${QUALITY_MIN_COVERAGE:-0.35}
 
 TEST_RATIO=${TEST_RATIO:-0.10}
 TRAIN_RATIO=${TRAIN_RATIO:-1.0}
@@ -51,16 +58,21 @@ RUN_NAME=${RUN_NAME:-css-${SPLIT_TAG}}
 source $ROOT/.venv/bin/activate
 cd $ROOT
 
-if [[ ! -f "$SCENES_FILE" ]]; then
+if [[ "$REFRESH_SCENES_FILE" == "1" || ! -f "$SCENES_FILE" ]]; then
     mkdir -p "$(dirname "$SCENES_FILE")"
-    while IFS= read -r sparse_dir; do
+    while IFS= read -r cameras_bin; do
+        sparse_dir="$(dirname "$cameras_bin")"
         scene_dir="$(dirname "$sparse_dir")"
         [[ -d "$scene_dir/images" ]] || continue
+        [[ -f "$sparse_dir/images.bin" ]] || continue
         echo "$scene_dir"
-    done < <(find "$MEGASCENES_ROOT" -mindepth 1 -type d -name sparse | sort) > "$SCENES_FILE"
+    done < <(find "$MEGASCENES_ROOT" -type f -path "*/sparse/cameras.bin" | sort) > "$SCENES_FILE"
     sort -u "$SCENES_FILE" -o "$SCENES_FILE"
-    echo "Auto-generated scene list: $SCENES_FILE"
+    echo "Generated valid scene list: $SCENES_FILE"
 fi
+
+READY_COUNT=$(wc -l < "$SCENES_FILE" || echo 0)
+echo "Valid scenes found: $READY_COUNT"
 
 python -m css.make_multiscene_split \
     --scenes-file "$SCENES_FILE" \
@@ -68,7 +80,16 @@ python -m css.make_multiscene_split \
     --test-ratio "$TEST_RATIO" \
     --train-ratio "$TRAIN_RATIO" \
     --seed "$SEED" \
-    --min-scenes "$MIN_SCENES"
+    --min-scenes "$MIN_SCENES" \
+    --quality-max-pair-dist "$MAX_PAIR_DIST" \
+    --quality-min-dir-sim "$MIN_DIR_SIM" \
+    --quality-min-ref-spacing "$MIN_REF_SPACING" \
+    --quality-max-rot-orth-err "$QUALITY_MAX_ROT_ORTH_ERR" \
+    --quality-max-det-err "$QUALITY_MAX_DET_ERR" \
+    --quality-min-pose-valid-ratio "$QUALITY_MIN_POSE_VALID_RATIO" \
+    --quality-min-covered-targets "$QUALITY_MIN_COVERED_TARGETS" \
+    --quality-min-coverage "$QUALITY_MIN_COVERAGE" \
+    $([[ "$POSE_QUALITY_FILTER" == "1" ]] && echo "--pose-quality-filter")
 
 python -m css.train \
     --scenes-file "$SPLIT_DIR/scenes.txt" \
