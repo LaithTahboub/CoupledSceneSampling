@@ -53,10 +53,12 @@ cd $ROOT
 
 if [[ ! -f "$SCENES_FILE" ]]; then
     mkdir -p "$(dirname "$SCENES_FILE")"
-    while IFS= read -r d; do
-        [[ -d "$d/images" && -d "$d/sparse" ]] || continue
-        echo "$d"
-    done < <(find "$MEGASCENES_ROOT" -mindepth 1 -maxdepth 1 -type d | sort) > "$SCENES_FILE"
+    while IFS= read -r sparse_dir; do
+        scene_dir="$(dirname "$sparse_dir")"
+        [[ -d "$scene_dir/images" ]] || continue
+        echo "$scene_dir"
+    done < <(find "$MEGASCENES_ROOT" -mindepth 1 -type d -name sparse | sort) > "$SCENES_FILE"
+    sort -u "$SCENES_FILE" -o "$SCENES_FILE"
     echo "Auto-generated scene list: $SCENES_FILE"
 fi
 

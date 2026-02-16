@@ -7,6 +7,7 @@ import torch
 from PIL import Image
 
 from css.data.dataset import load_image_name_set
+from css.data.scene_names import derive_scene_key, scene_prompt_name
 from css.models.pose_conditioned_sd import PoseConditionedSD, load_pose_sd_checkpoint
 from css.scene_sampling import (
     build_comparison_grid,
@@ -27,16 +28,20 @@ def _read_keys(path: Path) -> list[str]:
 
 
 def _split_scene_key(scene_key: str) -> tuple[str, str]:
-    if "/" not in scene_key:
-        raise ValueError(f"Expected scene-qualified key 'scene/image', got: {scene_key}")
-    scene_name, image_name = scene_key.split("/", 1)
-    return scene_name, image_name
+    if "\t" in scene_key:
+        scene_name, image_name = scene_key.split("\t", 1)
+        return scene_name, image_name
+    if "/" in scene_key:
+        scene_name, image_name = scene_key.split("/", 1)
+        return scene_name, image_name
+    raise ValueError(f"Expected scene-qualified key, got: {scene_key}")
 
 
 def _render_prompt(template: str, scene_name: str) -> str:
+    scene_text = scene_prompt_name(scene_name)
     if "{scene}" not in template:
         return template
-    return template.format(scene=scene_name.replace("_", " "))
+    return template.format(scene=scene_text)
 
 
 def _write_target_manifest(path: Path, scene_keys: list[str]) -> None:
@@ -52,9 +57,9 @@ def _load_scene_map(scenes_file: Path) -> dict[str, Path]:
     scene_map: dict[str, Path] = {}
     for line in _read_keys(scenes_file):
         scene_dir = Path(line)
-        scene_name = scene_dir.name
+        scene_name = derive_scene_key(scene_dir)
         if scene_name in scene_map and scene_map[scene_name] != scene_dir:
-            raise ValueError(f"Duplicate scene basename '{scene_name}' in {scenes_file}")
+            raise ValueError(f"Duplicate scene key '{scene_name}' in {scenes_file}")
         scene_map[scene_name] = scene_dir
     if not scene_map:
         raise ValueError(f"No scenes found in {scenes_file}")
@@ -152,7 +157,7 @@ def main():
         for idx in target_indices:
             scene_name, image_name = _split_scene_key(test_keys[idx])
             print(f"[{idx}] {scene_name}/{image_name}")
-            scene_out_dir = output_dir / scene_name
+            scene_out_dir = output_dir / scene_name.replace("/", "__")
             scene_out_dir.mkdir(parents=True, exist_ok=True)
             output_path = scene_out_dir / f"test_idx_{idx:06d}.png"
 

@@ -8,6 +8,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from css.data.colmap_reader import Camera, read_scene
+from css.data.scene_names import derive_scene_key, scene_pair_key, scene_prompt_name
 from seva.geometry import get_plucker_coordinates, to_hom_pose
 
 
@@ -28,14 +29,22 @@ def scene_image_key(scene_name: str, image_name: str) -> str:
     return f"{scene_name}/{image_name}"
 
 
-def scene_candidate_keys(scene_name: str, image_name: str) -> tuple[str, str]:
-    return image_name, scene_image_key(scene_name, image_name)
+def scene_candidate_keys(scene_name: str, image_name: str, scene_key: str | None = None) -> tuple[str, ...]:
+    keys = [image_name, scene_image_key(scene_name, image_name), scene_pair_key(scene_name, image_name)]
+    if scene_key and scene_key != scene_name:
+        keys.extend([scene_image_key(scene_key, image_name), scene_pair_key(scene_key, image_name)])
+    return tuple(dict.fromkeys(keys))
 
 
-def name_allowed(name_filter: set[str] | None, scene_name: str, image_name: str) -> bool:
+def name_allowed(
+    name_filter: set[str] | None,
+    scene_name: str,
+    image_name: str,
+    scene_key: str | None = None,
+) -> bool:
     if name_filter is None:
         return True
-    return any(k in name_filter for k in scene_candidate_keys(scene_name, image_name))
+    return any(k in name_filter for k in scene_candidate_keys(scene_name, image_name, scene_key))
 
 
 def load_image_tensor(images_dir: Path, image_name: str, H: int, W: int) -> torch.Tensor:
@@ -96,10 +105,13 @@ class MegaScenesDataset(Dataset):
         self.prompt_template = prompt_template
 
         self.triplets = []
-        for scene_dir in scene_dirs:
+        for scene_spec in scene_dirs:
+            scene_dir = Path(scene_spec)
+            scene_key = derive_scene_key(scene_dir)
             self.triplets.extend(
                 self._build_triplets(
-                    Path(scene_dir),
+                    scene_dir,
+                    scene_key,
                     max_pair_distance,
                     max_triplets_per_scene,
                     min_dir_similarity,
@@ -121,19 +133,19 @@ class MegaScenesDataset(Dataset):
             unique_images.add(str(images_dir / tgt_name))
         print(f"Dataset ready: {self.n} triplets, {len(unique_images)} unique images, {len(scene_names)} scenes")
 
-    def _build_triplets(self, scene_dir, max_dist, max_triplets, min_dir_sim, min_ref_spacing):
+    def _build_triplets(self, scene_dir: Path, scene_key: str, max_dist, max_triplets, min_dir_sim, min_ref_spacing):
         cameras, images = read_scene(scene_dir)
         images_dir = scene_dir / "images"
 
         valid = [img for img in images.values() if (images_dir / img.name).exists()]
         valid.sort(key=lambda x: x.id)
-        valid = [img for img in valid if not name_allowed(self.exclude_image_names, scene_dir.name, img.name)]
+        valid = [img for img in valid if not name_allowed(self.exclude_image_names, scene_dir.name, img.name, scene_key)]
 
-        targets = [img for img in valid if name_allowed(self.target_include_image_names, scene_dir.name, img.name)]
-        refs_pool = [img for img in valid if name_allowed(self.reference_include_image_names, scene_dir.name, img.name)]
+        targets = [img for img in valid if name_allowed(self.target_include_image_names, scene_dir.name, img.name, scene_key)]
+        refs_pool = [img for img in valid if name_allowed(self.reference_include_image_names, scene_dir.name, img.name, scene_key)]
 
         print(
-            f"{scene_dir.name}: usable images={len(valid)}, "
+            f"{scene_key}: usable images={len(valid)}, "
             f"target_pool={len(targets)}, ref_pool={len(refs_pool)}"
         )
 
@@ -199,7 +211,7 @@ class MegaScenesDataset(Dataset):
                 cam_t = cameras[target.camera_id]
 
                 triplets.append((
-                    scene_dir.name,
+                    scene_key,
                     images_dir,
                     ref1.name,
                     ref2.name,
@@ -221,7 +233,7 @@ class MegaScenesDataset(Dataset):
     def _scene_prompt(self, scene_name: str) -> str:
         if not self.prompt_template:
             return ""
-        scene_text = scene_name.replace("_", " ")
+        scene_text = scene_prompt_name(scene_name)
         if "{scene}" in self.prompt_template:
             return self.prompt_template.format(scene=scene_text)
         return self.prompt_template

@@ -9,10 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from css.data.colmap_reader import read_scene
-
-
-def scene_image_key(scene_name: str, image_name: str) -> str:
-    return f"{scene_name}/{image_name}"
+from css.data.scene_names import derive_scene_key, scene_pair_key
 
 
 def _read_lines(path: str | None) -> list[str]:
@@ -121,14 +118,14 @@ def main():
     per_scene_meta: list[dict] = []
     errors: list[str] = []
 
-    scene_names_seen: set[str] = set()
+    scene_keys_seen: set[str] = set()
     for scene in scenes:
         scene_dir = Path(scene)
-        scene_name = scene_dir.name
-        if scene_name in scene_names_seen:
-            errors.append(f"Duplicate scene name '{scene_name}' (paths must have unique basenames)")
+        scene_key = derive_scene_key(scene_dir)
+        if scene_key in scene_keys_seen:
+            errors.append(f"Duplicate scene key '{scene_key}'")
             continue
-        scene_names_seen.add(scene_name)
+        scene_keys_seen.add(scene_key)
 
         try:
             names = _valid_image_names(scene_dir)
@@ -136,7 +133,7 @@ def main():
                 names,
                 test_ratio=args.test_ratio,
                 train_ratio=args.train_ratio,
-                seed=_stable_seed(scene_name, args.seed),
+                seed=_stable_seed(scene_key, args.seed),
                 min_train_images=args.min_train_images,
             )
         except Exception as e:
@@ -144,17 +141,17 @@ def main():
             continue
 
         kept_scene_paths.append(str(scene_dir))
-        merged_train.extend([scene_image_key(scene_name, n) for n in train_names])
-        merged_test.extend([scene_image_key(scene_name, n) for n in test_names])
+        merged_train.extend([scene_pair_key(scene_key, n) for n in train_names])
+        merged_test.extend([scene_pair_key(scene_key, n) for n in test_names])
 
-        per_scene_dir = output_dir / "per_scene" / scene_name
+        per_scene_dir = output_dir / "per_scene" / scene_key.replace("/", "__")
         _write_names(per_scene_dir / "train_images.txt", train_names)
         _write_names(per_scene_dir / "test_images.txt", test_names)
         (per_scene_dir / "scene_path.txt").write_text(str(scene_dir) + "\n", encoding="utf-8")
 
         per_scene_meta.append(
             {
-                "scene_name": scene_name,
+                "scene_key": scene_key,
                 "scene_path": str(scene_dir),
                 "total_valid_images": len(names),
                 "train_images": len(train_names),
