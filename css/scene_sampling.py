@@ -6,7 +6,12 @@ import numpy as np
 import torch
 
 from css.data.colmap_reader import Camera, ImageData, read_scene
-from css.data.dataset import build_scaled_intrinsics, compute_plucker_tensor, load_image_tensor
+from css.data.dataset import (
+    build_scaled_intrinsics,
+    compute_plucker_tensor,
+    load_image_tensor,
+    name_allowed,
+)
 
 
 def load_scene_pools(
@@ -21,15 +26,23 @@ def load_scene_pools(
     valid_images = [img for img in images.values() if (images_dir / img.name).exists()]
     valid_images.sort(key=lambda x: x.id)
     if exclude_image_names is not None:
-        valid_images = [img for img in valid_images if img.name not in exclude_image_names]
+        valid_images = [img for img in valid_images if not name_allowed(exclude_image_names, scene_dir.name, img.name)]
 
     target_images = valid_images
     if target_include_image_names is not None:
-        target_images = [img for img in target_images if img.name in target_include_image_names]
+        target_images = [
+            img
+            for img in target_images
+            if name_allowed(target_include_image_names, scene_dir.name, img.name)
+        ]
 
     reference_images = valid_images
     if reference_include_image_names is not None:
-        reference_images = [img for img in reference_images if img.name in reference_include_image_names]
+        reference_images = [
+            img
+            for img in reference_images
+            if name_allowed(reference_include_image_names, scene_dir.name, img.name)
+        ]
 
     return cameras, images_dir, target_images, reference_images
 

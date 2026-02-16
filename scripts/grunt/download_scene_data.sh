@@ -1,29 +1,52 @@
-id=$1
-scene_name=$2
-recon_no=$3
+#!/bin/bash
+# Download one MegaScenes scene into <out_root>/<scene_name>/{images,sparse}.
+
+set -euo pipefail
+
+if [[ $# -lt 2 || $# -gt 4 ]]; then
+    echo "Usage: $0 <scene_id> <scene_name> [recon_no=0] [out_root=../MegaScenes]"
+    exit 1
+fi
+
+SCENE_ID="$1"
+SCENE_NAME="$2"
+RECON_NO="${3:-0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_OUT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)/MegaScenes"
+OUT_ROOT="${4:-${DEFAULT_OUT_ROOT}}"
 
-s5cmd --no-sign-request cp s3://megascenes/images/$id/* ../test_final/$scene_name/images/
-# s5cmd --no-sign-request cp s3://megascenes/metadata/subcat/$id/* ../scenes/$scene_name/metadata/
-s5cmd --no-sign-request cp s3://megascenes/reconstruct/$id/colmap/$recon_no/* ../test_final/$scene_name/sparse/
+SCENE_DIR="${OUT_ROOT}/${SCENE_NAME}"
+IMAGES_DIR="${SCENE_DIR}/images"
+SPARSE_DIR="${SCENE_DIR}/sparse"
 
-# colmap image_undistorter --image_path ../test_final/$scene_name/images --input_path ../test_final/$scene_name/sparse --output_path ../test_final/$scene_name/undistort --output_type COLMAP
-# mv ../test_final/$scene_name/undistort/images ../test_final/$scene_name/undistort/images_all
-# python3 $SCRIPT_DIR/collect_images_into_one.py $scene_name
-# python3 $SCRIPT_DIR/parse_images_bin.py $scene_name
-# python3 $SCRIPT_DIR/convert_rgb.py $scene_name
+mkdir -p "$IMAGES_DIR" "$SPARSE_DIR"
 
-# rm -rf ../test_final/$scene_name/undistort/images_all
-# rm -rf ../test_final/$scene_name/undistort/images_copy
-# rm -rf ../test_final/$scene_name/undistort/images_filtered
-# rm -rf ../test_final/$scene_name/undistort/stereo
-# rm -rf ../test_final/$scene_name/undistort/run-colmap-geometric.sh
-# rm -rf ../test_final/$scene_name/undistort/run-colmap-photometric.sh
-# #
-# rm -rf ../test_final/$scene_name/images
-# rm -rf ../test_final/$scene_name/sparse
-# mv ../test_final/$scene_name/undistort/* ../test_final/$scene_name/
-# rm -rf ../test_final/$scene_name/undistort
+echo "[download] scene=${SCENE_NAME} id=${SCENE_ID} recon=${RECON_NO}"
+echo "[download] out=${SCENE_DIR}"
 
-# python3 create_tsv.py $scene_name
-# s5cmd --no-sign-request cp s3://megascenes/metadata/categories.json ../scenes/
+s5cmd --no-sign-request cp "s3://megascenes/images/${SCENE_ID}/*" "${IMAGES_DIR}/"
+
+if s5cmd --no-sign-request cp "s3://megascenes/reconstruct/${SCENE_ID}/colmap/${RECON_NO}/*" "${SPARSE_DIR}/"; then
+    echo "[download] used reconstruct/<id>/colmap/${RECON_NO}"
+elif s5cmd --no-sign-request cp "s3://megascenes/reconstruct/${SCENE_ID}/sparses/${RECON_NO}/*" "${SPARSE_DIR}/"; then
+    echo "[download] used reconstruct/<id>/sparses/${RECON_NO}"
+else
+    echo "Failed to download sparse COLMAP files for ${SCENE_NAME} (${SCENE_ID})"
+    exit 1
+fi
+
+if [[ ! -f "${SPARSE_DIR}/cameras.bin" || ! -f "${SPARSE_DIR}/images.bin" ]]; then
+    # Some layouts can contain one nested folder under sparse.
+    NESTED=$(find "${SPARSE_DIR}" -mindepth 2 -maxdepth 2 -type f -name cameras.bin | head -n 1 || true)
+    if [[ -n "${NESTED}" ]]; then
+        NESTED_DIR="$(dirname "${NESTED}")"
+        cp "${NESTED_DIR}/"*.bin "${SPARSE_DIR}/"
+    fi
+fi
+
+if [[ ! -f "${SPARSE_DIR}/cameras.bin" || ! -f "${SPARSE_DIR}/images.bin" ]]; then
+    echo "Missing cameras.bin/images.bin under ${SPARSE_DIR}"
+    exit 1
+fi
+
+echo "[ok] downloaded ${SCENE_NAME}"

@@ -1,4 +1,5 @@
 from os import PathLike
+from collections.abc import Sequence
 
 import torch
 import torch.nn as nn
@@ -205,16 +206,26 @@ class PoseConditionedSD(nn.Module):
         with torch.no_grad():
             tokens = self.tokenizer([""], padding="max_length", max_length=77, return_tensors="pt")
             self.null_text_emb = self.text_encoder(tokens.input_ids.to(self.device))[0]
+            self._text_emb_cache: dict[str, torch.Tensor] = {"": self.null_text_emb}
 
     @torch.no_grad()
     def get_text_embedding(self, prompt: str) -> torch.Tensor:
-        if prompt == "":
-            return self.null_text_emb
-        if not hasattr(self, '_cached_prompt') or self._cached_prompt != prompt:
-            tokens = self.tokenizer([prompt], padding="max_length", max_length=77, return_tensors="pt")
-            self._cached_text_emb = self.text_encoder(tokens.input_ids.to(self.device))[0]
-            self._cached_prompt = prompt
-        return self._cached_text_emb
+        return self.get_text_embeddings([prompt])[0:1]
+
+    @torch.no_grad()
+    def get_text_embeddings(self, prompts: Sequence[str]) -> torch.Tensor:
+        normalized = [p if p is not None else "" for p in prompts]
+        if len(normalized) == 0:
+            raise ValueError("prompts cannot be empty")
+
+        missing = [p for p in dict.fromkeys(normalized) if p not in self._text_emb_cache]
+        if missing:
+            tokens = self.tokenizer(missing, padding="max_length", max_length=77, return_tensors="pt")
+            embeds = self.text_encoder(tokens.input_ids.to(self.device))[0]
+            for i, p in enumerate(missing):
+                self._text_emb_cache[p] = embeds[i : i + 1]
+
+        return torch.cat([self._text_emb_cache[p] for p in normalized], dim=0)
 
     @torch.no_grad()
     def encode_image(self, img: torch.Tensor) -> torch.Tensor:
@@ -300,7 +311,7 @@ class PoseConditionedSD(nn.Module):
     def training_step(
         self,
         batch: dict,
-        prompt: str = "",
+        prompt: str | Sequence[str] = "",
         cond_drop_prob: float = 0.1,
         min_timestep: int = 0,
         max_timestep: int | None = None,
@@ -328,7 +339,13 @@ class PoseConditionedSD(nn.Module):
         timesteps = torch.randint(lo, hi + 1, (B,), device=self.device)
         noisy_target = self.scheduler.add_noise(target_latent, noise, timesteps)
 
-        text_emb = self.get_text_embedding(prompt).expand(B, -1, -1)
+        if isinstance(prompt, str):
+            text_emb = self.get_text_embedding(prompt).expand(B, -1, -1)
+        else:
+            prompt_list = list(prompt)
+            if len(prompt_list) != B:
+                raise ValueError(f"Prompt batch size mismatch: got {len(prompt_list)} prompts for batch size {B}")
+            text_emb = self.get_text_embeddings(prompt_list)
 
         if self.training and cond_drop_prob > 0:
             drop_mask = torch.rand(B, device=self.device) < cond_drop_prob

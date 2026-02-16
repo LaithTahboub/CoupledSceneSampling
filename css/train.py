@@ -3,6 +3,7 @@
 import argparse
 import re
 import signal
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -47,17 +48,37 @@ def _to_uint8(t: torch.Tensor) -> np.ndarray:
     return ((t.clamp(-1, 1) + 1) / 2 * 255).byte().permute(1, 2, 0).cpu().numpy()
 
 
+def _read_lines(path: str | None) -> list[str]:
+    if path is None:
+        return []
+    out: list[str] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if s and not s.startswith("#"):
+                out.append(s)
+    return out
+
+
+def _resolve_scenes(args) -> list[str]:
+    merged = list(args.scenes or []) + _read_lines(args.scenes_file)
+    if not merged:
+        raise ValueError("Provide at least one scene via --scenes or --scenes-file")
+    return list(OrderedDict.fromkeys(merged))
+
+
 def _log_sample(model, dataset, prompt, step, cfg_scale, apg_eta, apg_momentum, apg_norm_threshold):
     try:
         sample = dataset[0]
         model.eval()
+        sample_prompt = sample.get("prompt", prompt)
         generated = model.sample(
             sample["ref1_img"].unsqueeze(0),
             sample["ref2_img"].unsqueeze(0),
             sample["plucker_ref1"].unsqueeze(0),
             sample["plucker_ref2"].unsqueeze(0),
             sample["plucker_target"].unsqueeze(0),
-            prompt=prompt, num_steps=50, cfg_scale=cfg_scale,
+            prompt=sample_prompt, num_steps=50, cfg_scale=cfg_scale,
             apg_eta=apg_eta,
             apg_momentum=apg_momentum,
             apg_norm_threshold=apg_norm_threshold,
@@ -96,12 +117,20 @@ def train(
     sample_apg_norm_threshold=0.0,
     min_timestep=0,
     max_timestep=None,
+    num_workers=0,
 ):
     global _save_requested
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=(model.device.startswith("cuda")),
+        persistent_workers=(num_workers > 0),
+    )
     if len(dataloader) == 0:
         raise ValueError("No training batches available. Check scene/split filters and triplet constraints.")
     trained_params = (
@@ -133,9 +162,10 @@ def train(
             pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
             for batch in pbar:
                 optimizer.zero_grad()
+                batch_prompt = batch["prompt"] if "prompt" in batch else prompt
                 loss = model.training_step(
                     batch,
-                    prompt,
+                    batch_prompt,
                     cond_drop_prob=cond_drop_prob,
                     min_timestep=min_timestep,
                     max_timestep=max_timestep,
@@ -186,13 +216,18 @@ def train(
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--scenes", nargs="+", required=True)
+    p.add_argument("--scenes", nargs="*", default=None)
+    p.add_argument("--scenes-file", type=str, default=None)
     p.add_argument("--output", required=True)
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--lr", type=float, default=1e-5)
     p.add_argument("--prompt", default="a photo of the Mysore palace")
+    p.add_argument("--prompt-template", type=str, default=None, help='Per-sample prompt template, e.g. "a photo of {scene}"')
     p.add_argument("--max-pair-dist", type=float, default=2.0)
+    p.add_argument("--min-dir-sim", type=float, default=0.3)
+    p.add_argument("--min-ref-spacing", type=float, default=0.3)
     p.add_argument("--max-triplets", type=int, default=10000)
     p.add_argument("--save-every", type=int, default=5)
     p.add_argument("--H", type=int, default=512)
@@ -249,13 +284,21 @@ def main():
     if reference_include_image_names is not None:
         print(f"Restricting references to {len(reference_include_image_names)} images")
 
+    scenes = _resolve_scenes(args)
+    print(f"Using {len(scenes)} scenes")
+    if args.prompt_template is not None:
+        print(f'Using prompt template: "{args.prompt_template}"')
+
     dataset = MegaScenesDataset(
-        args.scenes, H=args.H, W=args.W,
+        scenes, H=args.H, W=args.W,
         max_pair_distance=args.max_pair_dist,
         max_triplets_per_scene=args.max_triplets,
+        min_dir_similarity=args.min_dir_sim,
+        min_ref_spacing=args.min_ref_spacing,
         exclude_image_names=exclude_image_names,
         target_include_image_names=target_include_image_names,
         reference_include_image_names=reference_include_image_names,
+        prompt_template=args.prompt_template,
     )
     print(f"Found {len(dataset)} training triplets")
     if len(dataset) == 0:
@@ -278,6 +321,7 @@ def main():
         sample_apg_norm_threshold=args.sample_apg_norm_threshold,
         min_timestep=args.min_timestep,
         max_timestep=args.max_timestep,
+        num_workers=args.num_workers,
     )
 
     wandb.finish()

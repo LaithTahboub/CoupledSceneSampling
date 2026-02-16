@@ -1,13 +1,13 @@
 """MegaScenes dataset for pose-conditioned SD training."""
 
-import torch
-import numpy as np
 from pathlib import Path
+
+import numpy as np
+import torch
 from PIL import Image
 from torch.utils.data import Dataset
-from tqdm import tqdm
 
-from css.data.colmap_reader import read_scene, Camera, ImageData
+from css.data.colmap_reader import Camera, read_scene
 from seva.geometry import get_plucker_coordinates, to_hom_pose
 
 
@@ -22,6 +22,20 @@ def load_image_name_set(path: str | None) -> set[str] | None:
                 continue
             names.add(name)
     return names
+
+
+def scene_image_key(scene_name: str, image_name: str) -> str:
+    return f"{scene_name}/{image_name}"
+
+
+def scene_candidate_keys(scene_name: str, image_name: str) -> tuple[str, str]:
+    return image_name, scene_image_key(scene_name, image_name)
+
+
+def name_allowed(name_filter: set[str] | None, scene_name: str, image_name: str) -> bool:
+    if name_filter is None:
+        return True
+    return any(k in name_filter for k in scene_candidate_keys(scene_name, image_name))
 
 
 def load_image_tensor(images_dir: Path, image_name: str, H: int, W: int) -> torch.Tensor:
@@ -58,6 +72,7 @@ def compute_plucker_tensor(
 
 
 class MegaScenesDataset(Dataset):
+    """Lazy dataset: load images and compute Plucker maps per sample."""
 
     def __init__(
         self,
@@ -71,87 +86,51 @@ class MegaScenesDataset(Dataset):
         exclude_image_names: set[str] | None = None,
         target_include_image_names: set[str] | None = None,
         reference_include_image_names: set[str] | None = None,
+        prompt_template: str | None = None,
     ):
         self.H, self.W = H, W
         self.latent_h, self.latent_w = H // 8, W // 8
         self.exclude_image_names = exclude_image_names
         self.target_include_image_names = target_include_image_names
         self.reference_include_image_names = reference_include_image_names
+        self.prompt_template = prompt_template
 
-        raw_triplets = []
+        self.triplets = []
         for scene_dir in scene_dirs:
-            raw_triplets.extend(
+            self.triplets.extend(
                 self._build_triplets(
-                    Path(scene_dir), max_pair_distance, max_triplets_per_scene,
-                    min_dir_similarity, min_ref_spacing,
+                    Path(scene_dir),
+                    max_pair_distance,
+                    max_triplets_per_scene,
+                    min_dir_similarity,
+                    min_ref_spacing,
                 )
             )
 
-        self.n = len(raw_triplets)
+        self.n = len(self.triplets)
         if self.n == 0:
             print("MegaScenesDataset: 0 triplets found")
             return
 
-        image_map = {}
-        image_list = []
-        for images_dir, ref1, _, ref2, _, tgt, _ in raw_triplets:
-            for img in (ref1, ref2, tgt):
-                key = str(images_dir / img.name)
-                if key not in image_map:
-                    image_map[key] = len(image_list)
-                    image_list.append(self._load_image(images_dir, img))
-
-        self.images = torch.stack(image_list)
-
-        # All Pluckers in a triplet are expressed in ref1 frame.
-        plucker_cache = {}
-        plucker_list = []
-        ref1_img_idx, ref2_img_idx, tgt_img_idx = [], [], []
-        ref1_plk_idx, ref2_plk_idx, tgt_plk_idx = [], [], []
-
-        for images_dir, ref1, cam1, ref2, cam2, tgt, cam_tgt in tqdm(raw_triplets, desc="Precomputing Pluckers"):
-            ref1_img_idx.append(image_map[str(images_dir / ref1.name)])
-            ref2_img_idx.append(image_map[str(images_dir / ref2.name)])
-            tgt_img_idx.append(image_map[str(images_dir / tgt.name)])
-
-            src = ref1
-            for img, cam in [(ref1, cam1), (ref2, cam2), (tgt, cam_tgt)]:
-                pkey = (src.id, img.id, img.camera_id)
-                if pkey not in plucker_cache:
-                    plucker_cache[pkey] = len(plucker_list)
-                    plucker_list.append(self._compute_plucker(src.c2w, img.c2w, self._build_K(cam)))
-
-            ref1_plk_idx.append(plucker_cache[(src.id, ref1.id, ref1.camera_id)])
-            ref2_plk_idx.append(plucker_cache[(src.id, ref2.id, ref2.camera_id)])
-            tgt_plk_idx.append(plucker_cache[(src.id, tgt.id, tgt.camera_id)])
-
-        self.pluckers = torch.stack(plucker_list)
-        self.ref1_img_idx = torch.tensor(ref1_img_idx, dtype=torch.long)
-        self.ref2_img_idx = torch.tensor(ref2_img_idx, dtype=torch.long)
-        self.tgt_img_idx = torch.tensor(tgt_img_idx, dtype=torch.long)
-        self.ref1_plk_idx = torch.tensor(ref1_plk_idx, dtype=torch.long)
-        self.ref2_plk_idx = torch.tensor(ref2_plk_idx, dtype=torch.long)
-        self.tgt_plk_idx = torch.tensor(tgt_plk_idx, dtype=torch.long)
-
-        print(f"Dataset ready: {self.n} triplets, {len(image_list)} images, {len(plucker_list)} unique Pluckers")
+        unique_images = set()
+        scene_names = set()
+        for scene_name, images_dir, ref1_name, ref2_name, tgt_name, *_ in self.triplets:
+            scene_names.add(scene_name)
+            unique_images.add(str(images_dir / ref1_name))
+            unique_images.add(str(images_dir / ref2_name))
+            unique_images.add(str(images_dir / tgt_name))
+        print(f"Dataset ready: {self.n} triplets, {len(unique_images)} unique images, {len(scene_names)} scenes")
 
     def _build_triplets(self, scene_dir, max_dist, max_triplets, min_dir_sim, min_ref_spacing):
-        """Build target/ref pairs with close position and similar viewing direction."""
         cameras, images = read_scene(scene_dir)
         images_dir = scene_dir / "images"
 
         valid = [img for img in images.values() if (images_dir / img.name).exists()]
         valid.sort(key=lambda x: x.id)
-        if self.exclude_image_names is not None:
-            valid = [img for img in valid if img.name not in self.exclude_image_names]
+        valid = [img for img in valid if not name_allowed(self.exclude_image_names, scene_dir.name, img.name)]
 
-        targets = valid
-        if self.target_include_image_names is not None:
-            targets = [img for img in targets if img.name in self.target_include_image_names]
-
-        refs_pool = valid
-        if self.reference_include_image_names is not None:
-            refs_pool = [img for img in refs_pool if img.name in self.reference_include_image_names]
+        targets = [img for img in valid if name_allowed(self.target_include_image_names, scene_dir.name, img.name)]
+        refs_pool = [img for img in valid if name_allowed(self.reference_include_image_names, scene_dir.name, img.name)]
 
         print(
             f"{scene_dir.name}: usable images={len(valid)}, "
@@ -187,23 +166,23 @@ class MegaScenesDataset(Dataset):
                     continue
 
                 score = distance * (2.0 - dir_sim)
-                candidates.append((score, ref, distance, dir_sim))
+                candidates.append((score, ref))
 
             if len(candidates) < 2:
                 continue
 
             candidates.sort(key=lambda x: x[0])
-
             top_k = min(20, len(candidates))
+
             for i in range(min(top_k - 1, 5)):
                 if len(triplets) >= max_triplets:
                     break
 
-                _, ref1, _, _ = candidates[i]
-
+                ref1 = candidates[i][1]
                 ref2 = None
+
                 for j in range(i + 1, top_k):
-                    score, ref, dist, sim = candidates[j]
+                    ref = candidates[j][1]
                     ref1_to_ref2 = np.linalg.norm(ref.c2w[:3, 3] - ref1.c2w[:3, 3])
                     if ref1_to_ref2 >= min_ref_spacing:
                         ref2 = ref
@@ -212,41 +191,82 @@ class MegaScenesDataset(Dataset):
                 if ref2 is None and i + 1 < len(candidates):
                     ref2 = candidates[i + 1][1]
 
-                if ref2 is not None:
-                    triplets.append((
-                        images_dir,
-                        ref1, cameras[ref1.camera_id],
-                        ref2, cameras[ref2.camera_id],
-                        target, cameras[target.camera_id],
-                    ))
+                if ref2 is None:
+                    continue
+
+                cam1 = cameras[ref1.camera_id]
+                cam2 = cameras[ref2.camera_id]
+                cam_t = cameras[target.camera_id]
+
+                triplets.append((
+                    scene_dir.name,
+                    images_dir,
+                    ref1.name,
+                    ref2.name,
+                    target.name,
+                    ref1.c2w.astype(np.float32),
+                    ref2.c2w.astype(np.float32),
+                    target.c2w.astype(np.float32),
+                    self._build_K(cam1).astype(np.float32),
+                    self._build_K(cam2).astype(np.float32),
+                    self._build_K(cam_t).astype(np.float32),
+                ))
 
         return triplets
 
-    def _get_viewing_direction(self, c2w: np.ndarray) -> np.ndarray:
-        """Camera forward direction (negative z-axis in camera coords)."""
+    @staticmethod
+    def _get_viewing_direction(c2w: np.ndarray) -> np.ndarray:
         return -c2w[:3, 2]
+
+    def _scene_prompt(self, scene_name: str) -> str:
+        if not self.prompt_template:
+            return ""
+        scene_text = scene_name.replace("_", " ")
+        if "{scene}" in self.prompt_template:
+            return self.prompt_template.format(scene=scene_text)
+        return self.prompt_template
 
     def __len__(self):
         return self.n
 
     def __getitem__(self, idx):
-        return {
-            "ref1_img": self.images[self.ref1_img_idx[idx]],
-            "ref2_img": self.images[self.ref2_img_idx[idx]],
-            "target_img": self.images[self.tgt_img_idx[idx]],
-            "plucker_ref1": self.pluckers[self.ref1_plk_idx[idx]],
-            "plucker_ref2": self.pluckers[self.ref2_plk_idx[idx]],
-            "plucker_target": self.pluckers[self.tgt_plk_idx[idx]],
-        }
+        (
+            scene_name,
+            images_dir,
+            ref1_name,
+            ref2_name,
+            tgt_name,
+            ref1_c2w,
+            ref2_c2w,
+            tgt_c2w,
+            K_ref1,
+            K_ref2,
+            K_tgt,
+        ) = self.triplets[idx]
 
-    def _load_image(self, images_dir: Path, img: ImageData) -> torch.Tensor:
-        """Load image to [-1, 1] tensor."""
-        return load_image_tensor(images_dir, img.name, self.H, self.W)
+        ref1_img = load_image_tensor(images_dir, ref1_name, self.H, self.W)
+        ref2_img = load_image_tensor(images_dir, ref2_name, self.H, self.W)
+        target_img = load_image_tensor(images_dir, tgt_name, self.H, self.W)
+
+        plucker_ref1 = self._compute_plucker(ref1_c2w, ref1_c2w, K_ref1)
+        plucker_ref2 = self._compute_plucker(ref1_c2w, ref2_c2w, K_ref2)
+        plucker_target = self._compute_plucker(ref1_c2w, tgt_c2w, K_tgt)
+
+        out = {
+            "ref1_img": ref1_img,
+            "ref2_img": ref2_img,
+            "target_img": target_img,
+            "plucker_ref1": plucker_ref1,
+            "plucker_ref2": plucker_ref2,
+            "plucker_target": plucker_target,
+            "scene_name": scene_name,
+        }
+        if self.prompt_template:
+            out["prompt"] = self._scene_prompt(scene_name)
+        return out
 
     def _build_K(self, cam: Camera) -> np.ndarray:
-        """Scale intrinsics to target resolution."""
         return build_scaled_intrinsics(cam, self.H, self.W)
 
     def _compute_plucker(self, c2w_src: np.ndarray, c2w_tgt: np.ndarray, K_tgt: np.ndarray) -> torch.Tensor:
-        """Plucker coordinates for tgt-view rays represented in src camera frame."""
         return compute_plucker_tensor(c2w_src, c2w_tgt, K_tgt, self.latent_h, self.latent_w)
