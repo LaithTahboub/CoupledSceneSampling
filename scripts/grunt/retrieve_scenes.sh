@@ -1,6 +1,5 @@
 #!/bin/bash
-# Download many MegaScenes scenes by name list (or auto-pick from categories.json).
-# SCENE_LIST_FILE lines can be either: "<scene_name>" or "<scene_name><TAB><scene_id>".
+# Download N MegaScenes scenes (images only) and write scene list.
 
 set -euo pipefail
 
@@ -9,32 +8,33 @@ ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DOWNLOAD_SCRIPT="${SCRIPT_DIR}/download_scene_data.sh"
 
 OUT_ROOT="${OUT_ROOT:-${ROOT}/MegaScenes}"
+COUNT="${COUNT:-140}"
+MIN_READY="${MIN_READY:-100}"
 CATEGORIES_JSON="${CATEGORIES_JSON:-${OUT_ROOT}/metadata/categories.json}"
-SCENE_LIST_FILE="${SCENE_LIST_FILE:-${SCRIPT_DIR}/scene_names_100.txt}"
-AUTO_PICK_COUNT="${AUTO_PICK_COUNT:-140}"
-RECON_NO="${RECON_NO:-0}"
-MIN_SUCCESS="${MIN_SUCCESS:-100}"
+SCENE_LIST_FILE="${SCENE_LIST_FILE:-}"
+SCENES_OUT_FILE="${SCENES_OUT_FILE:-${OUT_ROOT}/scenes_images_only.txt}"
 
-mkdir -p "$(dirname "${CATEGORIES_JSON}")"
+mkdir -p "${OUT_ROOT}" "$(dirname "${CATEGORIES_JSON}")"
 
 if [[ ! -f "${CATEGORIES_JSON}" ]]; then
-    echo "[retrieve] downloading categories metadata"
+    echo "[retrieve] downloading categories.json"
     s5cmd --no-sign-request cp "s3://megascenes/metadata/categories.json" "${CATEGORIES_JSON}"
 fi
 
 MANIFEST="$(mktemp)"
-python3 - "${CATEGORIES_JSON}" "${SCENE_LIST_FILE}" "${AUTO_PICK_COUNT}" > "${MANIFEST}" <<'PY'
+python3 - "${CATEGORIES_JSON}" "${SCENE_LIST_FILE}" "${COUNT}" > "${MANIFEST}" <<'PY'
 import json
-import pathlib
+import re
 import sys
+from pathlib import Path
 
-categories_path = pathlib.Path(sys.argv[1])
-scene_list_path = pathlib.Path(sys.argv[2])
-auto_count = int(sys.argv[3])
+categories_path = Path(sys.argv[1])
+scene_list_file = sys.argv[2].strip()
+count = int(sys.argv[3])
 
 categories = json.loads(categories_path.read_text(encoding="utf-8"))
 if not isinstance(categories, dict):
-    raise RuntimeError(f"Unexpected categories format in {categories_path}")
+    raise RuntimeError(f"Unexpected categories format: {categories_path}")
 
 def to_scene_id(value):
     if isinstance(value, dict):
@@ -47,8 +47,6 @@ def to_scene_id(value):
         return f"{s[:3]}/{s[3:]}"
     if isinstance(value, str):
         s = value.strip()
-        if not s:
-            return None
         if "/" in s:
             return s
         if s.isdigit():
@@ -56,78 +54,82 @@ def to_scene_id(value):
             return f"{s[:3]}/{s[3:]}"
     return None
 
-def resolve_name(raw_name):
-    candidates = [
-        raw_name,
-        raw_name.replace(" ", "_"),
-        raw_name.replace("_", " "),
-    ]
-    for c in candidates:
-        if c in categories:
-            scene_id = to_scene_id(categories[c])
-            if scene_id is not None:
-                return c.replace(" ", "_"), scene_id
-    return None, None
+def sanitize_scene_name(name: str) -> str:
+    s = name.replace("/", "__")
+    s = s.replace('"', "").replace("'", "")
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
+    s = s.strip("._")
+    return s or "scene"
 
-if auto_count > 0:
-    requested = [(k, None) for k in sorted(categories.keys())[:auto_count]]
+requested = []
+if scene_list_file:
+    path = Path(scene_list_file)
+    if not path.exists():
+        raise RuntimeError(f"Scene list file not found: {path}")
+    for line in path.read_text(encoding="utf-8").splitlines():
+        raw = line.strip()
+        if raw and not raw.startswith("#"):
+            requested.append(raw)
 else:
-    if not scene_list_path.exists():
-        raise RuntimeError(f"Scene list file not found: {scene_list_path}")
-    requested = []
-    for line in scene_list_path.read_text(encoding="utf-8").splitlines():
-        s = line.strip()
-        if s and not s.startswith("#"):
-            if "\t" in s:
-                name, sid = s.split("\t", 1)
-                requested.append((name.strip(), sid.strip()))
-            else:
-                requested.append((s, None))
+    requested = sorted(categories.keys())[:count]
 
-seen = set()
-for name, explicit_id in requested:
-    if explicit_id:
-        scene_name = name.replace(" ", "_")
-        scene_id = to_scene_id(explicit_id)
-    else:
-        scene_name, scene_id = resolve_name(name)
-    if scene_name is None:
-        print(f"[warn] unresolved scene name: {name}", file=sys.stderr)
+selected = []
+seen_ids = set()
+for raw_name in requested:
+    candidate_names = [raw_name, raw_name.replace(" ", "_"), raw_name.replace("_", " ")]
+    scene_id = None
+    resolved_name = None
+    for name in candidate_names:
+        if name in categories:
+            scene_id = to_scene_id(categories[name])
+            if scene_id is not None:
+                resolved_name = name
+                break
+    if scene_id is None or scene_id in seen_ids:
         continue
-    if scene_id is None:
-        print(f"[warn] invalid scene id for {name}: {explicit_id}", file=sys.stderr)
-        continue
-    if scene_name in seen:
-        continue
-    seen.add(scene_name)
-    print(f"{scene_name}\t{scene_id}")
+    seen_ids.add(scene_id)
+    safe = f"{scene_id.replace('/', '_')}__{sanitize_scene_name(resolved_name)}"
+    selected.append((scene_id, safe, resolved_name))
+    if len(selected) >= count:
+        break
+
+for scene_id, safe, raw_name in selected:
+    print(f"{scene_id}\t{safe}\t{raw_name}")
 PY
 
-success=0
+mkdir -p "$(dirname "${SCENES_OUT_FILE}")"
+: > "${SCENES_OUT_FILE}"
+
+ready=0
 failed=0
-skipped=0
+while IFS=$'\t' read -r scene_id scene_safe scene_raw; do
+    [[ -n "${scene_id}" && -n "${scene_safe}" ]] || continue
+    scene_dir="${OUT_ROOT}/${scene_safe}"
+    images_dir="${scene_dir}/images"
 
-while IFS=$'\t' read -r scene_name scene_id; do
-    [[ -n "${scene_name}" && -n "${scene_id}" ]] || continue
-
-    if [[ -f "${OUT_ROOT}/${scene_name}/sparse/images.bin" && -f "${OUT_ROOT}/${scene_name}/sparse/cameras.bin" ]]; then
-        echo "[skip] ${scene_name} already downloaded"
-        skipped=$((skipped + 1))
+    if [[ -d "${images_dir}" ]] && [[ -n "$(find "${images_dir}" -type f -print -quit)" ]]; then
+        echo "${scene_dir}" >> "${SCENES_OUT_FILE}"
+        ready=$((ready + 1))
         continue
     fi
 
-    if bash "${DOWNLOAD_SCRIPT}" "${scene_id}" "${scene_name}" "${RECON_NO}" "${OUT_ROOT}"; then
-        success=$((success + 1))
+    if bash "${DOWNLOAD_SCRIPT}" "${scene_id}" "${scene_dir}" "${scene_raw}"; then
+        echo "${scene_dir}" >> "${SCENES_OUT_FILE}"
+        ready=$((ready + 1))
     else
-        echo "[warn] failed: ${scene_name} (${scene_id})"
+        echo "[warn] failed ${scene_id} (${scene_raw})"
         failed=$((failed + 1))
     fi
 done < "${MANIFEST}"
 
+sort -u "${SCENES_OUT_FILE}" -o "${SCENES_OUT_FILE}"
+ready=$(wc -l < "${SCENES_OUT_FILE}" || echo 0)
 rm -f "${MANIFEST}"
 
-echo "[retrieve] success=${success} skipped=${skipped} failed=${failed}"
-if (( success + skipped < MIN_SUCCESS )); then
-    echo "[retrieve] expected at least ${MIN_SUCCESS} ready scenes"
+echo "[retrieve] ready=${ready} failed=${failed}"
+echo "[retrieve] scenes list: ${SCENES_OUT_FILE}"
+if (( ready < MIN_READY )); then
+    echo "[retrieve] expected at least ${MIN_READY} ready scenes"
     exit 1
 fi

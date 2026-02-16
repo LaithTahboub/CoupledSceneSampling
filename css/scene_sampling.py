@@ -12,7 +12,6 @@ from css.data.dataset import (
     load_image_tensor,
     name_allowed,
 )
-from css.data.scene_names import derive_scene_key
 
 
 def load_scene_pools(
@@ -23,7 +22,6 @@ def load_scene_pools(
 ) -> tuple[dict[int, Camera], Path, list[ImageData], list[ImageData]]:
     cameras, images = read_scene(scene_dir)
     images_dir = scene_dir / "images"
-    scene_key = derive_scene_key(scene_dir)
 
     valid_images = [img for img in images.values() if (images_dir / img.name).exists()]
     valid_images.sort(key=lambda x: x.id)
@@ -31,7 +29,7 @@ def load_scene_pools(
         valid_images = [
             img
             for img in valid_images
-            if not name_allowed(exclude_image_names, scene_dir.name, img.name, scene_key)
+            if not name_allowed(exclude_image_names, scene_dir.name, img.name)
         ]
 
     target_images = valid_images
@@ -39,7 +37,7 @@ def load_scene_pools(
         target_images = [
             img
             for img in target_images
-            if name_allowed(target_include_image_names, scene_dir.name, img.name, scene_key)
+            if name_allowed(target_include_image_names, scene_dir.name, img.name)
         ]
 
     reference_images = valid_images
@@ -47,7 +45,7 @@ def load_scene_pools(
         reference_images = [
             img
             for img in reference_images
-            if name_allowed(reference_include_image_names, scene_dir.name, img.name, scene_key)
+            if name_allowed(reference_include_image_names, scene_dir.name, img.name)
         ]
 
     return cameras, images_dir, target_images, reference_images

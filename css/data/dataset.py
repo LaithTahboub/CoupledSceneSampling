@@ -8,7 +8,6 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from css.data.colmap_reader import Camera, read_scene
-from css.data.scene_names import derive_scene_key, scene_pair_key, scene_prompt_name
 from seva.geometry import get_plucker_coordinates, to_hom_pose
 
 
@@ -29,22 +28,37 @@ def scene_image_key(scene_name: str, image_name: str) -> str:
     return f"{scene_name}/{image_name}"
 
 
-def scene_candidate_keys(scene_name: str, image_name: str, scene_key: str | None = None) -> tuple[str, ...]:
-    keys = [image_name, scene_image_key(scene_name, image_name), scene_pair_key(scene_name, image_name)]
-    if scene_key and scene_key != scene_name:
-        keys.extend([scene_image_key(scene_key, image_name), scene_pair_key(scene_key, image_name)])
-    return tuple(dict.fromkeys(keys))
+def scene_candidate_keys(scene_name: str, image_name: str) -> tuple[str, str]:
+    return image_name, scene_image_key(scene_name, image_name)
 
 
 def name_allowed(
     name_filter: set[str] | None,
     scene_name: str,
     image_name: str,
-    scene_key: str | None = None,
 ) -> bool:
     if name_filter is None:
         return True
-    return any(k in name_filter for k in scene_candidate_keys(scene_name, image_name, scene_key))
+    return any(k in name_filter for k in scene_candidate_keys(scene_name, image_name))
+
+
+def clean_scene_prompt_name(scene_name: str) -> str:
+    cleaned = (
+        scene_name.replace("_", " ")
+        .replace('"', "")
+        .replace("'", "")
+        .replace("/", " ")
+    )
+    return " ".join(cleaned.split())
+
+
+def read_scene_prompt_name(scene_dir: Path) -> str:
+    raw_name_path = scene_dir / "scene_name_raw.txt"
+    if raw_name_path.exists():
+        text = raw_name_path.read_text(encoding="utf-8").strip()
+        if text:
+            return text
+    return scene_dir.name
 
 
 def load_image_tensor(images_dir: Path, image_name: str, H: int, W: int) -> torch.Tensor:
@@ -103,11 +117,13 @@ class MegaScenesDataset(Dataset):
         self.target_include_image_names = target_include_image_names
         self.reference_include_image_names = reference_include_image_names
         self.prompt_template = prompt_template
+        self.scene_prompt_names: dict[str, str] = {}
 
         self.triplets = []
         for scene_spec in scene_dirs:
             scene_dir = Path(scene_spec)
-            scene_key = derive_scene_key(scene_dir)
+            scene_key = scene_dir.name
+            self.scene_prompt_names[scene_key] = clean_scene_prompt_name(read_scene_prompt_name(scene_dir))
             self.triplets.extend(
                 self._build_triplets(
                     scene_dir,
@@ -139,10 +155,10 @@ class MegaScenesDataset(Dataset):
 
         valid = [img for img in images.values() if (images_dir / img.name).exists()]
         valid.sort(key=lambda x: x.id)
-        valid = [img for img in valid if not name_allowed(self.exclude_image_names, scene_dir.name, img.name, scene_key)]
+        valid = [img for img in valid if not name_allowed(self.exclude_image_names, scene_dir.name, img.name)]
 
-        targets = [img for img in valid if name_allowed(self.target_include_image_names, scene_dir.name, img.name, scene_key)]
-        refs_pool = [img for img in valid if name_allowed(self.reference_include_image_names, scene_dir.name, img.name, scene_key)]
+        targets = [img for img in valid if name_allowed(self.target_include_image_names, scene_dir.name, img.name)]
+        refs_pool = [img for img in valid if name_allowed(self.reference_include_image_names, scene_dir.name, img.name)]
 
         print(
             f"{scene_key}: usable images={len(valid)}, "
@@ -233,7 +249,7 @@ class MegaScenesDataset(Dataset):
     def _scene_prompt(self, scene_name: str) -> str:
         if not self.prompt_template:
             return ""
-        scene_text = scene_prompt_name(scene_name)
+        scene_text = self.scene_prompt_names.get(scene_name, clean_scene_prompt_name(scene_name))
         if "{scene}" in self.prompt_template:
             return self.prompt_template.format(scene=scene_text)
         return self.prompt_template
