@@ -17,6 +17,7 @@ FORCE_RECON="${FORCE_RECON:-0}"
 CLEAN_WORK="${CLEAN_WORK:-1}"
 
 SIFT_MAX_FEATURES="${SIFT_MAX_FEATURES:-8192}"
+SIFT_MAX_MATCHES="${SIFT_MAX_MATCHES:-32768}"
 MAPPER_MAX_NUM_MODELS="${MAPPER_MAX_NUM_MODELS:-1}"
 MIN_REGISTERED_IMAGES="${MIN_REGISTERED_IMAGES:-25}"
 
@@ -69,9 +70,20 @@ while IFS= read -r scene_dir; do
         --SiftExtraction.use_gpu "${USE_GPU}" \
         --SiftExtraction.max_num_features "${SIFT_MAX_FEATURES}" >/dev/null
 
-    "${COLMAP_BIN}" exhaustive_matcher \
+    if ! "${COLMAP_BIN}" exhaustive_matcher \
         --database_path "${db_path}" \
-        --SiftMatching.use_gpu "${USE_GPU}" >/dev/null
+        --SiftMatching.use_gpu "${USE_GPU}" \
+        --SiftMatching.max_num_matches "${SIFT_MAX_MATCHES}" >/dev/null; then
+        echo "[warn] exhaustive_matcher failed (gpu=${USE_GPU}) -> retrying on CPU"
+        if ! "${COLMAP_BIN}" exhaustive_matcher \
+            --database_path "${db_path}" \
+            --SiftMatching.use_gpu 0 \
+            --SiftMatching.max_num_matches "${SIFT_MAX_MATCHES}" >/dev/null; then
+            echo "[fail] matching failed: ${scene_dir}"
+            failed=$((failed + 1))
+            continue
+        fi
+    fi
 
     "${COLMAP_BIN}" mapper \
         --database_path "${db_path}" \
