@@ -26,6 +26,44 @@ if [[ ! -f "${SCENES_FILE}" ]]; then
     exit 1
 fi
 
+pick_best_model() {
+    local sparse_root="$1"
+    local best_model=""
+    local best_count=-1
+    local model_dir
+    local count
+
+    for model_dir in "${sparse_root}"/*; do
+        [[ -d "${model_dir}" ]] || continue
+        [[ -f "${model_dir}/images.bin" && -f "${model_dir}/cameras.bin" ]] || continue
+        count=$(
+            python3 - "${model_dir}/images.bin" <<'PY'
+import struct
+import sys
+path = sys.argv[1]
+try:
+    with open(path, "rb") as f:
+        header = f.read(8)
+    if len(header) != 8:
+        print(0)
+    else:
+        print(struct.unpack("<Q", header)[0])
+except Exception:
+    print(0)
+PY
+        )
+        if (( count > best_count )); then
+            best_count=${count}
+            best_model="${model_dir}"
+        fi
+    done
+
+    if [[ -z "${best_model}" ]]; then
+        return 1
+    fi
+    printf "%s\t%s\n" "${best_model}" "${best_count}"
+}
+
 : > "${SCENES_READY_FILE}"
 processed=0
 ready=0
@@ -54,6 +92,25 @@ while IFS= read -r scene_dir; do
         echo "${scene_dir}" >> "${SCENES_READY_FILE}"
         ready=$((ready + 1))
         continue
+    fi
+
+    if [[ "$FORCE_RECON" == "0" && -d "${work_dir}/sparse" ]]; then
+        if best_line=$(pick_best_model "${work_dir}/sparse"); then
+            best_model="$(echo "${best_line}" | cut -f1)"
+            best_count="$(echo "${best_line}" | cut -f2)"
+            if (( best_count >= MIN_REGISTERED_IMAGES )); then
+                mkdir -p "${sparse_dir}"
+                cp "${best_model}/cameras.bin" "${sparse_dir}/"
+                cp "${best_model}/images.bin" "${sparse_dir}/"
+                if [[ -f "${best_model}/points3D.bin" ]]; then
+                    cp "${best_model}/points3D.bin" "${sparse_dir}/"
+                fi
+                echo "[ok] reused existing model ${scene_dir} (registered_images=${best_count})"
+                echo "${scene_dir}" >> "${SCENES_READY_FILE}"
+                ready=$((ready + 1))
+                continue
+            fi
+        fi
     fi
 
     rm -rf "${work_dir}"
@@ -91,30 +148,13 @@ while IFS= read -r scene_dir; do
         --output_path "${work_dir}/sparse" \
         --Mapper.max_num_models "${MAPPER_MAX_NUM_MODELS}" >/dev/null || true
 
-    best_model=""
-    best_count=-1
-    for model_dir in "${work_dir}/sparse"/*; do
-        [[ -d "${model_dir}" ]] || continue
-        [[ -f "${model_dir}/images.bin" && -f "${model_dir}/cameras.bin" ]] || continue
-        count=$(
-            "${COLMAP_BIN}" model_analyzer --path "${model_dir}" 2>/dev/null \
-            | awk -F': ' '/Registered images/ {print $2; exit}' \
-            | tr -dc '0-9'
-        )
-        if [[ -z "${count}" ]]; then
-            count=0
-        fi
-        if (( count > best_count )); then
-            best_count=${count}
-            best_model="${model_dir}"
-        fi
-    done
-
-    if [[ -z "${best_model}" ]]; then
+    if ! best_line=$(pick_best_model "${work_dir}/sparse"); then
         echo "[fail] no sparse model: ${scene_dir}"
         failed=$((failed + 1))
         continue
     fi
+    best_model="$(echo "${best_line}" | cut -f1)"
+    best_count="$(echo "${best_line}" | cut -f2)"
 
     if (( best_count < MIN_REGISTERED_IMAGES )); then
         echo "[fail] weak reconstruction: ${scene_dir} (registered_images=${best_count})"
