@@ -19,6 +19,10 @@ CLEAN_WORK="${CLEAN_WORK:-1}"
 SIFT_MAX_FEATURES="${SIFT_MAX_FEATURES:-8192}"
 SIFT_MAX_MATCHES="${SIFT_MAX_MATCHES:-32768}"
 MAPPER_MAX_NUM_MODELS="${MAPPER_MAX_NUM_MODELS:-1}"
+MAPPER_MIN_NUM_MATCHES="${MAPPER_MIN_NUM_MATCHES:-8}"
+MAPPER_INIT_MIN_NUM_INLIERS="${MAPPER_INIT_MIN_NUM_INLIERS:-50}"
+MAPPER_ABS_POSE_MIN_NUM_INLIERS="${MAPPER_ABS_POSE_MIN_NUM_INLIERS:-20}"
+MIN_INPUT_IMAGES="${MIN_INPUT_IMAGES:-40}"
 MIN_REGISTERED_IMAGES="${MIN_REGISTERED_IMAGES:-25}"
 
 if [[ ! -f "${SCENES_FILE}" ]]; then
@@ -80,9 +84,17 @@ while IFS= read -r scene_dir; do
     sparse_dir="${scene_dir}/sparse"
     db_path="${scene_dir}/database.db"
     work_dir="${scene_dir}/colmap_work"
+    input_count=0
 
     if [[ ! -d "${images_dir}" ]] || [[ -z "$(find "${images_dir}" -type f -print -quit)" ]]; then
         echo "[skip] no images: ${scene_dir}"
+        failed=$((failed + 1))
+        continue
+    fi
+    input_count=$(find "${images_dir}" -type f | wc -l | tr -d ' ')
+    input_count="${input_count:-0}"
+    if (( input_count < MIN_INPUT_IMAGES )); then
+        echo "[skip] too few images: ${scene_dir} (images=${input_count}, min=${MIN_INPUT_IMAGES})"
         failed=$((failed + 1))
         continue
     fi
@@ -146,7 +158,10 @@ while IFS= read -r scene_dir; do
         --database_path "${db_path}" \
         --image_path "${images_dir}" \
         --output_path "${work_dir}/sparse" \
-        --Mapper.max_num_models "${MAPPER_MAX_NUM_MODELS}" >/dev/null || true
+        --Mapper.max_num_models "${MAPPER_MAX_NUM_MODELS}" \
+        --Mapper.min_num_matches "${MAPPER_MIN_NUM_MATCHES}" \
+        --Mapper.init_min_num_inliers "${MAPPER_INIT_MIN_NUM_INLIERS}" \
+        --Mapper.abs_pose_min_num_inliers "${MAPPER_ABS_POSE_MIN_NUM_INLIERS}" >/dev/null || true
 
     if ! best_line=$(pick_best_model "${work_dir}/sparse"); then
         echo "[fail] no sparse model: ${scene_dir}"
@@ -157,7 +172,7 @@ while IFS= read -r scene_dir; do
     best_count="$(echo "${best_line}" | cut -f2)"
 
     if (( best_count < MIN_REGISTERED_IMAGES )); then
-        echo "[fail] weak reconstruction: ${scene_dir} (registered_images=${best_count})"
+        echo "[fail] weak reconstruction: ${scene_dir} (registered_images=${best_count}, input_images=${input_count})"
         failed=$((failed + 1))
         continue
     fi
@@ -173,7 +188,7 @@ while IFS= read -r scene_dir; do
         rm -rf "${work_dir}"
     fi
 
-    echo "[ok] reconstructed ${scene_dir} (registered_images=${best_count})"
+    echo "[ok] reconstructed ${scene_dir} (registered_images=${best_count}, input_images=${input_count})"
     echo "${scene_dir}" >> "${SCENES_READY_FILE}"
     ready=$((ready + 1))
 done < "${SCENES_FILE}"

@@ -13,6 +13,10 @@ MIN_READY="${MIN_READY:-100}"
 CATEGORIES_JSON="${CATEGORIES_JSON:-${OUT_ROOT}/metadata/categories.json}"
 SCENE_LIST_FILE="${SCENE_LIST_FILE:-}"
 SCENES_OUT_FILE="${SCENES_OUT_FILE:-${OUT_ROOT}/scenes_images_only.txt}"
+MIN_IMAGES_PER_SCENE="${MIN_IMAGES_PER_SCENE:-60}"
+REQUIRE_PRECOMPUTED_RECON="${REQUIRE_PRECOMPUTED_RECON:-1}"
+SHUFFLE_SCENES="${SHUFFLE_SCENES:-1}"
+RANDOM_SEED="${RANDOM_SEED:-42}"
 
 mkdir -p "${OUT_ROOT}" "$(dirname "${CATEGORIES_JSON}")"
 
@@ -22,7 +26,7 @@ if [[ ! -f "${CATEGORIES_JSON}" ]]; then
 fi
 
 MANIFEST="$(mktemp)"
-python3 - "${CATEGORIES_JSON}" "${SCENE_LIST_FILE}" "${COUNT}" > "${MANIFEST}" <<'PY'
+python3 - "${CATEGORIES_JSON}" "${SCENE_LIST_FILE}" > "${MANIFEST}" <<'PY'
 import json
 import re
 import sys
@@ -30,7 +34,6 @@ from pathlib import Path
 
 categories_path = Path(sys.argv[1])
 scene_list_file = sys.argv[2].strip()
-count = int(sys.argv[3])
 
 categories = json.loads(categories_path.read_text(encoding="utf-8"))
 if not isinstance(categories, dict):
@@ -41,6 +44,11 @@ def to_scene_id(value):
         for k in ("id", "scene_id", "sid", "index"):
             if k in value:
                 return to_scene_id(value[k])
+    if isinstance(value, list):
+        for x in value:
+            sid = to_scene_id(x)
+            if sid is not None:
+                return sid
         return None
     if isinstance(value, int):
         s = f"{value:06d}"
@@ -62,64 +70,135 @@ def sanitize_scene_name(name: str) -> str:
     s = s.strip("._")
     return s or "scene"
 
-requested = []
+def is_scene_id(token: str) -> bool:
+    return bool(re.fullmatch(r"\d{3}/\d{3}", token.strip()))
+
+id_to_name = {}
+for raw_name, raw_value in categories.items():
+    sid = to_scene_id(raw_value)
+    if sid is None:
+        continue
+    id_to_name.setdefault(sid, raw_name)
+
+selected = []
+seen = set()
+
 if scene_list_file:
     path = Path(scene_list_file)
     if not path.exists():
         raise RuntimeError(f"Scene list file not found: {path}")
     for line in path.read_text(encoding="utf-8").splitlines():
         raw = line.strip()
-        if raw and not raw.startswith("#"):
-            requested.append(raw)
+        if not raw or raw.startswith("#"):
+            continue
+
+        sid = None
+        raw_name = None
+        if "\t" in raw:
+            left, right = raw.split("\t", 1)
+            if is_scene_id(left):
+                sid = left.strip()
+                raw_name = right.strip() or id_to_name.get(sid, sid.replace("/", "_"))
+        elif is_scene_id(raw):
+            sid = raw
+            raw_name = id_to_name.get(sid, sid.replace("/", "_"))
+        else:
+            for name in (raw, raw.replace(" ", "_"), raw.replace("_", " ")):
+                if name in categories:
+                    sid = to_scene_id(categories[name])
+                    if sid is not None:
+                        raw_name = name
+                        break
+        if sid is None or sid in seen:
+            continue
+        seen.add(sid)
+        selected.append((sid, raw_name))
 else:
-    requested = sorted(categories.keys())[:count]
+    for sid, raw_name in id_to_name.items():
+        if sid in seen:
+            continue
+        seen.add(sid)
+        selected.append((sid, raw_name))
 
-selected = []
-seen_ids = set()
-for raw_name in requested:
-    candidate_names = [raw_name, raw_name.replace(" ", "_"), raw_name.replace("_", " ")]
-    scene_id = None
-    resolved_name = None
-    for name in candidate_names:
-        if name in categories:
-            scene_id = to_scene_id(categories[name])
-            if scene_id is not None:
-                resolved_name = name
-                break
-    if scene_id is None or scene_id in seen_ids:
-        continue
-    seen_ids.add(scene_id)
-    safe = f"{scene_id.replace('/', '_')}__{sanitize_scene_name(resolved_name)}"
-    selected.append((scene_id, safe, resolved_name))
-    if len(selected) >= count:
-        break
+if not selected:
+    raise RuntimeError("No candidate scenes found from categories/scene list")
 
-for scene_id, safe, raw_name in selected:
+for scene_id, raw_name in selected:
+    safe = f"{scene_id.replace('/', '_')}__{sanitize_scene_name(raw_name)}"
     print(f"{scene_id}\t{safe}\t{raw_name}")
 PY
+
+if [[ "${SHUFFLE_SCENES}" == "1" ]]; then
+    shuffled="$(mktemp)"
+    python3 - "${MANIFEST}" "${RANDOM_SEED}" > "${shuffled}" <<'PY'
+import random
+import sys
+from pathlib import Path
+lines = [x for x in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines() if x.strip()]
+random.seed(int(sys.argv[2]))
+random.shuffle(lines)
+for line in lines:
+    print(line)
+PY
+    mv "${shuffled}" "${MANIFEST}"
+fi
 
 mkdir -p "$(dirname "${SCENES_OUT_FILE}")"
 : > "${SCENES_OUT_FILE}"
 
 ready=0
 failed=0
+skipped_small=0
+skipped_no_recon=0
 while IFS=$'\t' read -r scene_id scene_safe scene_raw; do
     [[ -n "${scene_id}" && -n "${scene_safe}" ]] || continue
+    if (( ready >= COUNT )); then
+        break
+    fi
+
     scene_dir="${OUT_ROOT}/${scene_safe}"
     images_dir="${scene_dir}/images"
+    image_count=0
 
-    if [[ -d "${images_dir}" ]] && [[ -n "$(find "${images_dir}" -type f -print -quit)" ]]; then
-        echo "${scene_dir}" >> "${SCENES_OUT_FILE}"
-        ready=$((ready + 1))
+    if [[ -d "${images_dir}" ]]; then
+        image_count=$(find "${images_dir}" -type f | wc -l | tr -d ' ')
+        image_count="${image_count:-0}"
+    fi
+
+    if (( image_count < MIN_IMAGES_PER_SCENE )); then
+        remote_count=$(s5cmd --no-sign-request ls "s3://megascenes/images/${scene_id}/*" 2>/dev/null | wc -l | tr -d ' ')
+        remote_count="${remote_count:-0}"
+        if (( remote_count < MIN_IMAGES_PER_SCENE )); then
+            skipped_small=$((skipped_small + 1))
+            continue
+        fi
+    fi
+
+    if [[ "${REQUIRE_PRECOMPUTED_RECON}" == "1" ]]; then
+        if ! s5cmd --no-sign-request ls "s3://megascenes/reconstruct/${scene_id}/colmap/0/images.bin" >/dev/null 2>&1; then
+            if ! s5cmd --no-sign-request ls "s3://megascenes/reconstruct/${scene_id}/sparses/0/images.bin" >/dev/null 2>&1; then
+                skipped_no_recon=$((skipped_no_recon + 1))
+                continue
+            fi
+        fi
+    fi
+
+    if (( image_count < MIN_IMAGES_PER_SCENE )) && ! bash "${DOWNLOAD_SCRIPT}" "${scene_id}" "${scene_dir}" "${scene_raw}"; then
+        echo "[warn] failed ${scene_id} (${scene_raw})"
+        failed=$((failed + 1))
         continue
     fi
 
-    if bash "${DOWNLOAD_SCRIPT}" "${scene_id}" "${scene_dir}" "${scene_raw}"; then
+    image_count=$(find "${images_dir}" -type f | wc -l | tr -d ' ')
+    image_count="${image_count:-0}"
+    if (( image_count < MIN_IMAGES_PER_SCENE )); then
+        skipped_small=$((skipped_small + 1))
+        continue
+    fi
+
+    if ! grep -Fxq "${scene_dir}" "${SCENES_OUT_FILE}" 2>/dev/null; then
         echo "${scene_dir}" >> "${SCENES_OUT_FILE}"
         ready=$((ready + 1))
-    else
-        echo "[warn] failed ${scene_id} (${scene_raw})"
-        failed=$((failed + 1))
     fi
 done < "${MANIFEST}"
 
@@ -127,7 +206,8 @@ sort -u "${SCENES_OUT_FILE}" -o "${SCENES_OUT_FILE}"
 ready=$(wc -l < "${SCENES_OUT_FILE}" || echo 0)
 rm -f "${MANIFEST}"
 
-echo "[retrieve] ready=${ready} failed=${failed}"
+echo "[retrieve] ready=${ready} failed=${failed} skipped_small=${skipped_small} skipped_no_recon=${skipped_no_recon}"
+echo "[retrieve] filters: min_images=${MIN_IMAGES_PER_SCENE} require_precomputed_recon=${REQUIRE_PRECOMPUTED_RECON}"
 echo "[retrieve] scenes list: ${SCENES_OUT_FILE}"
 if (( ready < MIN_READY )); then
     echo "[retrieve] expected at least ${MIN_READY} ready scenes"
