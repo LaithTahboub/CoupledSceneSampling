@@ -42,6 +42,16 @@ def name_allowed(
     return any(k in name_filter for k in scene_candidate_keys(scene_name, image_name))
 
 
+def name_excluded(
+    exclude_filter: set[str] | None,
+    scene_name: str,
+    image_name: str,
+) -> bool:
+    if exclude_filter is None:
+        return False
+    return any(k in exclude_filter for k in scene_candidate_keys(scene_name, image_name))
+
+
 def clean_scene_prompt_name(scene_name: str) -> str:
     cleaned = (
         scene_name.replace("_", " ")
@@ -64,6 +74,27 @@ def read_scene_prompt_name(scene_dir: Path) -> str:
 def load_image_tensor(images_dir: Path, image_name: str, H: int, W: int) -> torch.Tensor:
     pil = Image.open(images_dir / image_name).convert("RGB").resize((W, H))
     return torch.from_numpy(np.array(pil, dtype=np.float32) / 255.0).permute(2, 0, 1) * 2 - 1
+
+
+def _index_scene_images(images_dir: Path) -> tuple[set[str], dict[str, str]]:
+    rel_paths: list[str] = []
+    for p in images_dir.rglob("*"):
+        if p.is_file():
+            rel_paths.append(p.relative_to(images_dir).as_posix())
+
+    rel_set = set(rel_paths)
+    by_basename: dict[str, list[str]] = {}
+    for rel in rel_paths:
+        by_basename.setdefault(Path(rel).name, []).append(rel)
+    unique_basename = {k: v[0] for k, v in by_basename.items() if len(v) == 1}
+    return rel_set, unique_basename
+
+
+def _resolve_image_name(image_name: str, rel_set: set[str], unique_basename: dict[str, str]) -> str | None:
+    norm = image_name.replace("\\", "/")
+    if norm in rel_set:
+        return norm
+    return unique_basename.get(Path(norm).name)
 
 
 def build_scaled_intrinsics(cam: Camera, H: int, W: int) -> np.ndarray:
@@ -152,10 +183,18 @@ class MegaScenesDataset(Dataset):
     def _build_triplets(self, scene_dir: Path, scene_key: str, max_dist, max_triplets, min_dir_sim, min_ref_spacing):
         cameras, images = read_scene(scene_dir)
         images_dir = scene_dir / "images"
+        rel_set, unique_basename = _index_scene_images(images_dir)
 
-        valid = [img for img in images.values() if (images_dir / img.name).exists()]
-        valid.sort(key=lambda x: x.id)
-        valid = [img for img in valid if not name_allowed(self.exclude_image_names, scene_dir.name, img.name)]
+        resolved_name_by_id: dict[int, str] = {}
+        valid = []
+        for img in sorted(images.values(), key=lambda x: x.id):
+            resolved = _resolve_image_name(img.name, rel_set, unique_basename)
+            if resolved is None:
+                continue
+            if name_excluded(self.exclude_image_names, scene_dir.name, img.name):
+                continue
+            resolved_name_by_id[img.id] = resolved
+            valid.append(img)
 
         targets = [img for img in valid if name_allowed(self.target_include_image_names, scene_dir.name, img.name)]
         refs_pool = [img for img in valid if name_allowed(self.reference_include_image_names, scene_dir.name, img.name)]
@@ -178,6 +217,7 @@ class MegaScenesDataset(Dataset):
             target_dir = self._get_viewing_direction(target.c2w)
 
             candidates = []
+            relaxed_candidates = []
             for ref in refs_pool:
                 if ref.id == target.id:
                     continue
@@ -186,16 +226,22 @@ class MegaScenesDataset(Dataset):
                 ref_dir = self._get_viewing_direction(ref.c2w)
 
                 distance = np.linalg.norm(ref_pos - target_pos)
-                if distance > max_dist:
-                    continue
 
                 dir_sim = np.dot(target_dir, ref_dir)
-                if dir_sim < min_dir_sim:
-                    continue
 
                 score = distance * (2.0 - dir_sim)
-                candidates.append((score, ref))
+                relaxed_candidates.append((score, ref))
 
+                keep = True
+                if max_dist > 0 and distance > max_dist:
+                    keep = False
+                if dir_sim < min_dir_sim:
+                    keep = False
+                if keep:
+                    candidates.append((score, ref))
+
+            if len(candidates) < 2:
+                candidates = relaxed_candidates
             if len(candidates) < 2:
                 continue
 
@@ -229,9 +275,9 @@ class MegaScenesDataset(Dataset):
                 triplets.append((
                     scene_key,
                     images_dir,
-                    ref1.name,
-                    ref2.name,
-                    target.name,
+                    resolved_name_by_id[ref1.id],
+                    resolved_name_by_id[ref2.id],
+                    resolved_name_by_id[target.id],
                     ref1.c2w.astype(np.float32),
                     ref2.c2w.astype(np.float32),
                     target.c2w.astype(np.float32),
