@@ -1,5 +1,5 @@
 #!/bin/bash
-# Download N MegaScenes scenes (images only) and write scene list.
+# Download N MegaScenes scenes and write scene lists.
 
 set -euo pipefail
 
@@ -13,8 +13,11 @@ MIN_READY="${MIN_READY:-100}"
 CATEGORIES_JSON="${CATEGORIES_JSON:-${OUT_ROOT}/metadata/categories.json}"
 SCENE_LIST_FILE="${SCENE_LIST_FILE:-}"
 SCENES_OUT_FILE="${SCENES_OUT_FILE:-${OUT_ROOT}/scenes_images_only.txt}"
+SCENES_READY_FILE="${SCENES_READY_FILE:-${OUT_ROOT}/scenes_colmap_ready.txt}"
 MIN_IMAGES_PER_SCENE="${MIN_IMAGES_PER_SCENE:-60}"
 REQUIRE_PRECOMPUTED_RECON="${REQUIRE_PRECOMPUTED_RECON:-1}"
+DOWNLOAD_PRECOMPUTED_SPARSE="${DOWNLOAD_PRECOMPUTED_SPARSE:-1}"
+RECON_NO="${RECON_NO:-0}"
 SHUFFLE_SCENES="${SHUFFLE_SCENES:-1}"
 RANDOM_SEED="${RANDOM_SEED:-42}"
 
@@ -145,8 +148,13 @@ fi
 
 mkdir -p "$(dirname "${SCENES_OUT_FILE}")"
 : > "${SCENES_OUT_FILE}"
+if [[ "${DOWNLOAD_PRECOMPUTED_SPARSE}" == "1" ]]; then
+    mkdir -p "$(dirname "${SCENES_READY_FILE}")"
+    : > "${SCENES_READY_FILE}"
+fi
 
 ready=0
+ready_with_sparse=0
 failed=0
 skipped_small=0
 skipped_no_recon=0
@@ -158,11 +166,17 @@ while IFS=$'\t' read -r scene_id scene_safe scene_raw; do
 
     scene_dir="${OUT_ROOT}/${scene_safe}"
     images_dir="${scene_dir}/images"
+    sparse_dir="${scene_dir}/sparse"
     image_count=0
+    has_sparse=0
+    need_download=0
 
     if [[ -d "${images_dir}" ]]; then
         image_count=$(find "${images_dir}" -type f | wc -l | tr -d ' ')
         image_count="${image_count:-0}"
+    fi
+    if [[ -f "${sparse_dir}/cameras.bin" && -f "${sparse_dir}/images.bin" ]]; then
+        has_sparse=1
     fi
 
     if (( image_count < MIN_IMAGES_PER_SCENE )); then
@@ -172,27 +186,45 @@ while IFS=$'\t' read -r scene_id scene_safe scene_raw; do
             skipped_small=$((skipped_small + 1))
             continue
         fi
+        need_download=1
+    fi
+
+    if [[ "${DOWNLOAD_PRECOMPUTED_SPARSE}" == "1" && "${has_sparse}" == "0" ]]; then
+        need_download=1
     fi
 
     if [[ "${REQUIRE_PRECOMPUTED_RECON}" == "1" ]]; then
-        if ! s5cmd --no-sign-request ls "s3://megascenes/reconstruct/${scene_id}/colmap/0/images.bin" >/dev/null 2>&1; then
-            if ! s5cmd --no-sign-request ls "s3://megascenes/reconstruct/${scene_id}/sparses/0/images.bin" >/dev/null 2>&1; then
+        if ! s5cmd --no-sign-request ls "s3://megascenes/reconstruct/${scene_id}/colmap/${RECON_NO}/images.bin" >/dev/null 2>&1; then
+            if ! s5cmd --no-sign-request ls "s3://megascenes/reconstruct/${scene_id}/sparses/${RECON_NO}/images.bin" >/dev/null 2>&1; then
                 skipped_no_recon=$((skipped_no_recon + 1))
                 continue
             fi
         fi
     fi
 
-    if (( image_count < MIN_IMAGES_PER_SCENE )) && ! bash "${DOWNLOAD_SCRIPT}" "${scene_id}" "${scene_dir}" "${scene_raw}"; then
-        echo "[warn] failed ${scene_id} (${scene_raw})"
-        failed=$((failed + 1))
-        continue
+    if (( need_download == 1 )); then
+        if ! DOWNLOAD_SPARSE="${DOWNLOAD_PRECOMPUTED_SPARSE}" RECON_NO="${RECON_NO}" \
+            bash "${DOWNLOAD_SCRIPT}" "${scene_id}" "${scene_dir}" "${scene_raw}"; then
+            echo "[warn] failed ${scene_id} (${scene_raw})"
+            failed=$((failed + 1))
+            continue
+        fi
     fi
 
     image_count=$(find "${images_dir}" -type f | wc -l | tr -d ' ')
     image_count="${image_count:-0}"
+    if [[ -f "${sparse_dir}/cameras.bin" && -f "${sparse_dir}/images.bin" ]]; then
+        has_sparse=1
+    else
+        has_sparse=0
+    fi
     if (( image_count < MIN_IMAGES_PER_SCENE )); then
         skipped_small=$((skipped_small + 1))
+        continue
+    fi
+    if [[ "${DOWNLOAD_PRECOMPUTED_SPARSE}" == "1" && "${has_sparse}" == "0" ]]; then
+        echo "[warn] missing sparse after selection: ${scene_dir}"
+        failed=$((failed + 1))
         continue
     fi
 
@@ -200,16 +232,34 @@ while IFS=$'\t' read -r scene_id scene_safe scene_raw; do
         echo "${scene_dir}" >> "${SCENES_OUT_FILE}"
         ready=$((ready + 1))
     fi
+    if [[ "${DOWNLOAD_PRECOMPUTED_SPARSE}" == "1" && "${has_sparse}" == "1" ]]; then
+        if ! grep -Fxq "${scene_dir}" "${SCENES_READY_FILE}" 2>/dev/null; then
+            echo "${scene_dir}" >> "${SCENES_READY_FILE}"
+            ready_with_sparse=$((ready_with_sparse + 1))
+        fi
+    fi
 done < "${MANIFEST}"
 
 sort -u "${SCENES_OUT_FILE}" -o "${SCENES_OUT_FILE}"
 ready=$(wc -l < "${SCENES_OUT_FILE}" || echo 0)
+if [[ "${DOWNLOAD_PRECOMPUTED_SPARSE}" == "1" ]]; then
+    sort -u "${SCENES_READY_FILE}" -o "${SCENES_READY_FILE}"
+    ready_with_sparse=$(wc -l < "${SCENES_READY_FILE}" || echo 0)
+fi
 rm -f "${MANIFEST}"
 
-echo "[retrieve] ready=${ready} failed=${failed} skipped_small=${skipped_small} skipped_no_recon=${skipped_no_recon}"
-echo "[retrieve] filters: min_images=${MIN_IMAGES_PER_SCENE} require_precomputed_recon=${REQUIRE_PRECOMPUTED_RECON}"
+echo "[retrieve] ready_images=${ready} ready_sparse=${ready_with_sparse} failed=${failed} skipped_small=${skipped_small} skipped_no_recon=${skipped_no_recon}"
+echo "[retrieve] filters: min_images=${MIN_IMAGES_PER_SCENE} require_precomputed_recon=${REQUIRE_PRECOMPUTED_RECON} download_precomputed_sparse=${DOWNLOAD_PRECOMPUTED_SPARSE} recon_no=${RECON_NO}"
 echo "[retrieve] scenes list: ${SCENES_OUT_FILE}"
-if (( ready < MIN_READY )); then
-    echo "[retrieve] expected at least ${MIN_READY} ready scenes"
-    exit 1
+if [[ "${DOWNLOAD_PRECOMPUTED_SPARSE}" == "1" ]]; then
+    echo "[retrieve] sparse-ready list: ${SCENES_READY_FILE}"
+    if (( ready_with_sparse < MIN_READY )); then
+        echo "[retrieve] expected at least ${MIN_READY} sparse-ready scenes"
+        exit 1
+    fi
+else
+    if (( ready < MIN_READY )); then
+        echo "[retrieve] expected at least ${MIN_READY} ready scenes"
+        exit 1
+    fi
 fi
