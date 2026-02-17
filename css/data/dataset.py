@@ -4,11 +4,19 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageFile
 from torch.utils.data import Dataset
 
 from css.data.colmap_reader import Camera, read_scene
 from seva.geometry import get_plucker_coordinates, to_hom_pose
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+
+class ImageLoadError(OSError):
+    def __init__(self, path: Path, cause: Exception):
+        super().__init__(f"{path}: {cause}")
+        self.path = str(path)
 
 
 def load_image_name_set(path: str | None) -> set[str] | None:
@@ -72,8 +80,14 @@ def read_scene_prompt_name(scene_dir: Path) -> str:
 
 
 def load_image_tensor(images_dir: Path, image_name: str, H: int, W: int) -> torch.Tensor:
-    pil = Image.open(images_dir / image_name).convert("RGB").resize((W, H))
-    return torch.from_numpy(np.array(pil, dtype=np.float32) / 255.0).permute(2, 0, 1) * 2 - 1
+    path = images_dir / image_name
+    try:
+        with Image.open(path) as pil:
+            rgb = pil.convert("RGB").resize((W, H))
+            arr = np.array(rgb, dtype=np.float32) / 255.0
+    except Exception as e:
+        raise ImageLoadError(path, e) from e
+    return torch.from_numpy(arr).permute(2, 0, 1) * 2 - 1
 
 
 def _index_scene_images(images_dir: Path) -> tuple[set[str], dict[str, str]]:
@@ -149,6 +163,11 @@ class MegaScenesDataset(Dataset):
         self.reference_include_image_names = reference_include_image_names
         self.prompt_template = prompt_template
         self.scene_prompt_names: dict[str, str] = {}
+        self._bad_image_paths: set[str] = set()
+        self._bad_triplet_indices: set[int] = set()
+        self._max_io_retries = 64
+        self._io_error_logs = 0
+        self._max_io_error_logs = 20
 
         self.triplets = []
         for scene_spec in scene_dirs:
@@ -303,7 +322,7 @@ class MegaScenesDataset(Dataset):
     def __len__(self):
         return self.n
 
-    def __getitem__(self, idx):
+    def _make_item_from_triplet(self, idx: int):
         (
             scene_name,
             images_dir,
@@ -317,6 +336,20 @@ class MegaScenesDataset(Dataset):
             K_ref2,
             K_tgt,
         ) = self.triplets[idx]
+
+        ref1_path = str(images_dir / ref1_name)
+        ref2_path = str(images_dir / ref2_name)
+        tgt_path = str(images_dir / tgt_name)
+        bad_path = None
+        if ref1_path in self._bad_image_paths:
+            bad_path = ref1_path
+        elif ref2_path in self._bad_image_paths:
+            bad_path = ref2_path
+        elif tgt_path in self._bad_image_paths:
+            bad_path = tgt_path
+        if bad_path is not None:
+            self._bad_triplet_indices.add(idx)
+            raise ImageLoadError(Path(bad_path), RuntimeError("Triplet references previously failed image"))
 
         ref1_img = load_image_tensor(images_dir, ref1_name, self.H, self.W)
         ref2_img = load_image_tensor(images_dir, ref2_name, self.H, self.W)
@@ -338,6 +371,36 @@ class MegaScenesDataset(Dataset):
         if self.prompt_template:
             out["prompt"] = self._scene_prompt(scene_name)
         return out
+
+    def __getitem__(self, idx):
+        if self.n == 0:
+            raise IndexError("Empty dataset")
+
+        last_error = None
+        for attempt in range(self._max_io_retries):
+            candidate_idx = (idx + attempt) % self.n
+            if candidate_idx in self._bad_triplet_indices:
+                continue
+            try:
+                return self._make_item_from_triplet(candidate_idx)
+            except ImageLoadError as e:
+                last_error = e
+                self._bad_image_paths.add(e.path)
+                self._bad_triplet_indices.add(candidate_idx)
+                if self._io_error_logs < self._max_io_error_logs:
+                    print(f"[dataset] skipping unreadable image: {e.path}")
+                    self._io_error_logs += 1
+            except (OSError, FileNotFoundError) as e:
+                last_error = e
+                self._bad_triplet_indices.add(candidate_idx)
+                if self._io_error_logs < self._max_io_error_logs:
+                    print(f"[dataset] skipping unreadable triplet idx={candidate_idx}: {e}")
+                    self._io_error_logs += 1
+
+        raise RuntimeError(
+            f"Failed to load sample after {self._max_io_retries} retries; "
+            f"bad_triplets={len(self._bad_triplet_indices)} bad_images={len(self._bad_image_paths)}"
+        ) from last_error
 
     def _build_K(self, cam: Camera) -> np.ndarray:
         return build_scaled_intrinsics(cam, self.H, self.W)
