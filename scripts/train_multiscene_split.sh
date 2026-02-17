@@ -4,16 +4,16 @@
 #SBATCH --job-name=css-train-multiscene
 #SBATCH --partition=vulcan-ampere
 #SBATCH --ntasks=4
-#SBATCH --mem=64gb
+#SBATCH --mem=48gb
 #SBATCH --gres=gpu:rtxa6000:1
 #SBATCH --account=vulcan-jbhuang
 #SBATCH --qos=vulcan-medium
-#SBATCH --time=4-0:00:00
+#SBATCH --time=1-0:00:00
 #SBATCH --output=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/train_multiscene.out
 #SBATCH --error=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/train_multiscene.err
 
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="/fs/nexus-scratch/ltahboub/CoupledSceneSampling/scripts"
 ROOT=${ROOT:-/fs/nexus-scratch/ltahboub/CoupledSceneSampling}
 MEGASCENES_ROOT=${MEGASCENES_ROOT:-$ROOT/MegaScenes}
 SCENES_FILE=${SCENES_FILE:-$MEGASCENES_ROOT/scenes_colmap_ready.txt}
