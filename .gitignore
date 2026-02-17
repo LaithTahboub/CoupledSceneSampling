@@ -13,3 +13,4 @@ old
 pose_sd*/
 logs
 stable-virtual-camera
+images_index.parquet
