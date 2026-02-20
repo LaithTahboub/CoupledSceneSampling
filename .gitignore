@@ -14,3 +14,7 @@ pose_sd*/
 logs
 stable-virtual-camera
 images_index.parquet
+**/__pycache__/
+*.py[cod]
+holdnode.err
+*.core

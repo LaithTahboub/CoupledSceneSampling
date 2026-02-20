@@ -2,10 +2,6 @@
 Coupled diffusion sampling: SEVA + Pose-Conditioned SD.
 SEVA provides geometry, SD provides prompt-following + reference appearance.
 Coupling harmonizes x0 predictions.
-
-NOTE: This module needs updating for the target-anchored architecture and
-standard CFG (currently uses the old ref1-anchored interface and APG).
-Do not use until updated.
 """
 
 from contextlib import nullcontext
@@ -14,7 +10,6 @@ import torch
 import numpy as np
 from PIL import Image
 
-from css.models.apg import AdaptiveProjectedGuidance
 from css.models.pose_conditioned_sd import PoseConditionedSD, load_pose_sd_checkpoint
 
 from seva.utils import load_model as seva_load_model
@@ -41,9 +36,6 @@ class CoupledDiffusionSampler:
         coupling_strength: float = 0.5,
         cfg_seva: float = 2.0,
         cfg_sd: float = 7.5,
-        apg_eta: float = 0.0,
-        apg_momentum: float = -0.5,
-        apg_norm_threshold: float = 0.0,
         num_steps: int = 50,
         H: int = 576,
         W: int = 576,
@@ -69,18 +61,20 @@ class CoupledDiffusionSampler:
             print(f"Loaded pose-SD checkpoint: {pose_sd_checkpoint}")
         self.pose_sd.eval()
         self.sd_alphas = self.pose_sd.scheduler.alphas_cumprod.to(device)
-        self.sd_guider = AdaptiveProjectedGuidance(
-            guidance_scale=cfg_sd,
-            eta=apg_eta,
-            momentum=apg_momentum,
-            norm_threshold=apg_norm_threshold,
-        )
-        self.seva_guider = AdaptiveProjectedGuidance(
-            guidance_scale=cfg_seva,
-            eta=apg_eta,
-            momentum=apg_momentum,
-            norm_threshold=apg_norm_threshold,
-        )
+        self.cfg_sd = float(cfg_sd)
+        self.cfg_seva = float(cfg_seva)
+
+    @staticmethod
+    def _x0_from_eps(latent: torch.Tensor, eps: torch.Tensor, alpha_bar: torch.Tensor) -> torch.Tensor:
+        sqrt_alpha = alpha_bar.sqrt()
+        sqrt_one_minus = (1.0 - alpha_bar).clamp_min(0.0).sqrt()
+        return (latent - sqrt_one_minus * eps) / sqrt_alpha
+
+    @staticmethod
+    def _cfg_combine(cond: torch.Tensor, uncond: torch.Tensor, guidance_scale: float) -> torch.Tensor:
+        if guidance_scale <= 1.0:
+            return cond
+        return uncond + guidance_scale * (cond - uncond)
 
     def _autocast_context(self):
         return torch.autocast("cuda") if str(self.device).startswith("cuda") else nullcontext()
@@ -168,7 +162,7 @@ class CoupledDiffusionSampler:
         with self._autocast_context():
             pred = self.denoiser(self.seva_model, x2, s2, cond, num_frames=N)
         uc_pred, c_pred = pred.chunk(2)
-        return self.seva_guider.guide(c_pred, uc_pred)
+        return self._cfg_combine(c_pred, uc_pred, self.cfg_seva)
 
     def _sd_x0(self, x, t, prompt_emb, w2c, all_Ks, input_indices, sd_ref_latents):
         """Predict x0 from SD with cross-frame attention to closest references.
@@ -198,8 +192,8 @@ class CoupledDiffusionSampler:
             ref1_latent = sd_ref_latents[input_indices.index(ref1_frame_idx)].unsqueeze(0)
             ref2_latent = sd_ref_latents[input_indices.index(ref2_frame_idx)].unsqueeze(0)
 
-            # Match training convention: express all Pluckers in ref1 frame.
-            src_w2c = w2c[ref1_frame_idx]
+            # Match training convention: target-anchored pluckers.
+            src_w2c = w2c[j]
             plucker_ref1 = get_plucker_coordinates(
                 extrinsics_src=src_w2c, extrinsics=w2c[ref1_frame_idx].unsqueeze(0),
                 intrinsics=all_Ks[ref1_frame_idx].unsqueeze(0), target_size=[h, w]
@@ -208,17 +202,12 @@ class CoupledDiffusionSampler:
                 extrinsics_src=src_w2c, extrinsics=w2c[ref2_frame_idx].unsqueeze(0),
                 intrinsics=all_Ks[ref2_frame_idx].unsqueeze(0), target_size=[h, w]
             )
-            plucker_target = get_plucker_coordinates(
-                extrinsics_src=src_w2c, extrinsics=w2c[j].unsqueeze(0),
-                intrinsics=all_Ks[j].unsqueeze(0), target_size=[h, w]
-            )
 
             cond_context, uncond_context = self.pose_sd.build_conditioning_contexts(
                 ref1_latent,
                 ref2_latent,
                 plucker_ref1,
                 plucker_ref2,
-                plucker_target,
                 text_cond=prompt_emb[0:1],
                 text_uncond=prompt_emb[1:2],
             )
@@ -227,8 +216,8 @@ class CoupledDiffusionSampler:
             cond_contexts.append(cond_context)
             uncond_contexts.append(uncond_context)
 
-            # 10-channel UNet input: noisy latent + target Plucker
-            unet_inputs.append(torch.cat([x[j:j+1], plucker_target], dim=1))
+            # Current PoseConditionedSD UNet consumes latent only (4 channels).
+            unet_inputs.append(x[j:j+1])
 
         unet_input = torch.cat(unet_inputs, dim=0)
         cond_hidden = torch.cat(cond_contexts, dim=0)
@@ -247,9 +236,8 @@ class CoupledDiffusionSampler:
             ).sample.float()
 
         eps_uc, eps_c = eps.chunk(2)
-        x0_uc = self.pose_sd._x0_from_eps(x, eps_uc, alpha_bar)
-        x0_c = self.pose_sd._x0_from_eps(x, eps_c, alpha_bar)
-        return self.sd_guider.guide(x0_c, x0_uc)
+        eps_guided = self._cfg_combine(eps_c, eps_uc, self.cfg_sd)
+        return self._x0_from_eps(x, eps_guided, alpha_bar)
 
     def _sigma_to_sd_t(self, sigma):
         if sigma <= 0:
@@ -271,7 +259,6 @@ class CoupledDiffusionSampler:
     def sample_seva_only(self, images, trajectory="orbit", num_frames=21, seed=42):
         """SEVA-only sampling (no SD coupling)."""
         torch.manual_seed(seed)
-        self.seva_guider.reset()
         input_images, input_indices = self._parse_images(images)
 
         encoded_latents, clip_embeddings = self._encode_images(input_images)
@@ -294,8 +281,6 @@ class CoupledDiffusionSampler:
     def sample(self, images, prompt, trajectory="orbit", num_frames=21, seed=42):
         """Coupled SEVA + Pose-Conditioned SD sampling."""
         torch.manual_seed(seed)
-        self.seva_guider.reset()
-        self.sd_guider.reset()
         input_images, input_indices = self._parse_images(images)
 
         # SEVA encoding
@@ -356,9 +341,6 @@ if __name__ == "__main__":
     p.add_argument("--coupling", type=float, default=0.5)
     p.add_argument("--cfg-seva", type=float, default=2.0)
     p.add_argument("--cfg-sd", type=float, default=7.5)
-    p.add_argument("--apg-eta", type=float, default=0.0)
-    p.add_argument("--apg-momentum", type=float, default=-0.5)
-    p.add_argument("--apg-norm-threshold", type=float, default=0.0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--compare-seva", action="store_true")
     args = p.parse_args()
@@ -377,9 +359,6 @@ if __name__ == "__main__":
         coupling_strength=args.coupling,
         cfg_seva=args.cfg_seva,
         cfg_sd=args.cfg_sd,
-        apg_eta=args.apg_eta,
-        apg_momentum=args.apg_momentum,
-        apg_norm_threshold=args.apg_norm_threshold,
     )
 
     results = sampler.sample(images, args.prompt, args.trajectory, args.frames, args.seed)
