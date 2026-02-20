@@ -14,6 +14,41 @@ from css.data.dataset import (
 )
 
 
+def _index_scene_images(images_dir: Path) -> tuple[set[str], dict[str, str]]:
+    rel_paths: list[str] = []
+    for p in images_dir.rglob("*"):
+        if p.is_file():
+            rel_paths.append(p.relative_to(images_dir).as_posix())
+
+    rel_set = set(rel_paths)
+    by_basename: dict[str, list[str]] = {}
+    for rel in rel_paths:
+        by_basename.setdefault(Path(rel).name, []).append(rel)
+    unique_basename = {k: v[0] for k, v in by_basename.items() if len(v) == 1}
+    return rel_set, unique_basename
+
+
+def _resolve_image_name(
+    image_name: str,
+    rel_set: set[str],
+    unique_basename: dict[str, str],
+) -> str | None:
+    norm = image_name.replace("\\", "/")
+    if norm in rel_set:
+        return norm
+    return unique_basename.get(Path(norm).name)
+
+
+def _passes_filter(
+    image_names: tuple[str, str],
+    scene_name: str,
+    name_filter: set[str] | None,
+) -> bool:
+    if name_filter is None:
+        return True
+    return any(name_allowed(name_filter, scene_name, n) for n in image_names)
+
+
 def load_scene_pools(
     scene_dir: Path,
     exclude_image_names: set[str] | None = None,
@@ -23,13 +58,33 @@ def load_scene_pools(
     cameras, images = read_scene(scene_dir)
     images_dir = scene_dir / "images"
 
-    valid_images = [img for img in images.values() if (images_dir / img.name).exists()]
+    rel_set, unique_basename = _index_scene_images(images_dir)
+    valid_images: list[ImageData] = []
+    raw_name_by_id: dict[int, str] = {}
+    for img in images.values():
+        resolved = _resolve_image_name(img.name, rel_set, unique_basename)
+        if resolved is None:
+            continue
+        raw_name_by_id[img.id] = img.name
+        valid_images.append(
+            ImageData(
+                id=img.id,
+                camera_id=img.camera_id,
+                name=resolved,
+                c2w=img.c2w,
+            )
+        )
     valid_images.sort(key=lambda x: x.id)
+
     if exclude_image_names is not None:
         valid_images = [
             img
             for img in valid_images
-            if not name_allowed(exclude_image_names, scene_dir.name, img.name)
+            if not _passes_filter(
+                (img.name, raw_name_by_id.get(img.id, img.name)),
+                scene_dir.name,
+                exclude_image_names,
+            )
         ]
 
     target_images = valid_images
@@ -37,7 +92,11 @@ def load_scene_pools(
         target_images = [
             img
             for img in target_images
-            if name_allowed(target_include_image_names, scene_dir.name, img.name)
+            if _passes_filter(
+                (img.name, raw_name_by_id.get(img.id, img.name)),
+                scene_dir.name,
+                target_include_image_names,
+            )
         ]
 
     reference_images = valid_images
@@ -45,7 +104,11 @@ def load_scene_pools(
         reference_images = [
             img
             for img in reference_images
-            if name_allowed(reference_include_image_names, scene_dir.name, img.name)
+            if _passes_filter(
+                (img.name, raw_name_by_id.get(img.id, img.name)),
+                scene_dir.name,
+                reference_include_image_names,
+            )
         ]
 
     return cameras, images_dir, target_images, reference_images
