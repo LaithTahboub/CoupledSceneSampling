@@ -1,16 +1,14 @@
 #!/bin/bash
-# Train on a scene-level split (test scenes are fully unseen during training).
-
 #SBATCH --job-name=css-train-multiscene
-#SBATCH --partition=vulcan-ampere
+#SBATCH --partition=tron
 #SBATCH --ntasks=4
-#SBATCH --mem=48gb
+#SBATCH --mem=32gb
 #SBATCH --gres=gpu:rtxa6000:1
-#SBATCH --account=vulcan-jbhuang
-#SBATCH --qos=vulcan-medium
-#SBATCH --time=1-0:00:00
-#SBATCH --output=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/train_multiscene.out
-#SBATCH --error=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/train_multiscene.err
+##SBATCH --account=vulcan-jbhuang
+##SBATCH --qos=default
+#SBATCH --time=3-0:00:00
+#SBATCH --output=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/train_multiscene_split.out
+#SBATCH --error=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/train_multiscene_split.err
 
 set -euo pipefail
 SCRIPT_DIR="/fs/nexus-scratch/ltahboub/CoupledSceneSampling/scripts"
@@ -20,6 +18,7 @@ SCENES_FILE=${SCENES_FILE:-$MEGASCENES_ROOT/scenes_colmap_ready.txt}
 
 TEST_RATIO=${TEST_RATIO:-0.10}
 SEED=${SEED:-42}
+MAX_SCENES=${MAX_SCENES:-100}
 MIN_TRAIN_SCENES=${MIN_TRAIN_SCENES:-50}
 SPLIT_TAG="test${TEST_RATIO}_seed${SEED}"
 SPLIT_TAG=${SPLIT_TAG//./p}
@@ -33,6 +32,7 @@ python -m css.make_scenes_split \
     --output-dir "$SPLIT_DIR" \
     --test-ratio "$TEST_RATIO" \
     --seed "$SEED" \
+    --max-scenes "$MAX_SCENES" \
     --min-train-scenes "$MIN_TRAIN_SCENES"
 
 TRAIN_SCENES_FILE="$SPLIT_DIR/train_scenes.txt"

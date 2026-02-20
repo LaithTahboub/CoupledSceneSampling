@@ -77,7 +77,14 @@ def _resolve_scenes(args) -> list[str]:
     merged = list(args.scenes or []) + _read_lines(args.scenes_file)
     if not merged:
         raise ValueError("Provide at least one scene via --scenes or --scenes-file")
-    return list(OrderedDict.fromkeys(merged))
+    scenes = list(OrderedDict.fromkeys(merged))
+    max_scenes = getattr(args, "max_scenes", None)
+    if max_scenes is not None and len(scenes) > max_scenes:
+        rng = np.random.RandomState(42)
+        indices = rng.choice(len(scenes), max_scenes, replace=False)
+        indices.sort()
+        scenes = [scenes[i] for i in indices]
+    return scenes
 
 
 def _log_sample(model, dataset, prompt, step, cfg_scale):
@@ -215,6 +222,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--scenes", nargs="*", default=None)
     p.add_argument("--scenes-file", type=str, default=None)
+    p.add_argument("--max-scenes", type=int, default=None, help="Use at most N scenes (randomly sampled if more available)")
     p.add_argument("--output", required=True)
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--batch-size", type=int, default=4)

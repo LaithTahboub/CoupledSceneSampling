@@ -2,13 +2,13 @@
 # Train on many COLMAP-ready scenes with per-scene prompt template.
 
 #SBATCH --job-name=css-train-multiscene
-#SBATCH --partition=vulcan-ampere
+#SBATCH --partition=tron
 #SBATCH --ntasks=4
-#SBATCH --mem=64gb
+#SBATCH --mem=32gb
 #SBATCH --gres=gpu:rtxa6000:1
-#SBATCH --account=vulcan-jbhuang
-#SBATCH --qos=vulcan-medium
-#SBATCH --time=4-0:00:00
+##SBATCH --account=vulcan-jbhuang
+##SBATCH --qos=default
+#SBATCH --time=3-0:00:00
 #SBATCH --output=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/train_multiscene.out
 #SBATCH --error=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/train_multiscene.err
 
@@ -18,6 +18,7 @@ ROOT=${ROOT:-/fs/nexus-scratch/ltahboub/CoupledSceneSampling}
 MEGASCENES_ROOT=${MEGASCENES_ROOT:-$ROOT/MegaScenes}
 SCENES_FILE=${SCENES_FILE:-$MEGASCENES_ROOT/scenes_colmap_ready.txt}
 MIN_SCENES=${MIN_SCENES:-100}
+MAX_SCENES=${MAX_SCENES:-}
 
 EPOCHS=${EPOCHS:-100}
 OUTPUT=${OUTPUT:-checkpoints/pose_sd_multiscene_v1}
@@ -56,26 +57,33 @@ if (( READY_COUNT < MIN_SCENES )); then
     exit 1
 fi
 
-python -m css.train \
-    --scenes-file "$SCENES_FILE" \
-    --output "$OUTPUT" \
-    --epochs "$EPOCHS" \
-    --batch-size "$BATCH_SIZE" \
-    --num-workers "$NUM_WORKERS" \
-    --lr "$LR" \
-    --max-pair-dist "$MAX_PAIR_DIST" \
-    --min-dir-sim "$MIN_DIR_SIM" \
-    --min-ref-spacing "$MIN_REF_SPACING" \
-    --max-triplets "$MAX_TRIPLETS" \
-    --save-every "$SAVE_EVERY" \
-    --keep-checkpoints "$KEEP_CHECKPOINTS" \
-    --prompt "$PROMPT" \
-    --prompt-template "$PROMPT_TEMPLATE" \
-    --unet-train-mode cond \
-    --cond-drop-prob "$COND_DROP_PROB" \
-    --sample-cfg-scale "$SAMPLE_CFG_SCALE" \
-    --min-timestep 0 \
-    --H "$H" \
-    --W "$W" \
-    --wandb-project CoupledSceneSampling \
+TRAIN_ARGS=(
+    --scenes-file "$SCENES_FILE"
+    --output "$OUTPUT"
+    --epochs "$EPOCHS"
+    --batch-size "$BATCH_SIZE"
+    --num-workers "$NUM_WORKERS"
+    --lr "$LR"
+    --max-pair-dist "$MAX_PAIR_DIST"
+    --min-dir-sim "$MIN_DIR_SIM"
+    --min-ref-spacing "$MIN_REF_SPACING"
+    --max-triplets "$MAX_TRIPLETS"
+    --save-every "$SAVE_EVERY"
+    --keep-checkpoints "$KEEP_CHECKPOINTS"
+    --prompt "$PROMPT"
+    --prompt-template "$PROMPT_TEMPLATE"
+    --unet-train-mode cond
+    --cond-drop-prob "$COND_DROP_PROB"
+    --sample-cfg-scale "$SAMPLE_CFG_SCALE"
+    --min-timestep 0
+    --H "$H"
+    --W "$W"
+    --wandb-project CoupledSceneSampling
     --wandb-name "$RUN_NAME"
+)
+
+if [[ -n "$MAX_SCENES" ]]; then
+    TRAIN_ARGS+=(--max-scenes "$MAX_SCENES")
+fi
+
+python -m css.train "${TRAIN_ARGS[@]}"

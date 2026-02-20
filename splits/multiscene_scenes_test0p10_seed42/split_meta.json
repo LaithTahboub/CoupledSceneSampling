@@ -2,9 +2,10 @@
   "scenes_file": "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/MegaScenes/scenes_colmap_ready.txt",
   "seed": 42,
   "test_ratio": 0.1,
-  "total_scenes": 220,
-  "train_scenes": 198,
-  "test_scenes": 22,
+  "max_scenes": 100,
+  "total_scenes": 100,
+  "train_scenes": 90,
+  "test_scenes": 10,
   "train_scenes_file": "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/splits/multiscene_scenes_test0p10_seed42/train_scenes.txt",
   "test_scenes_file": "/fs/nexus-scratch/ltahboub/CoupledSceneSampling/splits/multiscene_scenes_test0p10_seed42/test_scenes.txt"
 }

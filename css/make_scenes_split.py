@@ -29,12 +29,18 @@ def main() -> None:
     p.add_argument("--test-ratio", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--min-train-scenes", type=int, default=1)
+    p.add_argument("--max-scenes", type=int, default=None, help="Cap total scenes before splitting")
     args = p.parse_args()
 
     if not (0.0 <= args.test_ratio < 1.0):
         raise ValueError("--test-ratio must be in [0, 1)")
 
     scenes = _read_scenes(Path(args.scenes_file))
+    if args.max_scenes is not None and len(scenes) > args.max_scenes:
+        rng_sub = np.random.default_rng(args.seed)
+        indices = rng_sub.choice(len(scenes), args.max_scenes, replace=False)
+        indices.sort()
+        scenes = [scenes[i] for i in indices]
     n = len(scenes)
     if n < args.min_train_scenes + 1:
         raise ValueError(f"Need at least {args.min_train_scenes + 1} scenes, found {n}")
@@ -62,6 +68,7 @@ def main() -> None:
         "scenes_file": str(Path(args.scenes_file)),
         "seed": args.seed,
         "test_ratio": args.test_ratio,
+        "max_scenes": args.max_scenes,
         "total_scenes": n,
         "train_scenes": len(train_scenes),
         "test_scenes": len(test_scenes),

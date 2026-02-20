@@ -2,12 +2,12 @@
 # Evaluate held-out test targets (split index) using train-only references.
 
 #SBATCH --job-name=css-eval-mysore-split
-#SBATCH --partition=vulcan-ampere
+#SBATCH --partition=tron
 #SBATCH --ntasks=4
 #SBATCH --mem=32gb
 #SBATCH --gres=gpu:rtxa6000:1
-#SBATCH --account=vulcan-jbhuang
-#SBATCH --qos=vulcan-medium
+##SBATCH --account=vulcan-jbhuang
+##SBATCH --qos=default
 #SBATCH --time=1-0:00:00
 #SBATCH --output=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/test_eval.out
 #SBATCH --error=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/test_eval.err
