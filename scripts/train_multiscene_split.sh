@@ -48,4 +48,5 @@ RUN_NAME=${RUN_NAME:-multiscene-${SPLIT_TAG}}
 OUTPUT=${OUTPUT:-checkpoints/pose_sd_multiscene_${SPLIT_TAG}}
 
 SCENES_FILE="$TRAIN_SCENES_FILE" RUN_NAME="$RUN_NAME" OUTPUT="$OUTPUT" MIN_SCENES=1 \
+SAVE_EVERY=4 KEEP_CHECKPOINTS=5 \
     exec "${SCRIPT_DIR}/train_multiscene.sh"

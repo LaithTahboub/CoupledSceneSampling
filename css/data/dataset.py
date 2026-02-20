@@ -355,9 +355,9 @@ class MegaScenesDataset(Dataset):
         ref2_img = load_image_tensor(images_dir, ref2_name, self.H, self.W)
         target_img = load_image_tensor(images_dir, tgt_name, self.H, self.W)
 
-        plucker_ref1 = self._compute_plucker(ref1_c2w, ref1_c2w, K_ref1)
-        plucker_ref2 = self._compute_plucker(ref1_c2w, ref2_c2w, K_ref2)
-        plucker_target = self._compute_plucker(ref1_c2w, tgt_c2w, K_tgt)
+        # Target-anchored: express ref poses relative to target view
+        plucker_ref1 = self._compute_plucker(tgt_c2w, ref1_c2w, K_ref1)
+        plucker_ref2 = self._compute_plucker(tgt_c2w, ref2_c2w, K_ref2)
 
         out = {
             "ref1_img": ref1_img,
@@ -365,7 +365,6 @@ class MegaScenesDataset(Dataset):
             "target_img": target_img,
             "plucker_ref1": plucker_ref1,
             "plucker_ref2": plucker_ref2,
-            "plucker_target": plucker_target,
             "scene_name": scene_name,
         }
         if self.prompt_template:

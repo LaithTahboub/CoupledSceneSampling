@@ -2,6 +2,10 @@
 Coupled diffusion sampling: SEVA + Pose-Conditioned SD.
 SEVA provides geometry, SD provides prompt-following + reference appearance.
 Coupling harmonizes x0 predictions.
+
+NOTE: This module needs updating for the target-anchored architecture and
+standard CFG (currently uses the old ref1-anchored interface and APG).
+Do not use until updated.
 """
 
 from contextlib import nullcontext

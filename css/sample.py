@@ -25,10 +25,7 @@ def main():
     parser.add_argument("--target-idx", type=int, default=None, help="Target image index (or random if not set)")
     parser.add_argument("--prompt", default="a photo of the Mysore palace", help="Text prompt")
     parser.add_argument("--num-steps", type=int, default=50, help="Sampling steps")
-    parser.add_argument("--cfg-scale", type=float, default=1.0, help="Guidance scale (APG)")
-    parser.add_argument("--apg-eta", type=float, default=0.0, help="APG parallel component weight")
-    parser.add_argument("--apg-momentum", type=float, default=-0.5, help="APG momentum term")
-    parser.add_argument("--apg-norm-threshold", type=float, default=0.0, help="APG norm clipping threshold (0 disables)")
+    parser.add_argument("--cfg-scale", type=float, default=7.5, help="CFG guidance scale")
     parser.add_argument("--max-pair-dist", type=float, default=2.0, help="Max ref-target camera distance")
     parser.add_argument("--min-dir-sim", type=float, default=0.3, help="Min view direction similarity")
     parser.add_argument("--min-ref-spacing", type=float, default=0.3, help="Min distance between refs")
@@ -89,32 +86,20 @@ def main():
     print(f"Selected refs: {ref1_img.name}, {ref2_img.name}")
 
     sample = build_single_sample(cameras, images_dir, ref1_img, ref2_img, target_img, args.H, args.W)
-    ref1_tensor = sample["ref1_img"]
-    ref2_tensor = sample["ref2_img"]
-    target_tensor = sample["target_img"]
-    plucker_ref1 = sample["plucker_ref1"]
-    plucker_ref2 = sample["plucker_ref2"]
-    plucker_target = sample["plucker_target"]
 
-    print(
-        f"\nGenerating with {args.num_steps} steps, "
-        f"guidance={args.cfg_scale}, eta={args.apg_eta}, momentum={args.apg_momentum}"
-    )
+    print(f"\nGenerating with {args.num_steps} steps, cfg_scale={args.cfg_scale}")
     with torch.inference_mode():
         generated = model.sample(
-            ref1_tensor, ref2_tensor,
-            plucker_ref1, plucker_ref2, plucker_target,
+            sample["ref1_img"], sample["ref2_img"],
+            sample["plucker_ref1"], sample["plucker_ref2"],
             prompt=args.prompt,
             num_steps=args.num_steps,
             cfg_scale=args.cfg_scale,
-            apg_eta=args.apg_eta,
-            apg_momentum=args.apg_momentum,
-            apg_norm_threshold=args.apg_norm_threshold,
-            target=(target_tensor if args.noisy_target_start else None),
+            target=(sample["target_img"] if args.noisy_target_start else None),
             start_t=args.start_t,
         )
 
-    grid = build_comparison_grid(ref1_tensor[0], ref2_tensor[0], target_tensor[0], generated[0])
+    grid = build_comparison_grid(sample["ref1_img"][0], sample["ref2_img"][0], sample["target_img"][0], generated[0])
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,9 +108,9 @@ def main():
     print("  [Ref1 | Ref2 | Ground Truth | Generated]")
 
     if args.show_refs:
-        Image.fromarray(to_uint8(ref1_tensor[0])).save(output_path.with_stem(output_path.stem + "_ref1"))
-        Image.fromarray(to_uint8(ref2_tensor[0])).save(output_path.with_stem(output_path.stem + "_ref2"))
-        Image.fromarray(to_uint8(target_tensor[0])).save(output_path.with_stem(output_path.stem + "_gt"))
+        Image.fromarray(to_uint8(sample["ref1_img"][0])).save(output_path.with_stem(output_path.stem + "_ref1"))
+        Image.fromarray(to_uint8(sample["ref2_img"][0])).save(output_path.with_stem(output_path.stem + "_ref2"))
+        Image.fromarray(to_uint8(sample["target_img"][0])).save(output_path.with_stem(output_path.stem + "_gt"))
         Image.fromarray(to_uint8(generated[0])).save(output_path.with_stem(output_path.stem + "_gen"))
         print("Saved individual images")
 

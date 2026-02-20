@@ -25,12 +25,10 @@ MAX_PAIR_DIST=${MAX_PAIR_DIST:-2.0}
 MAX_TRIPLETS=${MAX_TRIPLETS:-1000000}
 BATCH_SIZE=${BATCH_SIZE:-4}
 LR=${LR:-1e-5}
-SAVE_EVERY=${SAVE_EVERY:-20}
+SAVE_EVERY=${SAVE_EVERY:-4}
+KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-5}
 COND_DROP_PROB=${COND_DROP_PROB:-0.1}
-SAMPLE_CFG_SCALE=${SAMPLE_CFG_SCALE:-1.0}
-SAMPLE_APG_ETA=${SAMPLE_APG_ETA:-0.0}
-SAMPLE_APG_MOMENTUM=${SAMPLE_APG_MOMENTUM:--0.5}
-SAMPLE_APG_NORM_THRESHOLD=${SAMPLE_APG_NORM_THRESHOLD:-0.0}
+SAMPLE_CFG_SCALE=${SAMPLE_CFG_SCALE:-7.5}
 H=${H:-512}
 W=${W:-512}
 
@@ -59,13 +57,11 @@ python -m css.train \
     --max-pair-dist "$MAX_PAIR_DIST" \
     --max-triplets "$MAX_TRIPLETS" \
     --save-every "$SAVE_EVERY" \
+    --keep-checkpoints "$KEEP_CHECKPOINTS" \
     --prompt "$PROMPT" \
     --unet-train-mode cond \
     --cond-drop-prob "$COND_DROP_PROB" \
     --sample-cfg-scale "$SAMPLE_CFG_SCALE" \
-    --sample-apg-eta "$SAMPLE_APG_ETA" \
-    --sample-apg-momentum "$SAMPLE_APG_MOMENTUM" \
-    --sample-apg-norm-threshold "$SAMPLE_APG_NORM_THRESHOLD" \
     --min-timestep 0 \
     --exclude-image-list "$SPLIT_DIR/test_images.txt" \
     --target-include-image-list "$SPLIT_DIR/train_images.txt" \

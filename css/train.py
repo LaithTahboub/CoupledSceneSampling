@@ -44,6 +44,19 @@ def _find_latest_checkpoint(output_dir: Path) -> tuple[Path | None, int, int]:
     return best_path, best_epoch, best_step
 
 
+def _cleanup_old_checkpoints(output_dir: Path, keep_latest: int = 5) -> None:
+    """Keep only the N most recent periodic epoch checkpoints."""
+    checkpoints = []
+    for ckpt in output_dir.glob("unet_epoch_*.pt"):
+        m = re.search(r"epoch_(\d+)", ckpt.stem)
+        if m:
+            checkpoints.append((int(m.group(1)), ckpt))
+    checkpoints.sort(key=lambda x: x[0])
+    for _, path in checkpoints[:-keep_latest]:
+        print(f"Removing old checkpoint: {path.name}")
+        path.unlink()
+
+
 def _to_uint8(t: torch.Tensor) -> np.ndarray:
     return ((t.clamp(-1, 1) + 1) / 2 * 255).byte().permute(1, 2, 0).cpu().numpy()
 
@@ -67,7 +80,7 @@ def _resolve_scenes(args) -> list[str]:
     return list(OrderedDict.fromkeys(merged))
 
 
-def _log_sample(model, dataset, prompt, step, cfg_scale, apg_eta, apg_momentum, apg_norm_threshold):
+def _log_sample(model, dataset, prompt, step, cfg_scale):
     try:
         sample = dataset[0]
         model.eval()
@@ -77,11 +90,7 @@ def _log_sample(model, dataset, prompt, step, cfg_scale, apg_eta, apg_momentum, 
             sample["ref2_img"].unsqueeze(0),
             sample["plucker_ref1"].unsqueeze(0),
             sample["plucker_ref2"].unsqueeze(0),
-            sample["plucker_target"].unsqueeze(0),
             prompt=sample_prompt, num_steps=50, cfg_scale=cfg_scale,
-            apg_eta=apg_eta,
-            apg_momentum=apg_momentum,
-            apg_norm_threshold=apg_norm_threshold,
         )
         grid = np.concatenate([
             _to_uint8(sample["ref1_img"]),
@@ -108,13 +117,11 @@ def train(
     num_epochs=100,
     batch_size=4,
     lr=1e-5,
-    save_every=5,
+    save_every=4,
+    keep_checkpoints=5,
     prompt="",
     cond_drop_prob=0.1,
-    sample_cfg_scale=2.0,
-    sample_apg_eta=0.0,
-    sample_apg_momentum=-0.5,
-    sample_apg_norm_threshold=0.0,
+    sample_cfg_scale=7.5,
     min_timestep=0,
     max_timestep=None,
     num_workers=0,
@@ -136,8 +143,6 @@ def train(
     trained_params = (
         [p for p in model.unet.parameters() if p.requires_grad]
         + list(model.ref_encoder.parameters())
-        + list(model.target_pose_encoder.parameters())
-        + list(model.epipolar_attn.parameters())
     )
     optimizer = torch.optim.AdamW(trained_params, lr=lr)
 
@@ -193,17 +198,9 @@ def train(
 
             if (epoch + 1) % save_every == 0:
                 _save_checkpoint(model, output_path / f"unet_epoch_{epoch+1}.pt")
+                _cleanup_old_checkpoints(output_path, keep_latest=keep_checkpoints)
 
-            _log_sample(
-                model,
-                dataset,
-                prompt,
-                global_step,
-                cfg_scale=sample_cfg_scale,
-                apg_eta=sample_apg_eta,
-                apg_momentum=sample_apg_momentum,
-                apg_norm_threshold=sample_apg_norm_threshold,
-            )
+            _log_sample(model, dataset, prompt, global_step, cfg_scale=sample_cfg_scale)
 
     except KeyboardInterrupt:
         print("\n[Interrupted] Saving emergency checkpoint...")
@@ -229,17 +226,15 @@ def main():
     p.add_argument("--min-dir-sim", type=float, default=0.3)
     p.add_argument("--min-ref-spacing", type=float, default=0.3)
     p.add_argument("--max-triplets", type=int, default=10000)
-    p.add_argument("--save-every", type=int, default=5)
+    p.add_argument("--save-every", type=int, default=4)
+    p.add_argument("--keep-checkpoints", type=int, default=5)
     p.add_argument("--H", type=int, default=512)
     p.add_argument("--W", type=int, default=512)
     p.add_argument("--wandb-project", default="css-pose-sd")
     p.add_argument("--wandb-name", default=None)
     p.add_argument("--wandb-id", default=None)
     p.add_argument("--cond-drop-prob", type=float, default=0.1)
-    p.add_argument("--sample-cfg-scale", type=float, default=1.0)
-    p.add_argument("--sample-apg-eta", type=float, default=0.0)
-    p.add_argument("--sample-apg-momentum", type=float, default=-0.5)
-    p.add_argument("--sample-apg-norm-threshold", type=float, default=0.0)
+    p.add_argument("--sample-cfg-scale", type=float, default=7.5)
     p.add_argument("--min-timestep", type=int, default=0)
     p.add_argument("--max-timestep", type=int, default=None)
     p.add_argument("--unet-train-mode", choices=["full", "cond"], default="full")
@@ -264,12 +259,10 @@ def main():
     n_trainable = (
         sum(p.numel() for p in model.unet.parameters() if p.requires_grad)
         + sum(p.numel() for p in model.ref_encoder.parameters())
-        + sum(p.numel() for p in model.target_pose_encoder.parameters())
-        + sum(p.numel() for p in model.epipolar_attn.parameters())
     )
     print(
         f"UNet train mode: {args.unet_train_mode} "
-        f"(trainable params incl. conditioning modules: {n_trainable:,})"
+        f"(trainable params incl. ref_encoder: {n_trainable:,})"
     )
 
     print("Loading dataset...")
@@ -313,12 +306,10 @@ def main():
         args.batch_size,
         args.lr,
         args.save_every,
+        args.keep_checkpoints,
         args.prompt,
         cond_drop_prob=args.cond_drop_prob,
         sample_cfg_scale=args.sample_cfg_scale,
-        sample_apg_eta=args.sample_apg_eta,
-        sample_apg_momentum=args.sample_apg_momentum,
-        sample_apg_norm_threshold=args.sample_apg_norm_threshold,
         min_timestep=args.min_timestep,
         max_timestep=args.max_timestep,
         num_workers=args.num_workers,

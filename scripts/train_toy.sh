@@ -16,22 +16,20 @@ cd /fs/nexus-scratch/ltahboub/CoupledSceneSampling
 
 python -m css.train \
     --scenes MegaScenes/Mysore_Palace \
-    --output checkpoints/pose_sd_toy_overfit_cond_v1 \
+    --output checkpoints/pose_sd_toy_overfit_v1 \
     --epochs 500 \
     --batch-size 2 \
     --lr 5e-5 \
     --max-pair-dist 2.0 \
     --max-triplets 50 \
     --save-every 50 \
+    --keep-checkpoints 5 \
     --cond-drop-prob 0.0 \
     --sample-cfg-scale 1.0 \
-    --sample-apg-eta 0.0 \
-    --sample-apg-momentum -0.5 \
-    --sample-apg-norm-threshold 0.0 \
     --min-timestep 300 \
     --unet-train-mode cond \
     --H 512 \
     --W 512 \
     --wandb-project CoupledSceneSampling \
-    --wandb-name toy-overfit-v4 \
+    --wandb-name toy-overfit-v5 \
     --prompt "a photo of the Mysore palace"

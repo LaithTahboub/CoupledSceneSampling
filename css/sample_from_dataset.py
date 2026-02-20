@@ -1,9 +1,10 @@
 """Sample with dataset triplets."""
 
 import argparse
+from pathlib import Path
+
 import numpy as np
 import torch
-from pathlib import Path
 from PIL import Image
 
 from css.data.dataset import MegaScenesDataset, load_image_name_set
@@ -21,17 +22,13 @@ def main():
     parser.add_argument("--triplet-idx", type=int, default=0, help="Which dataset triplet to use")
     parser.add_argument("--prompt", default="", help="Text prompt")
     parser.add_argument("--num-steps", type=int, default=50, help="Sampling steps")
-    parser.add_argument("--cfg-scale", type=float, default=1.0, help="Guidance scale (APG)")
-    parser.add_argument("--apg-eta", type=float, default=0.0, help="APG parallel component weight")
-    parser.add_argument("--apg-momentum", type=float, default=-0.5, help="APG momentum term")
-    parser.add_argument("--apg-norm-threshold", type=float, default=0.0, help="APG norm clipping threshold (0 disables)")
+    parser.add_argument("--cfg-scale", type=float, default=7.5, help="CFG guidance scale")
     parser.add_argument("--max-pair-dist", type=float, default=2.0)
     parser.add_argument("--max-triplets", type=int, default=10000)
     parser.add_argument("--exclude-image-list", type=str, default=None)
     parser.add_argument("--target-include-image-list", type=str, default=None)
     parser.add_argument("--reference-include-image-list", type=str, default=None)
     parser.add_argument("--output", default="sample_ds.png", help="Output path")
-    parser.add_argument("--show-refs", action="store_true", help="Also save reference images")
     parser.add_argument("--start-t", type=int, default=500, help="t value for noisy-target start")
     parser.add_argument("--noisy-target-start", action="store_true")
     args = parser.parse_args()
@@ -67,26 +64,19 @@ def main():
     sample = dataset[args.triplet_idx]
     print(f"\nUsing triplet {args.triplet_idx}")
 
-    print(
-        f"Generating with {args.num_steps} steps, "
-        f"guidance={args.cfg_scale}, eta={args.apg_eta}, momentum={args.apg_momentum}..."
-    )
+    print(f"Generating with {args.num_steps} steps, cfg_scale={args.cfg_scale}...")
     with torch.inference_mode():
         generated = model.sample(
             sample["ref1_img"].unsqueeze(0),
             sample["ref2_img"].unsqueeze(0),
             sample["plucker_ref1"].unsqueeze(0),
             sample["plucker_ref2"].unsqueeze(0),
-            sample["plucker_target"].unsqueeze(0),
             prompt=args.prompt,
             num_steps=args.num_steps,
             cfg_scale=args.cfg_scale,
-            apg_eta=args.apg_eta,
-            apg_momentum=args.apg_momentum,
-            apg_norm_threshold=args.apg_norm_threshold,
-            target=(sample["target_img"].unsqueeze(0) if args.noisy_target_start else None), 
-            start_t=args.start_t
-        )   
+            target=(sample["target_img"].unsqueeze(0) if args.noisy_target_start else None),
+            start_t=args.start_t,
+        )
 
     grid = np.concatenate([
         _to_uint8(sample["ref1_img"]),

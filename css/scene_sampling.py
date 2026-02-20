@@ -117,9 +117,9 @@ def build_single_sample(
     K_ref2 = build_scaled_intrinsics(cameras[ref2_img.camera_id], H, W)
     K_tgt = build_scaled_intrinsics(cameras[target_img.camera_id], H, W)
 
-    plucker_ref1 = compute_plucker_tensor(ref1_img.c2w, ref1_img.c2w, K_ref1, latent_h, latent_w)
-    plucker_ref2 = compute_plucker_tensor(ref1_img.c2w, ref2_img.c2w, K_ref2, latent_h, latent_w)
-    plucker_target = compute_plucker_tensor(ref1_img.c2w, target_img.c2w, K_tgt, latent_h, latent_w)
+    # Target-anchored: express ref poses relative to target view
+    plucker_ref1 = compute_plucker_tensor(target_img.c2w, ref1_img.c2w, K_ref1, latent_h, latent_w)
+    plucker_ref2 = compute_plucker_tensor(target_img.c2w, ref2_img.c2w, K_ref2, latent_h, latent_w)
 
     return {
         "ref1_img": ref1_tensor.unsqueeze(0),
@@ -127,7 +127,6 @@ def build_single_sample(
         "target_img": target_tensor.unsqueeze(0),
         "plucker_ref1": plucker_ref1.unsqueeze(0),
         "plucker_ref2": plucker_ref2.unsqueeze(0),
-        "plucker_target": plucker_target.unsqueeze(0),
     }
 
 

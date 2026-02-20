@@ -23,8 +23,6 @@ SPLIT_TAG="test${TEST_RATIO}_train${TRAIN_RATIO}_seed${SEED}"
 SPLIT_TAG=${SPLIT_TAG//./p}
 SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/mysore_palace_${SPLIT_TAG}}
 
-# Override this when needed:
-#   CHECKPOINT=/path/to/unet_epoch_100.pt sbatch scripts/test_eval.sh
 OUTPUT=${OUTPUT:-checkpoints/pose_sd_mysore_${SPLIT_TAG}}
 if [[ "$OUTPUT" = /* ]]; then
     DEFAULT_CHECKPOINT="$OUTPUT/unet_final.pt"
@@ -35,10 +33,7 @@ CHECKPOINT=${CHECKPOINT:-$DEFAULT_CHECKPOINT}
 OUT_DIR=${OUT_DIR:-$ROOT/outputs/mysore_palace_split_eval_$(basename "${CHECKPOINT%.*}")}
 PROMPT=${PROMPT:-"a photo of the Mysore palace"}
 NUM_STEPS=${NUM_STEPS:-50}
-CFG_SCALE=${CFG_SCALE:-1.0}
-APG_ETA=${APG_ETA:-0.0}
-APG_MOMENTUM=${APG_MOMENTUM:--0.5}
-APG_NORM_THRESHOLD=${APG_NORM_THRESHOLD:-0.0}
+CFG_SCALE=${CFG_SCALE:-7.5}
 MAX_PAIR_DIST=${MAX_PAIR_DIST:-2.0}
 MIN_DIR_SIM=${MIN_DIR_SIM:-0.3}
 MIN_REF_SPACING=${MIN_REF_SPACING:-0.3}
@@ -75,9 +70,6 @@ ARGS=(
     --prompt "$PROMPT"
     --num-steps "$NUM_STEPS"
     --cfg-scale "$CFG_SCALE"
-    --apg-eta "$APG_ETA"
-    --apg-momentum "$APG_MOMENTUM"
-    --apg-norm-threshold "$APG_NORM_THRESHOLD"
     --max-pair-dist "$MAX_PAIR_DIST"
     --min-dir-sim "$MIN_DIR_SIM"
     --min-ref-spacing "$MIN_REF_SPACING"
