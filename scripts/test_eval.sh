@@ -1,7 +1,7 @@
 #!/bin/bash
 # Evaluate held-out targets for single-scene or multiscene splits.
 
-#SBATCH --job-name=css-eval-mysore-split
+#SBATCH --job-name=css-eval
 #SBATCH --partition=tron
 #SBATCH --ntasks=4
 #SBATCH --mem=32gb
@@ -22,7 +22,7 @@ SEED=${SEED:-42}
 SPLIT_TAG="test${TEST_RATIO}_train${TRAIN_RATIO}_seed${SEED}"
 SPLIT_TAG=${SPLIT_TAG//./p}
 NUM_STEPS=${NUM_STEPS:-50}
-CFG_SCALE=${CFG_SCALE:-7.5}
+CFG_SCALE=${CFG_SCALE:-10}
 MAX_PAIR_DIST=${MAX_PAIR_DIST:-2.0}
 MIN_DIR_SIM=${MIN_DIR_SIM:-0.3}
 MIN_REF_SPACING=${MIN_REF_SPACING:-0.3}
@@ -46,9 +46,9 @@ if [[ "$MULTISCENE" == "1" ]]; then
     EVAL_SEED=${EVAL_SEED:-42}
 
     if [[ "$OUTPUT" = /* ]]; then
-        DEFAULT_CHECKPOINT="$OUTPUT/unet_final.pt"
+        DEFAULT_CHECKPOINT="$OUTPUT/unet_epoch_16.pt"
     else
-        DEFAULT_CHECKPOINT="$ROOT/$OUTPUT/unet_final.pt"
+        DEFAULT_CHECKPOINT="$ROOT/$OUTPUT/unet_epoch_16.pt"
     fi
     CHECKPOINT=${CHECKPOINT:-$DEFAULT_CHECKPOINT}
     OUT_DIR=${OUT_DIR:-$ROOT/outputs/multiscene_split_eval_$(basename "${CHECKPOINT%.*}")}_${MULTI_SPLIT_TAG}
