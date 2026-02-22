@@ -75,6 +75,13 @@ def _find_latest_checkpoint(output_dir: Path) -> Path | None:
             step = int(step_m.group(1)) if step_m else 0
             if epoch > best_epoch or (epoch == best_epoch and step > best_step):
                 best_epoch, best_step, best_path = epoch, step, ckpt
+    final_ckpt = output_dir / "unet_final.pt"
+    if best_path is None and final_ckpt.exists():
+        return final_ckpt
+    if best_path is not None and final_ckpt.exists():
+        # Prefer final checkpoint when it is newer than the latest epoch checkpoint.
+        if final_ckpt.stat().st_mtime > best_path.stat().st_mtime:
+            return final_ckpt
     return best_path
 
 
@@ -202,6 +209,11 @@ def train(
     ema_decay=0.9999,
 ):
     global _save_requested
+    if save_every <= 0:
+        raise ValueError("--save-every must be >= 1")
+    if keep_checkpoints <= 0:
+        raise ValueError("--keep-checkpoints must be >= 1")
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -312,6 +324,14 @@ def train(
             output_path / f"unet_interrupted_epoch{epoch+1}_step{global_step}.pt",
         )
         return
+
+    if num_epochs % save_every != 0:
+        _save_checkpoint(
+            model, optimizer, lr_scheduler, ema,
+            num_epochs, global_step,
+            output_path / f"unet_epoch_{num_epochs}.pt",
+        )
+        _cleanup_old_checkpoints(output_path, keep_latest=keep_checkpoints)
 
     _save_checkpoint(
         model, optimizer, lr_scheduler, ema,

@@ -42,7 +42,7 @@ cd "$ROOT"
 
 if [[ ! -f "$SPLIT_DIR/test_scenes.txt" ]]; then
     echo "Missing test_scenes.txt in $SPLIT_DIR"
-    echo "Run scripts/train_multiscene_split.sh first (or set SPLIT_DIR)."
+    echo "Run scripts/train.sh first (or set SPLIT_DIR)."
     exit 1
 fi
 if [[ ! -f "$CHECKPOINT" ]]; then

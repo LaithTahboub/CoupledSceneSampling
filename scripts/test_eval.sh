@@ -15,7 +15,7 @@
 set -euo pipefail
 
 ROOT=/fs/nexus-scratch/ltahboub/CoupledSceneSampling
-MULTISCENE=${MULTISCENE:-0}
+MULTISCENE=${MULTISCENE:-1}
 TEST_RATIO=${TEST_RATIO:-0.10}
 TRAIN_RATIO=${TRAIN_RATIO:-1.0}
 SEED=${SEED:-42}
@@ -46,16 +46,16 @@ if [[ "$MULTISCENE" == "1" ]]; then
     EVAL_SEED=${EVAL_SEED:-42}
 
     if [[ "$OUTPUT" = /* ]]; then
-        DEFAULT_CHECKPOINT="$OUTPUT/unet_epoch_16.pt"
+        DEFAULT_CHECKPOINT="$OUTPUT/unet_final.pt"
     else
-        DEFAULT_CHECKPOINT="$ROOT/$OUTPUT/unet_epoch_16.pt"
+        DEFAULT_CHECKPOINT="$ROOT/$OUTPUT/unet_final.pt"
     fi
     CHECKPOINT=${CHECKPOINT:-$DEFAULT_CHECKPOINT}
     OUT_DIR=${OUT_DIR:-$ROOT/outputs/multiscene_split_eval_$(basename "${CHECKPOINT%.*}")}_${MULTI_SPLIT_TAG}
 
     if [[ ! -f "$SPLIT_DIR/test_scenes.txt" ]]; then
         echo "Missing test_scenes.txt in $SPLIT_DIR"
-        echo "Run scripts/train_multiscene_split.sh first (or set SPLIT_DIR to an existing split)."
+        echo "Run scripts/train.sh first (or set SPLIT_DIR to an existing split)."
         exit 1
     fi
     if [[ ! -f "$CHECKPOINT" ]]; then
@@ -116,7 +116,7 @@ else
 
     if [[ ! -f "$SPLIT_DIR/train_images.txt" || ! -f "$SPLIT_DIR/test_images.txt" ]]; then
         echo "Missing split files in $SPLIT_DIR"
-        echo "Run scripts/train_split.sh first (or set SPLIT_DIR to an existing split)."
+        echo "Run scripts/train_single_scene.sh first (or set SPLIT_DIR to an existing split)."
         exit 1
     fi
     if [[ ! -f "$CHECKPOINT" ]]; then
