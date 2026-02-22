@@ -114,7 +114,7 @@ class PoseConditionedSD(nn.Module):
     (no pose concat), preserving the pretrained SD initialization.
     """
 
-    def __init__(self, pretrained_model: str = "stabilityai/stable-diffusion-2-1-base", device: str = "cuda"):
+    def __init__(self, pretrained_model: str = "manojb/stable-diffusion-2-1-base", device: str = "cuda"):
         super().__init__()
         self.device = torch.device(device)
 
