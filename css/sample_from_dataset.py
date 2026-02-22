@@ -2,6 +2,7 @@
 
 import argparse
 from pathlib import Path
+from collections import OrderedDict
 
 import numpy as np
 import torch
@@ -15,12 +16,26 @@ def _to_uint8(t: torch.Tensor) -> np.ndarray:
     return ((t.clamp(-1, 1) + 1) / 2 * 255).byte().permute(1, 2, 0).cpu().numpy()
 
 
+def _read_lines(path: str | None) -> list[str]:
+    if path is None:
+        return []
+    out: list[str] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if s and not s.startswith("#"):
+                out.append(s)
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True, help="Path to UNet checkpoint (.pt file)")
-    parser.add_argument("--scene", default="MegaScenes/Mysore_Palace", help="Scene directory")
+    parser.add_argument("--scene", default=None, help="One scene directory")
+    parser.add_argument("--scenes-file", type=str, default=None, help="Optional list of scenes (one per line)")
     parser.add_argument("--triplet-idx", type=int, default=0, help="Which dataset triplet to use")
     parser.add_argument("--prompt", default="", help="Text prompt")
+    parser.add_argument("--prompt-template", type=str, default=None, help='Optional template, e.g. "a photo of {scene}"')
     parser.add_argument("--num-steps", type=int, default=50, help="Sampling steps")
     parser.add_argument("--cfg-scale", type=float, default=7.5, help="CFG guidance scale")
     parser.add_argument("--max-pair-dist", type=float, default=2.0)
@@ -39,19 +54,27 @@ def main():
     model.eval()
     print(f"Loaded checkpoint: {args.checkpoint}")
 
-    print(f"Loading dataset from {args.scene}...")
+    scenes = _read_lines(args.scenes_file)
+    if args.scene is not None:
+        scenes = [args.scene] + scenes
+    if not scenes:
+        scenes = ["MegaScenes/Mysore_Palace"]
+    scenes = list(OrderedDict.fromkeys(scenes))
+
+    print(f"Loading dataset from {len(scenes)} scene(s)...")
     exclude_image_names = load_image_name_set(args.exclude_image_list)
     target_include_image_names = load_image_name_set(args.target_include_image_list)
     reference_include_image_names = load_image_name_set(args.reference_include_image_list)
 
     dataset = MegaScenesDataset(
-        [args.scene],
+        scenes,
         H=512, W=512,
         max_pair_distance=args.max_pair_dist,
         max_triplets_per_scene=args.max_triplets,
         exclude_image_names=exclude_image_names,
         target_include_image_names=target_include_image_names,
         reference_include_image_names=reference_include_image_names,
+        prompt_template=args.prompt_template,
     )
     print(f"Dataset has {len(dataset)} triplets")
     if len(dataset) == 0:
@@ -63,6 +86,8 @@ def main():
 
     sample = dataset[args.triplet_idx]
     print(f"\nUsing triplet {args.triplet_idx}")
+    sample_prompt = args.prompt if args.prompt else sample.get("prompt", "")
+    print(f'Using prompt: "{sample_prompt}"')
 
     print(f"Generating with {args.num_steps} steps, cfg_scale={args.cfg_scale}...")
     with torch.inference_mode():
@@ -71,7 +96,7 @@ def main():
             sample["ref2_img"].unsqueeze(0),
             sample["plucker_ref1"].unsqueeze(0),
             sample["plucker_ref2"].unsqueeze(0),
-            prompt=args.prompt,
+            prompt=sample_prompt,
             num_steps=args.num_steps,
             cfg_scale=args.cfg_scale,
             target=(sample["target_img"].unsqueeze(0) if args.noisy_target_start else None),

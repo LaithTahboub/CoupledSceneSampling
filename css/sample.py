@@ -7,7 +7,11 @@ import numpy as np
 import torch
 from PIL import Image
 
-from css.data.dataset import load_image_name_set
+from css.data.dataset import (
+    clean_scene_prompt_name,
+    load_image_name_set,
+    read_scene_prompt_name,
+)
 from css.models.pose_conditioned_sd import PoseConditionedSD, load_pose_sd_checkpoint
 from css.scene_sampling import (
     build_comparison_grid,
@@ -24,6 +28,7 @@ def main():
     parser.add_argument("--scene", default="MegaScenes/Mysore_Palace", help="Scene directory")
     parser.add_argument("--target-idx", type=int, default=None, help="Target image index (or random if not set)")
     parser.add_argument("--prompt", default="a photo of the Mysore palace", help="Text prompt")
+    parser.add_argument("--prompt-template", type=str, default=None, help='Optional template, e.g. "a photo of {scene}"')
     parser.add_argument("--num-steps", type=int, default=50, help="Sampling steps")
     parser.add_argument("--cfg-scale", type=float, default=7.5, help="CFG guidance scale")
     parser.add_argument("--max-pair-dist", type=float, default=2.0, help="Max ref-target camera distance")
@@ -41,6 +46,10 @@ def main():
     args = parser.parse_args()
 
     scene_dir = Path(args.scene)
+    prompt = args.prompt
+    if args.prompt_template is not None and args.prompt == parser.get_default("prompt"):
+        scene_text = clean_scene_prompt_name(read_scene_prompt_name(scene_dir))
+        prompt = args.prompt_template.format(scene=scene_text) if "{scene}" in args.prompt_template else args.prompt_template
 
     print("Loading model...")
     model = PoseConditionedSD()
@@ -87,12 +96,12 @@ def main():
 
     sample = build_single_sample(cameras, images_dir, ref1_img, ref2_img, target_img, args.H, args.W)
 
-    print(f"\nGenerating with {args.num_steps} steps, cfg_scale={args.cfg_scale}")
+    print(f'\nGenerating with {args.num_steps} steps, cfg_scale={args.cfg_scale}, prompt="{prompt}"')
     with torch.inference_mode():
         generated = model.sample(
             sample["ref1_img"], sample["ref2_img"],
             sample["plucker_ref1"], sample["plucker_ref2"],
-            prompt=args.prompt,
+            prompt=prompt,
             num_steps=args.num_steps,
             cfg_scale=args.cfg_scale,
             target=(sample["target_img"] if args.noisy_target_start else None),
