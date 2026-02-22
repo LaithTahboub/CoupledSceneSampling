@@ -1,4 +1,15 @@
-"""MegaScenes dataset for pose-conditioned SD training."""
+"""MegaScenes dataset for pose-conditioned SD training.
+
+Fixes applied:
+- Intrinsics are explicitly normalized to [0,1] before calling get_plucker_coordinates,
+  removing dependence on SEVA's fragile auto-detection heuristic.
+- Images are center-cropped then resized instead of stretched, so intrinsics remain
+  geometrically valid for non-square source images.
+- Intrinsics scaling accounts for center-crop offset.
+- Plucker rays are generated at the reference camera's pixel grid (spatially aligned
+  with ref latent), using reference intrinsics.  The anchor is the target camera.
+  This is correct: extrinsics_src = w2c_target (anchor), extrinsics = w2c_ref (ray grid).
+"""
 
 from pathlib import Path
 
@@ -79,15 +90,49 @@ def read_scene_prompt_name(scene_dir: Path) -> str:
     return scene_dir.name
 
 
-def load_image_tensor(images_dir: Path, image_name: str, H: int, W: int) -> torch.Tensor:
+def _center_crop_and_resize(pil_img: Image.Image, H: int, W: int) -> tuple[Image.Image, float, float]:
+    """Center-crop to target aspect ratio, then resize.
+
+    Returns:
+        (cropped_resized_image, crop_offset_x, crop_offset_y)
+        where offsets are in *original* pixel coordinates.
+    """
+    src_w, src_h = pil_img.size
+    target_aspect = W / H
+    src_aspect = src_w / src_h
+
+    if src_aspect > target_aspect:
+        # Source is wider: crop horizontally
+        new_w = int(src_h * target_aspect)
+        offset_x = (src_w - new_w) // 2
+        offset_y = 0
+        pil_img = pil_img.crop((offset_x, 0, offset_x + new_w, src_h))
+    elif src_aspect < target_aspect:
+        # Source is taller: crop vertically
+        new_h = int(src_w / target_aspect)
+        offset_x = 0
+        offset_y = (src_h - new_h) // 2
+        pil_img = pil_img.crop((0, offset_y, src_w, offset_y + new_h))
+    else:
+        offset_x, offset_y = 0, 0
+
+    pil_img = pil_img.resize((W, H), Image.LANCZOS)
+    return pil_img, float(offset_x), float(offset_y)
+
+
+def load_image_tensor(images_dir: Path, image_name: str, H: int, W: int) -> tuple[torch.Tensor, int, int]:
+    """Load, center-crop, resize to (H, W).  Returns (tensor, orig_w, orig_h)."""
     path = images_dir / image_name
     try:
         with Image.open(path) as pil:
-            rgb = pil.convert("RGB").resize((W, H))
-            arr = np.array(rgb, dtype=np.float32) / 255.0
+            rgb = pil.convert("RGB")
+            orig_w, orig_h = rgb.size
+            cropped, _, _ = _center_crop_and_resize(rgb, H, W)
+            arr = np.array(cropped, dtype=np.float32) / 255.0
     except Exception as e:
         raise ImageLoadError(path, e) from e
-    return torch.from_numpy(arr).permute(2, 0, 1) * 2 - 1
+    tensor = torch.from_numpy(arr).permute(2, 0, 1) * 2 - 1
+    return tensor, orig_w, orig_h
 
 
 def _index_scene_images(images_dir: Path) -> tuple[set[str], dict[str, str]]:
@@ -111,28 +156,92 @@ def _resolve_image_name(image_name: str, rel_set: set[str], unique_basename: dic
     return unique_basename.get(Path(norm).name)
 
 
-def build_scaled_intrinsics(cam: Camera, H: int, W: int) -> np.ndarray:
+def build_cropped_scaled_intrinsics(cam: Camera, H: int, W: int) -> np.ndarray:
+    """Build intrinsics for center-crop + resize from (cam.width, cam.height) to (W, H).
+
+    Steps:
+    1. Start with original K.
+    2. Adjust principal point for center-crop offset.
+    3. Scale for resize from cropped size to (W, H).
+    """
     K = cam.K.copy()
-    K[0] *= W / cam.width
-    K[1] *= H / cam.height
+    src_w, src_h = cam.width, cam.height
+    target_aspect = W / H
+    src_aspect = src_w / src_h
+
+    if src_aspect > target_aspect:
+        # Horizontal crop
+        new_w = int(src_h * target_aspect)
+        offset_x = (src_w - new_w) / 2.0
+        K[0, 2] -= offset_x  # shift cx
+        # Scale from (new_w, src_h) -> (W, H)
+        K[0] *= W / new_w
+        K[1] *= H / src_h
+    elif src_aspect < target_aspect:
+        # Vertical crop
+        new_h = int(src_w / target_aspect)
+        offset_y = (src_h - new_h) / 2.0
+        K[1, 2] -= offset_y  # shift cy
+        # Scale from (src_w, new_h) -> (W, H)
+        K[0] *= W / src_w
+        K[1] *= H / new_h
+    else:
+        # Same aspect: just resize
+        K[0] *= W / src_w
+        K[1] *= H / src_h
+
     return K
 
 
+def normalize_intrinsics(K: np.ndarray, H: int, W: int) -> np.ndarray:
+    """Normalize intrinsics to resolution-independent [0,1] coordinates.
+
+    Divides fx, cx by W and fy, cy by H so that principal point is in [0,1].
+    """
+    K_norm = K.copy()
+    K_norm[0, :] /= W  # fx, skew, cx
+    K_norm[1, :] /= H  # fy, 0,    cy
+    return K_norm
+
+
 def compute_plucker_tensor(
-    c2w_src: np.ndarray,
-    c2w_tgt: np.ndarray,
-    K_tgt: np.ndarray,
+    c2w_anchor: np.ndarray,
+    c2w_ray_cam: np.ndarray,
+    K_ray_cam: np.ndarray,
+    H: int,
+    W: int,
     latent_h: int,
     latent_w: int,
 ) -> torch.Tensor:
-    c2w_s = to_hom_pose(torch.from_numpy(c2w_src).float().unsqueeze(0))
-    c2w_t = to_hom_pose(torch.from_numpy(c2w_tgt).float().unsqueeze(0))
-    w2c_s = torch.linalg.inv(c2w_s)
-    w2c_t = torch.linalg.inv(c2w_t)
-    K_t = torch.from_numpy(K_tgt).float().unsqueeze(0)
+    """Compute Plucker ray map at ray_cam's pixel grid, relative to anchor camera.
+
+    Args:
+        c2w_anchor: 4x4 camera-to-world of the anchor (target) camera.
+        c2w_ray_cam: 4x4 camera-to-world of the camera whose pixel grid defines rays.
+        K_ray_cam: 3x3 intrinsics of ray_cam, at full image resolution (H, W).
+        H, W: full image resolution.
+        latent_h, latent_w: spatial size of the output Plucker map.
+
+    Returns:
+        Plucker map of shape (6, latent_h, latent_w).
+    """
+    # Convert c2w -> w2c
+    c2w_a = to_hom_pose(torch.from_numpy(c2w_anchor).float().unsqueeze(0))
+    c2w_r = to_hom_pose(torch.from_numpy(c2w_ray_cam).float().unsqueeze(0))
+    w2c_anchor = torch.linalg.inv(c2w_a)
+    w2c_ray = torch.linalg.inv(c2w_r)
+
+    # Normalize intrinsics to [0,1] *before* calling get_plucker_coordinates
+    # so we don't depend on the auto-detection heuristic inside SEVA.
+    K_norm = normalize_intrinsics(K_ray_cam, H, W)
+    K_t = torch.from_numpy(K_norm).float().unsqueeze(0)
+
+    # extrinsics_src = anchor's w2c  (the function inverts it to get c2w_anchor)
+    # extrinsics = ray_cam's w2c     (the pixel grid camera, gets relative pose)
+    # intrinsics = ray_cam's K       (defines the pixel grid)
     plucker = get_plucker_coordinates(
-        extrinsics_src=w2c_s[0],
-        extrinsics=w2c_t,
+        extrinsics_src=w2c_anchor[0],
+        extrinsics=w2c_ray,
         intrinsics=K_t,
         target_size=[latent_h, latent_w],
     )
@@ -245,9 +354,7 @@ class MegaScenesDataset(Dataset):
                 ref_dir = self._get_viewing_direction(ref.c2w)
 
                 distance = np.linalg.norm(ref_pos - target_pos)
-
                 dir_sim = np.dot(target_dir, ref_dir)
-
                 score = distance * (2.0 - dir_sim)
                 relaxed_candidates.append((score, ref))
 
@@ -351,11 +458,15 @@ class MegaScenesDataset(Dataset):
             self._bad_triplet_indices.add(idx)
             raise ImageLoadError(Path(bad_path), RuntimeError("Triplet references previously failed image"))
 
-        ref1_img = load_image_tensor(images_dir, ref1_name, self.H, self.W)
-        ref2_img = load_image_tensor(images_dir, ref2_name, self.H, self.W)
-        target_img = load_image_tensor(images_dir, tgt_name, self.H, self.W)
+        ref1_img, _, _ = load_image_tensor(images_dir, ref1_name, self.H, self.W)
+        ref2_img, _, _ = load_image_tensor(images_dir, ref2_name, self.H, self.W)
+        target_img, _, _ = load_image_tensor(images_dir, tgt_name, self.H, self.W)
 
-        # Target-anchored: express ref poses relative to target view
+        # Target-anchored Plucker rays:
+        #   anchor = target camera (extrinsics_src)
+        #   ray grid = reference camera (extrinsics)
+        #   intrinsics = reference camera's K (matches the pixel grid)
+        # The Plucker map is spatially aligned with the reference image/latent.
         plucker_ref1 = self._compute_plucker(tgt_c2w, ref1_c2w, K_ref1)
         plucker_ref2 = self._compute_plucker(tgt_c2w, ref2_c2w, K_ref2)
 
@@ -402,7 +513,13 @@ class MegaScenesDataset(Dataset):
         ) from last_error
 
     def _build_K(self, cam: Camera) -> np.ndarray:
-        return build_scaled_intrinsics(cam, self.H, self.W)
+        """Build intrinsics adjusted for center-crop + resize to (self.W, self.H)."""
+        return build_cropped_scaled_intrinsics(cam, self.H, self.W)
 
-    def _compute_plucker(self, c2w_src: np.ndarray, c2w_tgt: np.ndarray, K_tgt: np.ndarray) -> torch.Tensor:
-        return compute_plucker_tensor(c2w_src, c2w_tgt, K_tgt, self.latent_h, self.latent_w)
+    def _compute_plucker(self, c2w_anchor: np.ndarray, c2w_ray_cam: np.ndarray, K_ray_cam: np.ndarray) -> torch.Tensor:
+        """Plucker map at ray_cam's pixel grid, anchored to target camera."""
+        return compute_plucker_tensor(
+            c2w_anchor, c2w_ray_cam, K_ray_cam,
+            self.H, self.W,
+            self.latent_h, self.latent_w,
+        )

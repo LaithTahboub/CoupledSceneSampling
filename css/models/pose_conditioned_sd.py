@@ -6,7 +6,19 @@ Architecture:
 - Plucker rays are target-anchored: refs' poses are expressed relative to target
 - Cross-attention context: [text_tokens, ref1_tokens, ref2_tokens]
 - CFG: unconditional = null text + zero ref tokens (truly unconditional)
+
+Fixes applied:
+- Conditioning drop: only mask-based zeroing on encoder output, never zero encoder inputs
+- Train/inference unconditional mismatch resolved
+- EMA support added
+- Checkpoint saves/loads optimizer, LR scheduler, EMA, epoch, step
+- Device stored as torch.device for robustness
+- cross_attention_dim read from UNet config instead of hardcoded
+- configure_trainable iterates named_parameters not named_modules
+- get_trainable_parameters helper added
 """
+
+from __future__ import annotations
 
 from os import PathLike
 from collections.abc import Sequence
@@ -19,6 +31,10 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from tqdm import tqdm
 
 
+# ---------------------------------------------------------------------------
+# Reference encoder
+# ---------------------------------------------------------------------------
+
 class ReferenceEncoder(nn.Module):
     """Encode (reference latent + Plucker) into cross-attention tokens.
 
@@ -26,7 +42,7 @@ class ReferenceEncoder(nn.Module):
     Output: tokens (B, N, output_dim) where N = (H/4)*(W/4).
     """
 
-    def __init__(self, latent_dim=4, plucker_dim=6, hidden_dim=768, output_dim=1024):
+    def __init__(self, latent_dim: int = 4, plucker_dim: int = 6, hidden_dim: int = 768, output_dim: int = 1024):
         super().__init__()
         in_channels = latent_dim + plucker_dim
 
@@ -49,6 +65,47 @@ class ReferenceEncoder(nn.Module):
         return feat.flatten(2).permute(0, 2, 1)
 
 
+# ---------------------------------------------------------------------------
+# EMA
+# ---------------------------------------------------------------------------
+
+class EMAModel:
+    """Exponential Moving Average of model parameters."""
+
+    def __init__(self, parameters: list[nn.Parameter], decay: float = 0.9999):
+        self.decay = decay
+        self.shadow = [p.clone().detach() for p in parameters]
+        self.backup: list[torch.Tensor] = []
+
+    @torch.no_grad()
+    def update(self, parameters: list[nn.Parameter]):
+        for s, p in zip(self.shadow, parameters):
+            s.lerp_(p.data, 1.0 - self.decay)
+
+    def apply_shadow(self, parameters: list[nn.Parameter]):
+        """Replace model params with EMA params (for eval/sampling)."""
+        self.backup = [p.data.clone() for p in parameters]
+        for s, p in zip(self.shadow, parameters):
+            p.data.copy_(s)
+
+    def restore(self, parameters: list[nn.Parameter]):
+        """Restore original model params after eval."""
+        for b, p in zip(self.backup, parameters):
+            p.data.copy_(b)
+        self.backup = []
+
+    def state_dict(self) -> dict:
+        return {"shadow": self.shadow, "decay": self.decay}
+
+    def load_state_dict(self, state_dict: dict):
+        self.shadow = state_dict["shadow"]
+        self.decay = state_dict["decay"]
+
+
+# ---------------------------------------------------------------------------
+# Main model
+# ---------------------------------------------------------------------------
+
 class PoseConditionedSD(nn.Module):
     """Stable Diffusion with two-reference cross-attention conditioning.
 
@@ -57,20 +114,22 @@ class PoseConditionedSD(nn.Module):
     (no pose concat), preserving the pretrained SD initialization.
     """
 
-    def __init__(self, pretrained_model: str = "manojb/stable-diffusion-2-1-base", device: str = "cuda"):
+    def __init__(self, pretrained_model: str = "stabilityai/stable-diffusion-2-1-base", device: str = "cuda"):
         super().__init__()
-        self.device = device
+        self.device = torch.device(device)
 
-        self.vae = AutoencoderKL.from_pretrained(pretrained_model, subfolder="vae").to(device)
-        self.unet = UNet2DConditionModel.from_pretrained(pretrained_model, subfolder="unet").to(device)
-        self.text_encoder = CLIPTextModel.from_pretrained(pretrained_model, subfolder="text_encoder").to(device)
+        self.vae = AutoencoderKL.from_pretrained(pretrained_model, subfolder="vae").to(self.device)
+        self.unet = UNet2DConditionModel.from_pretrained(pretrained_model, subfolder="unet").to(self.device)
+        self.text_encoder = CLIPTextModel.from_pretrained(pretrained_model, subfolder="text_encoder").to(self.device)
         self.tokenizer = CLIPTokenizer.from_pretrained(pretrained_model, subfolder="tokenizer")
         self.scheduler = DDPMScheduler.from_pretrained(pretrained_model, subfolder="scheduler")
 
         self.vae.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
 
-        self.ref_encoder = ReferenceEncoder().to(device)
+        # Read cross-attention dim from UNet config instead of hardcoding
+        cross_attn_dim = self.unet.config.cross_attention_dim
+        self.ref_encoder = ReferenceEncoder(output_dim=cross_attn_dim).to(self.device)
         self._cache_null_embeddings()
 
     def configure_trainable(self, unet_train_mode: str = "full") -> None:
@@ -81,9 +140,17 @@ class PoseConditionedSD(nn.Module):
             raise ValueError(f"Unknown unet_train_mode: {unet_train_mode}")
         self.unet.requires_grad_(False)
         self.unet.conv_in.requires_grad_(True)
-        for name, module in self.unet.named_modules():
+        # Enable gradients on individual parameters whose name contains "attn2"
+        for name, param in self.unet.named_parameters():
             if "attn2" in name:
-                module.requires_grad_(True)
+                param.requires_grad_(True)
+
+    def get_trainable_parameters(self) -> list[nn.Parameter]:
+        """Return all parameters that require gradients (UNet + ref_encoder)."""
+        return (
+            [p for p in self.unet.parameters() if p.requires_grad]
+            + list(self.ref_encoder.parameters())
+        )
 
     def _cache_null_embeddings(self):
         with torch.no_grad():
@@ -135,17 +202,32 @@ class PoseConditionedSD(nn.Module):
         plucker_ref2: torch.Tensor,
         text_cond: torch.Tensor,
         text_uncond: torch.Tensor | None = None,
-        ref_keep_mask: torch.Tensor | None = None,
+        ref_drop_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Build cross-attention context tensors.
+
+        The ref encoder always sees real reference data.  Conditioning dropout
+        is implemented by masking the *output* tokens to zero, so the
+        unconditional signal seen during training exactly matches the
+        ``torch.zeros_like(ref_tokens)`` used at inference time.
+
+        Args:
+            ref_drop_mask: (B,) bool tensor.  ``True`` = drop this sample's
+                ref tokens (replace with zeros for unconditional training).
+        """
         ref_tokens = self._encode_refs(ref1_latent, ref2_latent, plucker_ref1, plucker_ref2)
-        if ref_keep_mask is not None:
-            keep = ref_keep_mask.to(ref_tokens.dtype).view(ref_tokens.shape[0], 1, 1)
+
+        # Training conditioning dropout: zero output tokens for dropped samples
+        if ref_drop_mask is not None and ref_drop_mask.any():
+            keep = (~ref_drop_mask).to(ref_tokens.dtype).view(-1, 1, 1)
             ref_tokens = ref_tokens * keep
 
         cond_context = torch.cat([text_cond, ref_tokens], dim=1)
+
         if text_uncond is None:
             return cond_context, None
 
+        # Inference CFG: unconditional branch uses zero ref tokens
         uncond_context = torch.cat([text_uncond, torch.zeros_like(ref_tokens)], dim=1)
         return cond_context, uncond_context
 
@@ -158,11 +240,11 @@ class PoseConditionedSD(nn.Module):
         plucker_ref1: torch.Tensor,
         plucker_ref2: torch.Tensor,
         text_emb: torch.Tensor,
-        ref_keep_mask: torch.Tensor | None = None,
+        ref_drop_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         cond_context, _ = self.build_conditioning_contexts(
             ref1_latent, ref2_latent, plucker_ref1, plucker_ref2,
-            text_cond=text_emb, ref_keep_mask=ref_keep_mask,
+            text_cond=text_emb, ref_drop_mask=ref_drop_mask,
         )
         return self.unet(noisy_target, timesteps, encoder_hidden_states=cond_context).sample
 
@@ -203,32 +285,29 @@ class PoseConditionedSD(nn.Module):
                 raise ValueError(f"Prompt batch size mismatch: got {len(prompt_list)} prompts for batch size {B}")
             text_emb = self.get_text_embeddings(prompt_list)
 
-        drop_mask = None
+        # --- Conditioning dropout (joint text + ref) for CFG training ---
+        # Text: replaced with null embedding.
+        # Refs: encoder always sees real data; output tokens are zeroed via ref_drop_mask.
+        # This ensures the unconditional signal matches inference exactly.
+        ref_drop_mask = None
         if self.training and cond_drop_prob > 0:
-            drop_mask = torch.rand(B, device=self.device) < cond_drop_prob
-            if drop_mask.any():
-                num_drop = int(drop_mask.sum().item())
+            ref_drop_mask = torch.rand(B, device=self.device) < cond_drop_prob
+            if ref_drop_mask.any():
+                num_drop = int(ref_drop_mask.sum().item())
                 text_emb = text_emb.clone()
-                text_emb[drop_mask] = self.null_text_emb.expand(num_drop, -1, -1)
-                ref1_latent = ref1_latent.clone()
-                ref2_latent = ref2_latent.clone()
-                plucker_ref1 = plucker_ref1.clone()
-                plucker_ref2 = plucker_ref2.clone()
-                ref1_latent[drop_mask] = 0
-                ref2_latent[drop_mask] = 0
-                plucker_ref1[drop_mask] = 0
-                plucker_ref2[drop_mask] = 0
+                text_emb[ref_drop_mask] = self.null_text_emb.expand(num_drop, -1, -1)
+            else:
+                # No samples were dropped; pass None so we skip the mask logic
+                ref_drop_mask = None
 
-        loss = F.mse_loss(
-            self.forward(
-                noisy_target, timesteps,
-                ref1_latent, ref2_latent,
-                plucker_ref1, plucker_ref2,
-                text_emb,
-                ref_keep_mask=(None if drop_mask is None else ~drop_mask),
-            ),
-            noise,
+        noise_pred = self.forward(
+            noisy_target, timesteps,
+            ref1_latent, ref2_latent,
+            plucker_ref1, plucker_ref2,
+            text_emb,
+            ref_drop_mask=ref_drop_mask,
         )
+        loss = F.mse_loss(noise_pred, noise)
         return loss
 
     @torch.inference_mode()
@@ -292,20 +371,61 @@ class PoseConditionedSD(nn.Module):
         return self.decode_latent(latent)
 
 
-def save_pose_sd_checkpoint(model: PoseConditionedSD, checkpoint_path: str | PathLike) -> None:
-    torch.save(
-        {
-            "unet": model.unet.state_dict(),
-            "ref_encoder": model.ref_encoder.state_dict(),
-        },
-        checkpoint_path,
-    )
+# ---------------------------------------------------------------------------
+# Checkpoint I/O
+# ---------------------------------------------------------------------------
+
+def save_pose_sd_checkpoint(
+    model: PoseConditionedSD,
+    checkpoint_path: str | PathLike,
+    optimizer: torch.optim.Optimizer | None = None,
+    lr_scheduler: object | None = None,
+    ema: EMAModel | None = None,
+    epoch: int = 0,
+    global_step: int = 0,
+) -> None:
+    state: dict = {
+        "unet": model.unet.state_dict(),
+        "ref_encoder": model.ref_encoder.state_dict(),
+        "epoch": epoch,
+        "global_step": global_step,
+    }
+    if optimizer is not None:
+        state["optimizer"] = optimizer.state_dict()
+    if lr_scheduler is not None and hasattr(lr_scheduler, "state_dict"):
+        state["lr_scheduler"] = lr_scheduler.state_dict()
+    if ema is not None:
+        state["ema"] = ema.state_dict()
+    torch.save(state, checkpoint_path)
 
 
-def load_pose_sd_checkpoint(model: PoseConditionedSD, checkpoint_path: str | PathLike, device: str) -> None:
+def load_pose_sd_checkpoint(
+    model: PoseConditionedSD,
+    checkpoint_path: str | PathLike,
+    device: str,
+    optimizer: torch.optim.Optimizer | None = None,
+    lr_scheduler: object | None = None,
+    ema: EMAModel | None = None,
+) -> dict:
+    """Load checkpoint.  Returns ``{"epoch": int, "global_step": int}``."""
     state = torch.load(checkpoint_path, map_location=device)
-    if isinstance(state, dict) and "unet" in state:
-        model.unet.load_state_dict(state["unet"])
-        model.ref_encoder.load_state_dict(state["ref_encoder"])
-    else:
+
+    # Handle legacy checkpoints that are just a raw state_dict
+    if not isinstance(state, dict) or "unet" not in state:
         model.unet.load_state_dict(state)
+        return {"epoch": 0, "global_step": 0}
+
+    model.unet.load_state_dict(state["unet"])
+    model.ref_encoder.load_state_dict(state["ref_encoder"])
+
+    if optimizer is not None and "optimizer" in state:
+        optimizer.load_state_dict(state["optimizer"])
+    if lr_scheduler is not None and "lr_scheduler" in state and hasattr(lr_scheduler, "load_state_dict"):
+        lr_scheduler.load_state_dict(state["lr_scheduler"])
+    if ema is not None and "ema" in state:
+        ema.load_state_dict(state["ema"])
+
+    return {
+        "epoch": state.get("epoch", 0),
+        "global_step": state.get("global_step", 0),
+    }
