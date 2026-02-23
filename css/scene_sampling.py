@@ -7,7 +7,7 @@ import torch
 
 from css.data.colmap_reader import Camera, ImageData, read_scene
 from css.data.dataset import (
-    build_scaled_intrinsics,
+    build_cropped_scaled_intrinsics,
     compute_plucker_tensor,
     load_image_tensor,
     name_allowed,
@@ -172,17 +172,16 @@ def build_single_sample(
 ) -> dict[str, torch.Tensor]:
     latent_h, latent_w = H // 8, W // 8
 
-    ref1_tensor = load_image_tensor(images_dir, ref1_img.name, H, W)
-    ref2_tensor = load_image_tensor(images_dir, ref2_img.name, H, W)
-    target_tensor = load_image_tensor(images_dir, target_img.name, H, W)
+    ref1_tensor, _, _ = load_image_tensor(images_dir, ref1_img.name, H, W)
+    ref2_tensor, _, _ = load_image_tensor(images_dir, ref2_img.name, H, W)
+    target_tensor, _, _ = load_image_tensor(images_dir, target_img.name, H, W)
 
-    K_ref1 = build_scaled_intrinsics(cameras[ref1_img.camera_id], H, W)
-    K_ref2 = build_scaled_intrinsics(cameras[ref2_img.camera_id], H, W)
-    K_tgt = build_scaled_intrinsics(cameras[target_img.camera_id], H, W)
+    K_ref1 = build_cropped_scaled_intrinsics(cameras[ref1_img.camera_id], H, W)
+    K_ref2 = build_cropped_scaled_intrinsics(cameras[ref2_img.camera_id], H, W)
 
     # Target-anchored: express ref poses relative to target view
-    plucker_ref1 = compute_plucker_tensor(target_img.c2w, ref1_img.c2w, K_ref1, latent_h, latent_w)
-    plucker_ref2 = compute_plucker_tensor(target_img.c2w, ref2_img.c2w, K_ref2, latent_h, latent_w)
+    plucker_ref1 = compute_plucker_tensor(target_img.c2w, ref1_img.c2w, K_ref1, H, W, latent_h, latent_w)
+    plucker_ref2 = compute_plucker_tensor(target_img.c2w, ref2_img.c2w, K_ref2, H, W, latent_h, latent_w)
 
     return {
         "ref1_img": ref1_tensor.unsqueeze(0),
