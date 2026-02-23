@@ -129,7 +129,6 @@ class PoseConditionedSD(nn.Module):
         self.vae.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
 
-        # Read cross-attention dim from UNet config instead of hardcoding
         cross_attn_dim = self.unet.config.cross_attention_dim
         self.ref_encoder = ReferenceEncoder(output_dim=cross_attn_dim).to(self.device)
         self._cache_null_embeddings()
