@@ -31,6 +31,11 @@ def main():
     parser.add_argument("--prompt-template", type=str, default=None, help='Optional template, e.g. "a photo of {scene}"')
     parser.add_argument("--num-steps", type=int, default=50, help="Sampling steps")
     parser.add_argument("--cfg-scale", type=float, default=7.5, help="CFG guidance scale")
+    parser.add_argument("--apg", action="store_true", help="Use APG guidance instead of vanilla CFG")
+    parser.add_argument("--apg-eta", type=float, default=0.0, help="APG eta (ignored unless --apg)")
+    parser.add_argument("--apg-momentum", type=float, default=-0.5, help="APG momentum (ignored unless --apg)")
+    parser.add_argument("--apg-norm-threshold", type=float, default=0.0, help="APG norm threshold (ignored unless --apg)")
+    parser.add_argument("--apg-eps", type=float, default=1e-12, help="APG epsilon (ignored unless --apg)")
     parser.add_argument("--max-pair-dist", type=float, default=2.0, help="Max ref-target camera distance")
     parser.add_argument("--min-dir-sim", type=float, default=0.3, help="Min view direction similarity")
     parser.add_argument("--min-ref-spacing", type=float, default=0.3, help="Min distance between refs")
@@ -96,7 +101,11 @@ def main():
 
     sample = build_single_sample(cameras, images_dir, ref1_img, ref2_img, target_img, args.H, args.W)
 
-    print(f'\nGenerating with {args.num_steps} steps, cfg_scale={args.cfg_scale}, prompt="{prompt}"')
+    guidance_mode = "apg" if args.apg else "cfg"
+    print(
+        f'\nGenerating with {args.num_steps} steps, guidance={guidance_mode}, '
+        f'cfg_scale={args.cfg_scale}, prompt="{prompt}"'
+    )
     with torch.inference_mode():
         generated = model.sample(
             sample["ref1_img"], sample["ref2_img"],
@@ -106,6 +115,11 @@ def main():
             cfg_scale=args.cfg_scale,
             target=(sample["target_img"] if args.noisy_target_start else None),
             start_t=args.start_t,
+            use_apg=args.apg,
+            apg_eta=args.apg_eta,
+            apg_momentum=args.apg_momentum,
+            apg_norm_threshold=args.apg_norm_threshold,
+            apg_eps=args.apg_eps,
         )
 
     grid = build_comparison_grid(sample["ref1_img"][0], sample["ref2_img"][0], sample["target_img"][0], generated[0])

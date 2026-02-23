@@ -30,6 +30,8 @@ from diffusers import AutoencoderKL, UNet2DConditionModel, DDPMScheduler
 from transformers import CLIPTextModel, CLIPTokenizer
 from tqdm import tqdm
 
+from css.models.apg import AdaptiveProjectedGuidance
+
 
 # ---------------------------------------------------------------------------
 # Reference encoder
@@ -322,6 +324,11 @@ class PoseConditionedSD(nn.Module):
         cfg_scale: float = 7.5,
         target: torch.Tensor | None = None,
         start_t: int = 1000,
+        use_apg: bool = False,
+        apg_eta: float = 0.0,
+        apg_momentum: float = -0.5,
+        apg_norm_threshold: float = 0.0,
+        apg_eps: float = 1e-12,
     ) -> torch.Tensor:
         B = ref1_img.shape[0]
 
@@ -350,18 +357,31 @@ class PoseConditionedSD(nn.Module):
             latent = torch.randn_like(ref1_latent)
             timesteps = self.scheduler.timesteps
 
-        use_cfg = cfg_scale > 1.0 and uncond_context is not None
+        use_apg_guidance = use_apg and cfg_scale > 1.0 and uncond_context is not None
+        use_cfg = (not use_apg_guidance) and cfg_scale > 1.0 and uncond_context is not None
+        apg = None
+        if use_apg_guidance:
+            apg = AdaptiveProjectedGuidance(
+                guidance_scale=cfg_scale,
+                eta=apg_eta,
+                momentum=apg_momentum,
+                norm_threshold=apg_norm_threshold,
+                eps=apg_eps,
+            )
 
         for t in tqdm(timesteps, desc="Sampling"):
             t_val = int(t.item()) if isinstance(t, torch.Tensor) else int(t)
 
-            if use_cfg:
+            if use_apg_guidance or use_cfg:
                 latent_pair = torch.cat([latent, latent], dim=0)
                 context_pair = torch.cat([uncond_context, cond_context], dim=0)
                 t_pair = torch.full((2 * B,), t_val, device=self.device, dtype=torch.long)
                 eps_pair = self.unet(latent_pair, t_pair, encoder_hidden_states=context_pair).sample
                 eps_uncond, eps_cond = eps_pair.chunk(2)
-                eps = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
+                if use_apg_guidance and apg is not None:
+                    eps = apg.guide(pred_cond=eps_cond, pred_uncond=eps_uncond)
+                else:
+                    eps = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
             else:
                 t_batch = torch.full((B,), t_val, device=self.device, dtype=torch.long)
                 eps = self.unet(latent, t_batch, encoder_hidden_states=cond_context).sample
