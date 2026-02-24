@@ -128,22 +128,91 @@ def _run_download(
     return proc.returncode == 0
 
 
-def _read_manifest_stats(manifest_path: Path) -> tuple[set[str], int]:
+def _resolve_images_dir(images_dir_raw: str, output_root: Path) -> Path:
+    images_dir = Path(images_dir_raw)
+    if not images_dir.is_absolute():
+        images_dir = (output_root / images_dir).resolve()
+    return images_dir
+
+
+def _row_is_materialized(row: dict, output_root: Path) -> bool:
+    try:
+        images_dir = _resolve_images_dir(str(row["images_dir"]), output_root)
+        if not images_dir.exists():
+            return False
+        for key in ("ref1_name", "ref2_name", "target_name"):
+            if not (images_dir / str(row[key])).exists():
+                return False
+    except Exception:
+        return False
+    return True
+
+
+def _write_manifest_rows(path: Path, rows: list[dict]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+
+
+def _write_packed_scenes_file(path: Path, output_root: Path, rows: list[dict]) -> None:
+    scene_dirs = []
+    seen = set()
+    for row in rows:
+        images_dir = _resolve_images_dir(str(row["images_dir"]), output_root)
+        scene_dir = images_dir.parent
+        if scene_dir in seen:
+            continue
+        if not images_dir.exists():
+            continue
+        seen.add(scene_dir)
+        scene_dirs.append(scene_dir)
+    scene_dirs.sort()
+
+    with open(path, "w", encoding="utf-8") as f:
+        for scene_dir in scene_dirs:
+            f.write(str(scene_dir) + "\n")
+
+
+def _read_manifest_stats(
+    manifest_path: Path,
+    packed_scenes_file: Path,
+    output_root: Path,
+    repair_manifest: bool,
+) -> tuple[set[str], int]:
     if not manifest_path.exists():
+        packed_scenes_file.write_text("", encoding="utf-8")
         return set(), 0
-    done: set[str] = set()
-    rows = 0
+
+    valid_rows: list[dict] = []
+    dropped = 0
+    malformed = 0
     with open(manifest_path, "r", encoding="utf-8") as f:
         for raw in f:
             line = raw.strip()
             if not line or line.startswith("#"):
                 continue
-            row = json.loads(line)
-            rows += 1
-            sid = str(row.get("scene_id", "")).strip()
-            if sid:
-                done.add(sid)
-    return done, rows
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                malformed += 1
+                continue
+            if _row_is_materialized(row, output_root):
+                valid_rows.append(row)
+            else:
+                dropped += 1
+
+    if repair_manifest and (dropped > 0 or malformed > 0):
+        print(f"[resume] repairing manifest: keeping {len(valid_rows)} rows, dropped={dropped}, malformed={malformed}")
+        _write_manifest_rows(manifest_path, valid_rows)
+
+    _write_packed_scenes_file(packed_scenes_file, output_root, valid_rows)
+
+    done: set[str] = set()
+    for row in valid_rows:
+        sid = str(row.get("scene_id", "")).strip()
+        if sid:
+            done.add(sid)
+    return done, len(valid_rows)
 
 
 def main() -> None:
@@ -167,6 +236,9 @@ def main() -> None:
     p.add_argument("--W", type=int, default=512)
     p.add_argument("--resume", action="store_true")
     p.add_argument("--keep-temp-scenes", action="store_true")
+    p.add_argument("--repair-manifest-on-resume", action="store_true", default=True)
+    p.add_argument("--no-repair-manifest-on-resume", action="store_false", dest="repair_manifest_on_resume")
+    p.add_argument("--verify-resume-state-only", action="store_true")
     args = p.parse_args()
 
     if args.target_scenes <= 0:
@@ -200,7 +272,24 @@ def main() -> None:
     perm = rng.permutation(len(candidates))
     candidates = [candidates[i] for i in perm.tolist()]
 
-    done_scene_ids, existing_rows = _read_manifest_stats(manifest_path) if args.resume else (set(), 0)
+    done_scene_ids, existing_rows = _read_manifest_stats(
+        manifest_path=manifest_path,
+        packed_scenes_file=packed_scenes_file,
+        output_root=output_root,
+        repair_manifest=args.repair_manifest_on_resume,
+    ) if args.resume else (set(), 0)
+    if args.resume:
+        print(f"[resume] recovered scenes={len(done_scene_ids)} rows={existing_rows}")
+    if args.verify_resume_state_only:
+        status = {
+            "output_root": str(output_root),
+            "recovered_scenes": len(done_scene_ids),
+            "recovered_rows": existing_rows,
+            "target_scenes": args.target_scenes,
+            "will_continue": len(done_scene_ids) < args.target_scenes,
+        }
+        print(json.dumps(status, indent=2))
+        return
     if not args.resume:
         manifest_path.write_text("", encoding="utf-8")
         packed_scenes_file.write_text("", encoding="utf-8")
