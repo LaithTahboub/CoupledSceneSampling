@@ -77,4 +77,5 @@ else
     ARGS+=(--no-download-sparse)
 fi
 
-python -m css.prepare_triplet_manifest "${ARGS[@]}"
+export PYTHONUNBUFFERED=1
+python -u -m css.prepare_triplet_manifest "${ARGS[@]}"

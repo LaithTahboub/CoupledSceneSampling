@@ -33,4 +33,9 @@ KEEP_TEMP_SCENES=${KEEP_TEMP_SCENES:-0}
 # this pipeline uses precomputed sparse data and cpu-side filtering/copying,
 # so no gpu reservation is required.
 
+echo "[sbatch] ROOT=$ROOT"
+echo "[sbatch] OUT_ROOT=$OUT_ROOT"
+echo "[sbatch] TARGET_SCENES=$TARGET_SCENES"
+echo "[sbatch] RESUME=$RESUME"
+
 bash "$ROOT/scripts/prepare_triplets_manifest.sh"
