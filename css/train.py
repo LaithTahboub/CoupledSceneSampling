@@ -132,7 +132,7 @@ def _resolve_scenes(args) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Sampling with EMA
+# sampling
 # ---------------------------------------------------------------------------
 
 def _log_sample(model, ema, trainable_params, dataset, prompt, step, cfg_scale):
@@ -398,7 +398,7 @@ def main():
     n_trainable = sum(p.numel() for p in trainable_params)
     print(
         f"UNet train mode: {args.unet_train_mode} "
-        f"(trainable params incl. ref_encoder: {n_trainable:,})"
+        f"(trainable params: {n_trainable:,})"
     )
 
     print("Loading dataset...")

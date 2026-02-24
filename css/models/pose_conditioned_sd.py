@@ -10,6 +10,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from tqdm import tqdm
 
 from css.models.apg import AdaptiveProjectedGuidance
+from css.models.pose_sd_checkpoint import EMAModel, load_pose_sd_checkpoint, save_pose_sd_checkpoint
 
 
 
