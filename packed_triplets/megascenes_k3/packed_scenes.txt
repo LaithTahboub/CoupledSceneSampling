@@ -43,6 +43,7 @@
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/041_550__Chapel_of_Saint_George__Litovel
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/047_175__Burg_Mildenstein
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/059_114__Battistero_di_San_Giovanni_in_Fonte__Padula
+/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/062_985__Ermida_da_Mem_ria__Nazar
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/068_540__Brunswick_Palace
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/069_016__Farmers_Market__Los_Angeles
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/070_897__Saks_Fifth_Avenue_flagship_store
@@ -51,6 +52,7 @@
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/077_298__Central_Market__Zaragoza
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/087_343__S
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/090_776__Brabofontein
+/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/098_097__The_Langham__Manhattan
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/099_350__Trump_SoHo
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/102_020__Tempel_Synagogue_of_Kazimierz__Krak_w
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/102_164__National_Philharmonic_Society_of_Ukraine
@@ -68,6 +70,7 @@
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/126_876__Monument_against_war_and_fascism__Vienna
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/127_042__Castell_de_la_Santa_B_rbara
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/127_986__Casa_Vicens
+/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/128_578__Castle_of_Ponferrada
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/128_613__Millennium_Monument__Budapest
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/129_530__Museum_and_Monastery_of_San_Telmo__STM
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/129_663__Monumento_Nazionale_al_Carabiniere
@@ -103,6 +106,9 @@
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/179_731__Neues_Schloss_Schlei_heim
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/179_923__Aga_Khan_Palace
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/179_977__Miramar_jauregia
+/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/182_564__Palazzo_Guggino__Palermo
+/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/183_489__Palazzo_Chigi_Zondadari
+/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/183_814__Palazzo_del_Collegio_Puteano
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/185_280__Palazzo_Panciatichi_Ximenes_da_Sangallo
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/185_399__Palazzo_Barbarigo_della_Terrazza__Venice
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/186_460__Royal_Opera_House_Covent_Garden
@@ -127,6 +133,7 @@
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/207_394__Dhakeshwari_Temple
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/207_400__Padmanabhaswamy_Temple
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/207_819__Chaturbhuj_Temple_Khajuraho
+/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/208_720__Sri_Venkateswara_Temple__Penn_Hills_Township
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/211_869__Borobudur
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/212_131__Foguang_Temple
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/212_486__Kaiyuan_Temple__Quanzhou
@@ -142,8 +149,10 @@
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/219_472__Wolno_ci_Square_in_Bielsko-Bia_a
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/219_746__R_dhuspladsen__Copenhagen
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/220_227__Voli_Maidan__Ternopil
+/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/220_729__Place_des_Dominicains__Colmar
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/221_211__Obiln__trh
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/221_626__Heimplatz__Z_rich
+/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/222_971__Masarykovo_n_m_st___Vy_kov
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/229_723__Abgineh_Museum_of_Tehran
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/230_666__Moritzburg__Halle
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/231_218__Burg_Deutschlandsberg
@@ -173,6 +182,7 @@
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/276_640__Chigang_Pagoda
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/278_193__Grote_of_Sint-Jeroenskerk__Noordwijk
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/279_010__Michelangelos_Rebellious_Slave__Louvre
+/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/279_833__Lion_of_Mari
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/293_717__glise_Saint-Trojan_de_R_taud
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/293_920__St._Pankratius__Wiggensbach
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/294_018__Coll_giale_Notre-Dame_de_Poissy
@@ -186,6 +196,7 @@
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/306_890__glise_Saint-Martin_de_Belle-_glise
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/313_252__Holy_Trinity_church__Olyka
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/313_739__Church_of_Sant_Nicolau__Val_ncia
+/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/314_693__Evangelische_Kirche_Bad_Waldsee
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/316_294__St_John_the_Baptist_Church__North_Luffenham
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/324_154__Hagshults_kyrka
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/328_564__SantAndrea__Sarzana
@@ -228,6 +239,7 @@
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/423_719__Catedral_de_Concepci_n__Santa_Cruz
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/425_623__Church_of_Saint_Bartholomew__Ko
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/426_636__Sint-Annakerk__Brugge
+/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/427_203__Saint_Martins_church_in_Bra_ov
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/428_294__Farstorps_kyrka
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/429_970__Wooden_church_in_Luga_u_de_Sus
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/435_489__St._Martin__Euerwang
@@ -235,13 +247,3 @@
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/450_960__Hervormde_Kerk__Poortugaal
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/451_058__Onze_Lieve_Vrouw_ten_Hemelopneming__Doetinchem
 /fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/455_845__Full_sa_kyrka
-/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/279_833__Lion_of_Mari
-/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/220_729__Place_des_Dominicains__Colmar
-/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/314_693__Evangelische_Kirche_Bad_Waldsee
-/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/208_720__Sri_Venkateswara_Temple__Penn_Hills_Township
-/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/182_564__Palazzo_Guggino__Palermo
-/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/062_985__Ermida_da_Mem_ria__Nazar
-/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/427_203__Saint_Martins_church_in_Bra_ov
-/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/128_578__Castle_of_Ponferrada
-/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/183_489__Palazzo_Chigi_Zondadari
-/fs/nexus-scratch/ltahboub/CoupledSceneSampling/packed_triplets/megascenes_k3/scenes/222_971__Masarykovo_n_m_st___Vy_kov
