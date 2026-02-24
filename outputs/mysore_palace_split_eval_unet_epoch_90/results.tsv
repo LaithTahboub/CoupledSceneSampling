@@ -1,2 +1,0 @@
-target_idx	image_id	image_name	status	output	error
-12	177	commons/Gardens_of_the_Mysore_Palace/0/pictures/Mysore_357.jpg	ok	/fs/nexus-scratch/ltahboub/CoupledSceneSampling/outputs/mysore_palace_split_eval_unet_epoch_90/test_idx_00012.png	

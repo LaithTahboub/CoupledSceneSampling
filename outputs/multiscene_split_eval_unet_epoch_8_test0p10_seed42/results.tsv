@@ -1,2 +1,0 @@
-target_idx	scene_spec	image_id	image_name	status	output	error
-50	/fs/nexus-scratch/ltahboub/CoupledSceneSampling/MegaScenes/099_559__Jubilee_Synagogue	58	commons/Jubilee_Synagogue/0/pictures/PRG-Prt160-Exa-JeruzalemskaSyn01.jpg	ok	/fs/nexus-scratch/ltahboub/CoupledSceneSampling/outputs/multiscene_split_eval_unet_epoch_8_test0p10_seed42/test_idx_000050_099_559__Jubilee_Synagogue.png	

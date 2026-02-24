@@ -1,2 +1,0 @@
-target_idx	scene_spec	image_id	image_name	status	output	error
-32	/fs/nexus-scratch/ltahboub/CoupledSceneSampling/MegaScenes/094_873__Fuente_de_los_Ba_os_de_Diana._La_Granja_de_San_Ildefonso	64	commons/Fuente_de_los_Baños_de_Diana._La_Granja_de_San_Ildefonso/0/pictures/®_M.D._PALACIO_REAL_LA_GRANJA_DE_SAN_ILDEFONSO_FUENTES_-_panoramio_-_Concepcion_AMAT_ORTA…_(26).jpg	ok	/fs/nexus-scratch/ltahboub/CoupledSceneSampling/outputs/multiscene_split_eval_unet_epoch_16_test0p10_seed42/test_idx_000032_094_873__Fuente_de_los_Ba_os_de_Diana__La_Granja_de_San_Ildefonso.png	

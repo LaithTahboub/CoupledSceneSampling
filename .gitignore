@@ -18,3 +18,5 @@ images_index.parquet
 *.py[cod]
 holdnode.err
 *.core
+packed_triplets/megascenes_k3/scenes/*/*
+packed_triplets/megascenes_k3/tmp_scenes/*/*

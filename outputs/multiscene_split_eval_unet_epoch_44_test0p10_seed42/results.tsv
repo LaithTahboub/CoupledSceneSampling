@@ -1,2 +1,0 @@
-target_idx	scene_spec	image_id	image_name	status	output	error
-139	/fs/nexus-scratch/ltahboub/CoupledSceneSampling/MegaScenes/229_956__Haus_des_Meeres	382	commons/Views_from_Haus_des_Meeres/0/pictures/140806_HausDesMeeres_179_(14846478445).jpg	ok	/fs/nexus-scratch/ltahboub/CoupledSceneSampling/outputs/multiscene_split_eval_unet_epoch_44_test0p10_seed42/test_idx_000139_229_956__Haus_des_Meeres.png	
