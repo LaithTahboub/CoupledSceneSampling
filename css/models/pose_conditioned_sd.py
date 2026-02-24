@@ -10,7 +10,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from tqdm import tqdm
 
 from css.models.apg import AdaptiveProjectedGuidance
-from css.models.pose_sd_checkpoint import EMAModel, load_pose_sd_checkpoint, save_pose_sd_checkpoint
+from css.models.EMA import EMAModel, load_pose_sd_checkpoint, save_pose_sd_checkpoint
 
 
 
@@ -170,11 +170,11 @@ class PoseConditionedSD(nn.Module):
             m1 = m1 * keep
             m2 = m2 * keep
 
-        v1 = torch.cat([ref1_lat, pl1, m1], dim=1)  # (b,11,h,w)
+        v1 = torch.cat([ref1_lat, pl1, m1], dim=1)  
         v2 = torch.cat([ref2_lat, pl2, m2], dim=1)
         vt = torch.cat([tgt_lat,  plt, mt], dim=1)
 
-        x = torch.cat([v1, v2, vt], dim=1)          # (b,33,h,w)
+        x = torch.cat([vt, v1, v2], dim=1)
         return x
 
     def training_step(
