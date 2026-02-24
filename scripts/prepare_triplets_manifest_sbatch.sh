@@ -4,7 +4,7 @@
 #SBATCH --job-name=css-pack-triplets
 #SBATCH --partition=tron
 #SBATCH --ntasks=4
-#SBATCH --mem=64gb
+#SBATCH --mem=32gb
 #SBATCH --time=3-0:00:00
 #SBATCH --output=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/prepare_triplets_manifest_%j.out
 #SBATCH --error=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/prepare_triplets_manifest_%j.err
@@ -21,7 +21,7 @@ MAX_TRIPLETS_PER_SCENE=${MAX_TRIPLETS_PER_SCENE:-3}
 MAX_PAIR_DIST=${MAX_PAIR_DIST:-2.5}
 MIN_DIR_SIM=${MIN_DIR_SIM:-0.2}
 MIN_REF_SPACING=${MIN_REF_SPACING:-0.25}
-MIN_IMAGES_PER_SCENE=${MIN_IMAGES_PER_SCENE:-60}
+MIN_IMAGES_PER_SCENE=${MIN_IMAGES_PER_SCENE:-15}
 SEED=${SEED:-42}
 RECON_NO=${RECON_NO:-0}
 H=${H:-512}
