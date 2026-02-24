@@ -411,6 +411,8 @@ def main() -> None:
                 mf.write(json.dumps(row) + "\n")
 
             sf.write(str(packed_scene_dir) + "\n")
+            mf.flush()
+            sf.flush()
             kept_scene_ids.add(scene_id)
             kept_scene_count += 1
             kept_triplet_count += len(triplets)
