@@ -259,6 +259,9 @@ def main() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     packed_scenes_root.mkdir(parents=True, exist_ok=True)
     tmp_root.mkdir(parents=True, exist_ok=True)
+    print(f"[prep] output_root={output_root}")
+    print(f"[prep] manifest={manifest_path}")
+    print(f"[prep] packed_scenes_file={packed_scenes_file}")
 
     candidates = _build_candidates(categories_json, scene_list_file)
     if args.max_candidates is not None:

@@ -6,8 +6,8 @@
 #SBATCH --ntasks=4
 #SBATCH --mem=64gb
 #SBATCH --time=3-0:00:00
-#SBATCH --output=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/prepare_triplets_manifest.out
-#SBATCH --error=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/prepare_triplets_manifest.err
+#SBATCH --output=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/prepare_triplets_manifest_%j.out
+#SBATCH --error=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/prepare_triplets_manifest_%j.err
 
 set -euo pipefail
 
@@ -34,4 +34,3 @@ KEEP_TEMP_SCENES=${KEEP_TEMP_SCENES:-0}
 # so no gpu reservation is required.
 
 bash "$ROOT/scripts/prepare_triplets_manifest.sh"
-
