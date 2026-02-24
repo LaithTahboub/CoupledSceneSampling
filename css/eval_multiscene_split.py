@@ -227,6 +227,7 @@ def main() -> None:
                         sample["ref2_img"],
                         sample["plucker_ref1"],
                         sample["plucker_ref2"],
+                        sample["plucker_tgt"],
                         prompt=rec.prompt,
                         num_steps=args.num_steps,
                         cfg_scale=args.cfg_scale,
@@ -239,6 +240,7 @@ def main() -> None:
                     sample["ref2_img"][0],
                     sample["target_img"][0],
                     generated[0],
+                    prompt=rec.prompt,
                 )
                 out_name = f"test_idx_{target_idx:06d}_{_safe_slug(rec.scene_name)}.png"
                 output_path = output_dir / out_name

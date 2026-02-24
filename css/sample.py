@@ -109,7 +109,7 @@ def main():
     with torch.inference_mode():
         generated = model.sample(
             sample["ref1_img"], sample["ref2_img"],
-            sample["plucker_ref1"], sample["plucker_ref2"],
+            sample["plucker_ref1"], sample["plucker_ref2"], sample["plucker_tgt"],
             prompt=prompt,
             num_steps=args.num_steps,
             cfg_scale=args.cfg_scale,
@@ -122,7 +122,13 @@ def main():
             apg_eps=args.apg_eps,
         )
 
-    grid = build_comparison_grid(sample["ref1_img"][0], sample["ref2_img"][0], sample["target_img"][0], generated[0])
+    grid = build_comparison_grid(
+        sample["ref1_img"][0],
+        sample["ref2_img"][0],
+        sample["target_img"][0],
+        generated[0],
+        prompt=prompt,
+    )
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

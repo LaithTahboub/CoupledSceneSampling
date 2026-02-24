@@ -15,6 +15,7 @@ set -euo pipefail
 ROOT=${ROOT:-/fs/nexus-scratch/ltahboub/CoupledSceneSampling}
 MEGASCENES_ROOT=${MEGASCENES_ROOT:-$ROOT/MegaScenes}
 SCENES_FILE=${SCENES_FILE:-$MEGASCENES_ROOT/scenes_colmap_ready.txt}
+TRIPLETS_MANIFEST=${TRIPLETS_MANIFEST:-}
 
 TEST_RATIO=${TEST_RATIO:-0.10}
 SEED=${SEED:-42}
@@ -36,7 +37,7 @@ PROMPT_TEMPLATE=${PROMPT_TEMPLATE:-"a photo of {scene}"}
 MAX_PAIR_DIST=${MAX_PAIR_DIST:-2.5}
 MIN_DIR_SIM=${MIN_DIR_SIM:-0.2}
 MIN_REF_SPACING=${MIN_REF_SPACING:-0.25}
-MAX_TRIPLETS=${MAX_TRIPLETS:-3000}
+MAX_TRIPLETS=${MAX_TRIPLETS:-8}
 
 BATCH_SIZE=${BATCH_SIZE:-4}
 NUM_WORKERS=${NUM_WORKERS:-8}
@@ -56,50 +57,62 @@ W=${W:-512}
 source "$ROOT/.venv/bin/activate"
 cd "$ROOT"
 
-if [[ ! -f "$SCENES_FILE" ]]; then
-    echo "Scenes file not found: $SCENES_FILE"
-    exit 1
-fi
+TRAIN_INPUT_ARGS=()
+if [[ -n "$TRIPLETS_MANIFEST" ]]; then
+    if [[ ! -f "$TRIPLETS_MANIFEST" ]]; then
+        echo "Triplets manifest not found: $TRIPLETS_MANIFEST"
+        exit 1
+    fi
+    echo "Training from triplets manifest: $TRIPLETS_MANIFEST"
+    TRAIN_INPUT_ARGS=(--triplets-manifest "$TRIPLETS_MANIFEST")
+else
+    if [[ ! -f "$SCENES_FILE" ]]; then
+        echo "Scenes file not found: $SCENES_FILE"
+        exit 1
+    fi
 
-READY_COUNT=$(wc -l < "$SCENES_FILE" || echo 0)
-echo "Ready scenes in list: $READY_COUNT"
-if (( READY_COUNT < MIN_READY_SCENES )); then
-    echo "Need at least $MIN_READY_SCENES scenes in SCENES_FILE before training."
-    exit 1
-fi
+    READY_COUNT=$(wc -l < "$SCENES_FILE" || echo 0)
+    echo "Ready scenes in list: $READY_COUNT"
+    if (( READY_COUNT < MIN_READY_SCENES )); then
+        echo "Need at least $MIN_READY_SCENES scenes in SCENES_FILE before training."
+        exit 1
+    fi
 
-SPLIT_ARGS=(
-    --scenes-file "$SCENES_FILE"
-    --output-dir "$SPLIT_DIR"
-    --test-ratio "$TEST_RATIO"
-    --seed "$SEED"
-    --min-train-scenes "$MIN_TRAIN_SCENES"
-)
-if [[ -n "$MAX_SCENES" ]]; then
-    SPLIT_ARGS+=(--max-scenes "$MAX_SCENES")
-fi
+    SPLIT_ARGS=(
+        --scenes-file "$SCENES_FILE"
+        --output-dir "$SPLIT_DIR"
+        --test-ratio "$TEST_RATIO"
+        --seed "$SEED"
+        --min-train-scenes "$MIN_TRAIN_SCENES"
+    )
+    if [[ -n "$MAX_SCENES" ]]; then
+        SPLIT_ARGS+=(--max-scenes "$MAX_SCENES")
+    fi
 
-python -m css.make_scenes_split "${SPLIT_ARGS[@]}"
+    python -m css.make_scenes_split "${SPLIT_ARGS[@]}"
 
-TRAIN_SCENES_FILE="$SPLIT_DIR/train_scenes.txt"
-TEST_SCENES_FILE="$SPLIT_DIR/test_scenes.txt"
-if [[ ! -f "$TRAIN_SCENES_FILE" || ! -f "$TEST_SCENES_FILE" ]]; then
-    echo "Split creation failed in $SPLIT_DIR"
-    exit 1
-fi
+    TRAIN_SCENES_FILE="$SPLIT_DIR/train_scenes.txt"
+    TEST_SCENES_FILE="$SPLIT_DIR/test_scenes.txt"
+    if [[ ! -f "$TRAIN_SCENES_FILE" || ! -f "$TEST_SCENES_FILE" ]]; then
+        echo "Split creation failed in $SPLIT_DIR"
+        exit 1
+    fi
 
-TRAIN_SCENES_COUNT=$(wc -l < "$TRAIN_SCENES_FILE" || echo 0)
-TEST_SCENES_COUNT=$(wc -l < "$TEST_SCENES_FILE" || echo 0)
-echo "Train scenes: $TRAIN_SCENES_COUNT"
-echo "Test scenes:  $TEST_SCENES_COUNT"
-echo "Split dir: $SPLIT_DIR"
-if (( TRAIN_SCENES_COUNT < 1 )); then
-    echo "Split has no train scenes: $TRAIN_SCENES_FILE"
-    exit 1
+    TRAIN_SCENES_COUNT=$(wc -l < "$TRAIN_SCENES_FILE" || echo 0)
+    TEST_SCENES_COUNT=$(wc -l < "$TEST_SCENES_FILE" || echo 0)
+    echo "Train scenes: $TRAIN_SCENES_COUNT"
+    echo "Test scenes:  $TEST_SCENES_COUNT"
+    echo "Split dir: $SPLIT_DIR"
+    if (( TRAIN_SCENES_COUNT < 1 )); then
+        echo "Split has no train scenes: $TRAIN_SCENES_FILE"
+        exit 1
+    fi
+
+    TRAIN_INPUT_ARGS=(--scenes-file "$TRAIN_SCENES_FILE")
 fi
 
 TRAIN_ARGS=(
-    --scenes-file "$TRAIN_SCENES_FILE"
+    "${TRAIN_INPUT_ARGS[@]}"
     --output "$OUTPUT"
     --epochs "$EPOCHS"
     --batch-size "$BATCH_SIZE"

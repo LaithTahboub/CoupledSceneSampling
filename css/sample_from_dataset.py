@@ -4,16 +4,12 @@ import argparse
 from pathlib import Path
 from collections import OrderedDict
 
-import numpy as np
 import torch
 from PIL import Image
 
 from css.data.dataset import MegaScenesDataset, load_image_name_set
 from css.models.pose_conditioned_sd import PoseConditionedSD, load_pose_sd_checkpoint
-
-
-def _to_uint8(t: torch.Tensor) -> np.ndarray:
-    return ((t.clamp(-1, 1) + 1) / 2 * 255).byte().permute(1, 2, 0).cpu().numpy()
+from css.scene_sampling import build_comparison_grid
 
 
 def _read_lines(path: str | None) -> list[str]:
@@ -39,7 +35,8 @@ def main():
     parser.add_argument("--num-steps", type=int, default=50, help="Sampling steps")
     parser.add_argument("--cfg-scale", type=float, default=7.5, help="CFG guidance scale")
     parser.add_argument("--max-pair-dist", type=float, default=2.0)
-    parser.add_argument("--max-triplets", type=int, default=10000)
+    parser.add_argument("--max-triplets", type=int, default=8)
+    parser.add_argument("--triplets-manifest", type=str, default=None, help="Optional jsonl manifest of packed triplets")
     parser.add_argument("--exclude-image-list", type=str, default=None)
     parser.add_argument("--target-include-image-list", type=str, default=None)
     parser.add_argument("--reference-include-image-list", type=str, default=None)
@@ -57,11 +54,14 @@ def main():
     scenes = _read_lines(args.scenes_file)
     if args.scene is not None:
         scenes = [args.scene] + scenes
-    if not scenes:
+    if not scenes and args.triplets_manifest is None:
         scenes = ["MegaScenes/Mysore_Palace"]
     scenes = list(OrderedDict.fromkeys(scenes))
 
-    print(f"Loading dataset from {len(scenes)} scene(s)...")
+    if args.triplets_manifest is not None:
+        print(f"Loading dataset from manifest: {args.triplets_manifest}")
+    else:
+        print(f"Loading dataset from {len(scenes)} scene(s)...")
     exclude_image_names = load_image_name_set(args.exclude_image_list)
     target_include_image_names = load_image_name_set(args.target_include_image_list)
     reference_include_image_names = load_image_name_set(args.reference_include_image_list)
@@ -75,6 +75,7 @@ def main():
         target_include_image_names=target_include_image_names,
         reference_include_image_names=reference_include_image_names,
         prompt_template=args.prompt_template,
+        triplets_manifest=args.triplets_manifest,
     )
     print(f"Dataset has {len(dataset)} triplets")
     if len(dataset) == 0:
@@ -96,6 +97,7 @@ def main():
             sample["ref2_img"].unsqueeze(0),
             sample["plucker_ref1"].unsqueeze(0),
             sample["plucker_ref2"].unsqueeze(0),
+            sample["plucker_tgt"].unsqueeze(0),
             prompt=sample_prompt,
             num_steps=args.num_steps,
             cfg_scale=args.cfg_scale,
@@ -103,12 +105,13 @@ def main():
             start_t=args.start_t,
         )
 
-    grid = np.concatenate([
-        _to_uint8(sample["ref1_img"]),
-        _to_uint8(sample["ref2_img"]),
-        _to_uint8(sample["target_img"]),
-        _to_uint8(generated[0]),
-    ], axis=1)
+    grid = build_comparison_grid(
+        sample["ref1_img"],
+        sample["ref2_img"],
+        sample["target_img"],
+        generated[0],
+        prompt=sample_prompt,
+    )
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

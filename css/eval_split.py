@@ -115,6 +115,7 @@ def main():
                         sample["ref2_img"],
                         sample["plucker_ref1"],
                         sample["plucker_ref2"],
+                        sample["plucker_tgt"],
                         prompt=args.prompt,
                         num_steps=args.num_steps,
                         cfg_scale=args.cfg_scale,
@@ -127,6 +128,7 @@ def main():
                     sample["ref2_img"][0],
                     sample["target_img"][0],
                     generated[0],
+                    prompt=args.prompt,
                 )
                 Image.fromarray(grid).save(output_path)
                 f.write(f"{idx}\t{target_img.id}\t{target_img.name}\tok\t{output_path}\t\n")

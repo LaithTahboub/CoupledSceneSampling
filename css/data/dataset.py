@@ -1,16 +1,12 @@
-"""MegaScenes dataset for pose-conditioned SD training.
+"""dataset helpers for pose-conditioned sd.
 
-Fixes applied:
-- Intrinsics are explicitly normalized to [0,1] before calling get_plucker_coordinates,
-  removing dependence on SEVA's fragile auto-detection heuristic.
-- Images are center-cropped then resized instead of stretched, so intrinsics remain
-  geometrically valid for non-square source images.
-- Intrinsics scaling accounts for center-crop offset.
-- Plucker rays are generated at the reference camera's pixel grid (spatially aligned
-  with ref latent), using reference intrinsics.  The anchor is the target camera.
-  This is correct: extrinsics_src = w2c_target (anchor), extrinsics = w2c_ref (ray grid).
+notes:
+- intrinsics are normalized to [0, 1] before calling get_plucker_coordinates.
+- images are center-cropped then resized so geometry is preserved.
+- plucker rays are computed per view and can be anchored to any camera pose.
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -213,10 +209,10 @@ def compute_plucker_tensor(
     latent_h: int,
     latent_w: int,
 ) -> torch.Tensor:
-    """Compute Plucker ray map at ray_cam's pixel grid, relative to anchor camera.
+    """Compute a plucker ray map at ray_cam's pixel grid, relative to anchor.
 
     Args:
-        c2w_anchor: 4x4 camera-to-world of the anchor (target) camera.
+        c2w_anchor: 4x4 camera-to-world of the anchor camera.
         c2w_ray_cam: 4x4 camera-to-world of the camera whose pixel grid defines rays.
         K_ray_cam: 3x3 intrinsics of ray_cam, at full image resolution (H, W).
         H, W: full image resolution.
@@ -253,17 +249,18 @@ class MegaScenesDataset(Dataset):
 
     def __init__(
         self,
-        scene_dirs: list[str],
+        scene_dirs: list[str] | None = None,
         H: int = 512,
         W: int = 512,
         max_pair_distance: float = 2.0,
-        max_triplets_per_scene: int = 10000,
+        max_triplets_per_scene: int = 8,
         min_dir_similarity: float = 0.3,
         min_ref_spacing: float = 0.3,
         exclude_image_names: set[str] | None = None,
         target_include_image_names: set[str] | None = None,
         reference_include_image_names: set[str] | None = None,
         prompt_template: str | None = None,
+        triplets_manifest: str | None = None,
     ):
         self.H, self.W = H, W
         self.latent_h, self.latent_w = H // 8, W // 8
@@ -278,21 +275,28 @@ class MegaScenesDataset(Dataset):
         self._io_error_logs = 0
         self._max_io_error_logs = 20
 
+        if max_triplets_per_scene <= 0:
+            raise ValueError("max_triplets_per_scene must be >= 1")
+
         self.triplets = []
-        for scene_spec in scene_dirs:
-            scene_dir = Path(scene_spec)
-            scene_key = scene_dir.name
-            self.scene_prompt_names[scene_key] = clean_scene_prompt_name(read_scene_prompt_name(scene_dir))
-            self.triplets.extend(
-                self._build_triplets(
-                    scene_dir,
-                    scene_key,
-                    max_pair_distance,
-                    max_triplets_per_scene,
-                    min_dir_similarity,
-                    min_ref_spacing,
+        if triplets_manifest is not None:
+            self.triplets.extend(self._load_triplets_manifest(Path(triplets_manifest)))
+        else:
+            scene_specs = list(scene_dirs or [])
+            for scene_spec in scene_specs:
+                scene_dir = Path(scene_spec)
+                scene_key = scene_dir.name
+                self.scene_prompt_names[scene_key] = clean_scene_prompt_name(read_scene_prompt_name(scene_dir))
+                self.triplets.extend(
+                    self._build_triplets(
+                        scene_dir,
+                        scene_key,
+                        max_pair_distance,
+                        max_triplets_per_scene,
+                        min_dir_similarity,
+                        min_ref_spacing,
+                    )
                 )
-            )
 
         self.n = len(self.triplets)
         if self.n == 0:
@@ -307,6 +311,56 @@ class MegaScenesDataset(Dataset):
             unique_images.add(str(images_dir / ref2_name))
             unique_images.add(str(images_dir / tgt_name))
         print(f"Dataset ready: {self.n} triplets, {len(unique_images)} unique images, {len(scene_names)} scenes")
+
+    def _load_triplets_manifest(self, manifest_path: Path):
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Triplets manifest not found: {manifest_path}")
+
+        base_dir = manifest_path.parent
+        triplets = []
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            for line_no, raw in enumerate(f, start=1):
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                row = json.loads(line)
+                scene_name = str(row["scene_name"])
+                scene_prompt_name = str(row.get("scene_prompt_name", scene_name))
+                images_dir_raw = str(row["images_dir"])
+                images_dir = Path(images_dir_raw)
+                if not images_dir.is_absolute():
+                    images_dir = (base_dir / images_dir).resolve()
+
+                ref1_c2w = np.asarray(row["ref1_c2w"], dtype=np.float32)
+                ref2_c2w = np.asarray(row["ref2_c2w"], dtype=np.float32)
+                tgt_c2w = np.asarray(row["target_c2w"], dtype=np.float32)
+                K_ref1 = np.asarray(row["K_ref1"], dtype=np.float32)
+                K_ref2 = np.asarray(row["K_ref2"], dtype=np.float32)
+                K_tgt = np.asarray(row["K_tgt"], dtype=np.float32)
+
+                if ref1_c2w.shape != (4, 4) or ref2_c2w.shape != (4, 4) or tgt_c2w.shape != (4, 4):
+                    raise ValueError(f"{manifest_path}:{line_no} invalid c2w shape")
+                if K_ref1.shape != (3, 3) or K_ref2.shape != (3, 3) or K_tgt.shape != (3, 3):
+                    raise ValueError(f"{manifest_path}:{line_no} invalid intrinsics shape")
+
+                self.scene_prompt_names[scene_name] = clean_scene_prompt_name(scene_prompt_name)
+                triplets.append(
+                    (
+                        scene_name,
+                        images_dir,
+                        str(row["ref1_name"]),
+                        str(row["ref2_name"]),
+                        str(row["target_name"]),
+                        ref1_c2w,
+                        ref2_c2w,
+                        tgt_c2w,
+                        K_ref1,
+                        K_ref2,
+                        K_tgt,
+                    )
+                )
+        return triplets
 
     def _build_triplets(self, scene_dir: Path, scene_key: str, max_dist, max_triplets, min_dir_sim, min_ref_spacing):
         cameras, images = read_scene(scene_dir)
@@ -335,84 +389,90 @@ class MegaScenesDataset(Dataset):
         if len(targets) == 0 or len(refs_pool) < 2:
             return []
 
-        triplets = []
+        positions = {img.id: img.c2w[:3, 3] for img in valid}
+        directions = {img.id: self._get_viewing_direction(img.c2w) for img in valid}
+        target_ids = {img.id for img in targets}
 
-        for target in targets:
-            if len(triplets) >= max_triplets:
-                break
+        triplets_scored: list[tuple[float, tuple]] = []
+        for ref1 in refs_pool:
+            ref1_pos = positions[ref1.id]
+            ref1_dir = directions[ref1.id]
 
-            target_pos = target.c2w[:3, 3]
-            target_dir = self._get_viewing_direction(target.c2w)
-
-            candidates = []
-            relaxed_candidates = []
-            for ref in refs_pool:
-                if ref.id == target.id:
+            strict_ref2: list[tuple[float, object]] = []
+            relaxed_ref2: list[tuple[float, object]] = []
+            for ref2 in refs_pool:
+                if ref2.id == ref1.id:
                     continue
+                dist = float(np.linalg.norm(positions[ref2.id] - ref1_pos))
+                sim = float(np.dot(ref1_dir, directions[ref2.id]))
+                score = dist * (2.0 - sim)
+                relaxed_ref2.append((score, ref2))
+                if dist < min_ref_spacing:
+                    continue
+                if max_dist > 0 and dist > max_dist:
+                    continue
+                if sim < min_dir_sim:
+                    continue
+                strict_ref2.append((score, ref2))
 
-                ref_pos = ref.c2w[:3, 3]
-                ref_dir = self._get_viewing_direction(ref.c2w)
+            strict_targets: list[tuple[float, object]] = []
+            relaxed_targets: list[tuple[float, object]] = []
+            for tgt in valid:
+                if tgt.id == ref1.id:
+                    continue
+                if tgt.id not in target_ids:
+                    continue
+                dist = float(np.linalg.norm(positions[tgt.id] - ref1_pos))
+                sim = float(np.dot(ref1_dir, directions[tgt.id]))
+                score = dist * (2.0 - sim)
+                relaxed_targets.append((score, tgt))
+                if max_dist > 0 and dist > max_dist:
+                    continue
+                if sim < min_dir_sim:
+                    continue
+                strict_targets.append((score, tgt))
 
-                distance = np.linalg.norm(ref_pos - target_pos)
-                dir_sim = np.dot(target_dir, ref_dir)
-                score = distance * (2.0 - dir_sim)
-                relaxed_candidates.append((score, ref))
-
-                keep = True
-                if max_dist > 0 and distance > max_dist:
-                    keep = False
-                if dir_sim < min_dir_sim:
-                    keep = False
-                if keep:
-                    candidates.append((score, ref))
-
-            if len(candidates) < 2:
-                candidates = relaxed_candidates
-            if len(candidates) < 2:
+            ref2_pool = strict_ref2 if len(strict_ref2) > 0 else relaxed_ref2
+            target_pool = strict_targets if len(strict_targets) > 0 else relaxed_targets
+            if len(ref2_pool) == 0 or len(target_pool) == 0:
                 continue
 
-            candidates.sort(key=lambda x: x[0])
-            top_k = min(20, len(candidates))
+            ref2_pool.sort(key=lambda x: x[0])
+            target_pool.sort(key=lambda x: x[0])
 
-            for i in range(min(top_k - 1, 5)):
-                if len(triplets) >= max_triplets:
+            best = None
+            for ref2_score, ref2 in ref2_pool[:20]:
+                for tgt_score, tgt in target_pool[:20]:
+                    if tgt.id == ref2.id:
+                        continue
+                    combo = ref2_score + tgt_score
+                    if best is None or combo < best[0]:
+                        best = (combo, ref2, tgt)
                     break
+            if best is None:
+                continue
 
-                ref1 = candidates[i][1]
-                ref2 = None
+            _, ref2, target = best
+            cam1 = cameras[ref1.camera_id]
+            cam2 = cameras[ref2.camera_id]
+            cam_t = cameras[target.camera_id]
+            triplet = (
+                scene_key,
+                images_dir,
+                resolved_name_by_id[ref1.id],
+                resolved_name_by_id[ref2.id],
+                resolved_name_by_id[target.id],
+                ref1.c2w.astype(np.float32),
+                ref2.c2w.astype(np.float32),
+                target.c2w.astype(np.float32),
+                self._build_K(cam1).astype(np.float32),
+                self._build_K(cam2).astype(np.float32),
+                self._build_K(cam_t).astype(np.float32),
+            )
+            triplets_scored.append((best[0], triplet))
 
-                for j in range(i + 1, top_k):
-                    ref = candidates[j][1]
-                    ref1_to_ref2 = np.linalg.norm(ref.c2w[:3, 3] - ref1.c2w[:3, 3])
-                    if ref1_to_ref2 >= min_ref_spacing:
-                        ref2 = ref
-                        break
-
-                if ref2 is None and i + 1 < len(candidates):
-                    ref2 = candidates[i + 1][1]
-
-                if ref2 is None:
-                    continue
-
-                cam1 = cameras[ref1.camera_id]
-                cam2 = cameras[ref2.camera_id]
-                cam_t = cameras[target.camera_id]
-
-                triplets.append((
-                    scene_key,
-                    images_dir,
-                    resolved_name_by_id[ref1.id],
-                    resolved_name_by_id[ref2.id],
-                    resolved_name_by_id[target.id],
-                    ref1.c2w.astype(np.float32),
-                    ref2.c2w.astype(np.float32),
-                    target.c2w.astype(np.float32),
-                    self._build_K(cam1).astype(np.float32),
-                    self._build_K(cam2).astype(np.float32),
-                    self._build_K(cam_t).astype(np.float32),
-                ))
-
-        return triplets
+        triplets_scored.sort(key=lambda x: x[0])
+        return [triplet for _, triplet in triplets_scored[:max_triplets]]
 
     @staticmethod
     def _get_viewing_direction(c2w: np.ndarray) -> np.ndarray:
@@ -462,13 +522,10 @@ class MegaScenesDataset(Dataset):
         ref2_img, _, _ = load_image_tensor(images_dir, ref2_name, self.H, self.W)
         target_img, _, _ = load_image_tensor(images_dir, tgt_name, self.H, self.W)
 
-        # Target-anchored Plucker rays:
-        #   anchor = target camera (extrinsics_src)
-        #   ray grid = reference camera (extrinsics)
-        #   intrinsics = reference camera's K (matches the pixel grid)
-        # The Plucker map is spatially aligned with the reference image/latent.
-        plucker_ref1 = self._compute_plucker(tgt_c2w, ref1_c2w, K_ref1)
-        plucker_ref2 = self._compute_plucker(tgt_c2w, ref2_c2w, K_ref2)
+        # ref1-anchored pluckers for cat3d-style conditioning.
+        plucker_ref1 = self._compute_plucker(ref1_c2w, ref1_c2w, K_ref1)
+        plucker_ref2 = self._compute_plucker(ref1_c2w, ref2_c2w, K_ref2)
+        plucker_tgt = self._compute_plucker(ref1_c2w, tgt_c2w, K_tgt)
 
         out = {
             "ref1_img": ref1_img,
@@ -476,6 +533,7 @@ class MegaScenesDataset(Dataset):
             "target_img": target_img,
             "plucker_ref1": plucker_ref1,
             "plucker_ref2": plucker_ref2,
+            "plucker_tgt": plucker_tgt,
             "scene_name": scene_name,
         }
         if self.prompt_template:
@@ -517,7 +575,7 @@ class MegaScenesDataset(Dataset):
         return build_cropped_scaled_intrinsics(cam, self.H, self.W)
 
     def _compute_plucker(self, c2w_anchor: np.ndarray, c2w_ray_cam: np.ndarray, K_ray_cam: np.ndarray) -> torch.Tensor:
-        """Plucker map at ray_cam's pixel grid, anchored to target camera."""
+        """Plucker map at ray_cam's pixel grid, anchored to c2w_anchor."""
         return compute_plucker_tensor(
             c2w_anchor, c2w_ray_cam, K_ray_cam,
             self.H, self.W,

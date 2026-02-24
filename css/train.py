@@ -29,6 +29,7 @@ from css.models.pose_conditioned_sd import (
     load_pose_sd_checkpoint,
     save_pose_sd_checkpoint,
 )
+from css.scene_sampling import build_comparison_grid
 
 _save_requested = False
 
@@ -102,10 +103,6 @@ def _cleanup_old_checkpoints(output_dir: Path, keep_latest: int = 5) -> None:
 # Utilities
 # ---------------------------------------------------------------------------
 
-def _to_uint8(t: torch.Tensor) -> np.ndarray:
-    return ((t.clamp(-1, 1) + 1) / 2 * 255).byte().permute(1, 2, 0).cpu().numpy()
-
-
 def _read_lines(path: str | None) -> list[str]:
     if path is None:
         return []
@@ -121,7 +118,9 @@ def _read_lines(path: str | None) -> list[str]:
 def _resolve_scenes(args) -> list[str]:
     merged = list(args.scenes or []) + _read_lines(args.scenes_file)
     if not merged:
-        raise ValueError("Provide at least one scene via --scenes or --scenes-file")
+        if getattr(args, "triplets_manifest", None):
+            return []
+        raise ValueError("Provide at least one scene via --scenes or --scenes-file, or pass --triplets-manifest")
     scenes = list(OrderedDict.fromkeys(merged))
     max_scenes = getattr(args, "max_scenes", None)
     if max_scenes is not None and len(scenes) > max_scenes:
@@ -151,15 +150,20 @@ def _log_sample(model, ema, trainable_params, dataset, prompt, step, cfg_scale):
             sample["ref2_img"].unsqueeze(0),
             sample["plucker_ref1"].unsqueeze(0),
             sample["plucker_ref2"].unsqueeze(0),
+            sample["plucker_tgt"].unsqueeze(0),
             prompt=sample_prompt, num_steps=50, cfg_scale=cfg_scale,
         )
-        grid = np.concatenate([
-            _to_uint8(sample["ref1_img"]),
-            _to_uint8(sample["ref2_img"]),
-            _to_uint8(sample["target_img"]),
-            _to_uint8(generated[0]),
-        ], axis=1)
-        wandb.log({"samples/comparison": wandb.Image(grid, caption="ref1 | ref2 | GT | generated")}, step=step)
+        grid = build_comparison_grid(
+            sample["ref1_img"],
+            sample["ref2_img"],
+            sample["target_img"],
+            generated[0],
+            prompt=sample_prompt,
+        )
+        wandb.log(
+            {"samples/comparison": wandb.Image(grid, caption=f'prompt="{sample_prompt}"')},
+            step=step,
+        )
 
     except Exception as e:
         print(f"[Warning] Sample generation failed: {e}")
@@ -358,7 +362,8 @@ def main():
     p.add_argument("--max-pair-dist", type=float, default=2.0)
     p.add_argument("--min-dir-sim", type=float, default=0.3)
     p.add_argument("--min-ref-spacing", type=float, default=0.3)
-    p.add_argument("--max-triplets", type=int, default=10000)
+    p.add_argument("--max-triplets", type=int, default=8)
+    p.add_argument("--triplets-manifest", type=str, default=None, help="Optional jsonl manifest of packed triplets")
     p.add_argument("--save-every", type=int, default=4)
     p.add_argument("--keep-checkpoints", type=int, default=5)
     p.add_argument("--H", type=int, default=512)
@@ -409,7 +414,10 @@ def main():
         print(f"Restricting references to {len(reference_include_image_names)} images")
 
     scenes = _resolve_scenes(args)
-    print(f"Using {len(scenes)} scenes")
+    if args.triplets_manifest is not None:
+        print(f"Using triplets manifest: {args.triplets_manifest}")
+    else:
+        print(f"Using {len(scenes)} scenes")
     if args.prompt_template is not None:
         print(f'Using prompt template: "{args.prompt_template}"')
 
@@ -423,6 +431,7 @@ def main():
         target_include_image_names=target_include_image_names,
         reference_include_image_names=reference_include_image_names,
         prompt_template=args.prompt_template,
+        triplets_manifest=args.triplets_manifest,
     )
     print(f"Found {len(dataset)} training triplets")
     if len(dataset) == 0:
