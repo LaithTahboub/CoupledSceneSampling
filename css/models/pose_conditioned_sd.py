@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Sequence
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,7 +12,6 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from tqdm import tqdm
 
 from css.models.apg import AdaptiveProjectedGuidance
-from css.models.EMA import EMAModel, load_pose_sd_checkpoint, save_pose_sd_checkpoint
 
 
 
@@ -65,6 +66,9 @@ class PoseConditionedSD(nn.Module):
 
     def __init__(self, pretrained_model: str = "manojb/stable-diffusion-2-1-base", device: str = "cuda"):
         super().__init__()
+        if device == "cuda" and not torch.cuda.is_available():
+            print("[pose-sd] CUDA not available, falling back to CPU.")
+            device = "cpu"
         self.device = torch.device(device)
 
         self.vae = AutoencoderKL.from_pretrained(pretrained_model, subfolder="vae").to(self.device)
@@ -75,6 +79,8 @@ class PoseConditionedSD(nn.Module):
 
         self.vae.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
+        self.vae.eval()
+        self.text_encoder.eval()
 
         self.latent_ch = 4
         self.plucker_ch = 6
@@ -85,6 +91,7 @@ class PoseConditionedSD(nn.Module):
 
         expand_conv_in(self.unet, new_in_channels=self.in_ch)
         self._cache_null_embeddings()
+        self._text_cache_limit = 4096
 
     def configure_trainable(self, unet_train_mode: str = "full") -> None:
         if unet_train_mode == "full":
@@ -100,6 +107,19 @@ class PoseConditionedSD(nn.Module):
             if "attn" in name:
                 p.requires_grad_(True)
 
+    def configure_memory_optimizations(
+        self,
+        gradient_checkpointing: bool = False,
+        xformers_attention: bool = False,
+    ) -> None:
+        if gradient_checkpointing:
+            self.unet.enable_gradient_checkpointing()
+        if xformers_attention:
+            try:
+                self.unet.enable_xformers_memory_efficient_attention()
+            except Exception as exc:  # pragma: no cover - env-dependent
+                print(f"[pose-sd] xformers attention unavailable: {exc}")
+
     def get_trainable_parameters(self) -> list[nn.Parameter]:
         return [p for p in self.unet.parameters() if p.requires_grad]
 
@@ -110,7 +130,7 @@ class PoseConditionedSD(nn.Module):
             self._text_emb_cache: dict[str, torch.Tensor] = {"": self.null_text_emb}
 
     @torch.no_grad()
-    def get_text_embeddings(self, prompts) -> torch.Tensor:
+    def get_text_embeddings(self, prompts: Sequence[str | None]) -> torch.Tensor:
         normalized = [p if p is not None else "" for p in prompts]
         missing = [p for p in dict.fromkeys(normalized) if p not in self._text_emb_cache]
         if missing:
@@ -118,6 +138,8 @@ class PoseConditionedSD(nn.Module):
             embeds = self.text_encoder(tokens.input_ids.to(self.device))[0]
             for i, p in enumerate(missing):
                 self._text_emb_cache[p] = embeds[i : i + 1]
+            if len(self._text_emb_cache) > self._text_cache_limit:
+                self._text_emb_cache = {"": self.null_text_emb}
         return torch.cat([self._text_emb_cache[p] for p in normalized], dim=0)
 
     @torch.no_grad()
@@ -184,6 +206,8 @@ class PoseConditionedSD(nn.Module):
         cond_drop_prob: float = 0.1,
         min_timestep: int = 0,
         max_timestep: int | None = None,
+        noise_offset: float = 0.0,
+        min_snr_gamma: float | None = None,
     ) -> torch.Tensor:
         ref1_img = batch["ref1_img"].to(self.device)
         ref2_img = batch["ref2_img"].to(self.device)
@@ -201,6 +225,12 @@ class PoseConditionedSD(nn.Module):
         tgt_lat_clean = self.encode_image(target_img)
 
         noise = torch.randn_like(tgt_lat_clean)
+        if noise_offset > 0:
+            noise = noise + noise_offset * torch.randn(
+                (b, noise.shape[1], 1, 1),
+                device=self.device,
+                dtype=noise.dtype,
+            )
 
         total = int(self.scheduler.config.num_train_timesteps)
         lo = max(0, int(min_timestep))
@@ -229,9 +259,31 @@ class PoseConditionedSD(nn.Module):
                 ref_keep_mask = ~drop
 
         x = self._pack_cat33(ref1_lat, ref2_lat, tgt_lat_noisy, pl1, pl2, plt, ref_keep_mask=ref_keep_mask)
-        eps = self.unet(x, timesteps, encoder_hidden_states=text_emb).sample  # (b,4,h,w)
+        pred = self.unet(x, timesteps, encoder_hidden_states=text_emb).sample
 
-        return F.mse_loss(eps, noise)
+        prediction_type = getattr(self.scheduler.config, "prediction_type", "epsilon")
+        if prediction_type == "epsilon":
+            target = noise
+        elif prediction_type == "v_prediction":
+            target = self.scheduler.get_velocity(tgt_lat_clean, noise, timesteps)
+        else:
+            raise ValueError(f"Unsupported scheduler prediction type: {prediction_type}")
+
+        loss = F.mse_loss(pred.float(), target.float(), reduction="none")
+        loss = loss.mean(dim=(1, 2, 3))
+
+        if min_snr_gamma is not None and min_snr_gamma > 0:
+            alphas = self.scheduler.alphas_cumprod.to(device=self.device, dtype=loss.dtype)
+            alpha_t = alphas[timesteps]
+            snr = alpha_t / (1.0 - alpha_t).clamp_min(1e-8)
+            gamma = torch.full_like(snr, float(min_snr_gamma))
+            if prediction_type == "epsilon":
+                weights = torch.minimum(snr, gamma) / snr.clamp_min(1e-8)
+            else:  # v_prediction
+                weights = torch.minimum(snr, gamma) / (snr + 1.0).clamp_min(1e-8)
+            loss = loss * weights
+
+        return loss.mean()
 
     @torch.inference_mode()
     def sample(

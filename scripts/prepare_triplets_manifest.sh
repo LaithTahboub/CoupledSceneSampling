@@ -9,7 +9,7 @@ CATEGORIES_JSON=${CATEGORIES_JSON:-$ROOT/MegaScenes/metadata/categories.json}
 SCENE_LIST_FILE=${SCENE_LIST_FILE:-}
 DOWNLOAD_SCRIPT=${DOWNLOAD_SCRIPT:-$ROOT/scripts/grunt/download_scene_data.sh}
 
-TARGET_SCENES=${TARGET_SCENES:-}
+TARGET_SCENES=${TARGET_SCENES:-100}
 MAX_CANDIDATES=${MAX_CANDIDATES:-}
 MAX_TRIPLETS_PER_SCENE=${MAX_TRIPLETS_PER_SCENE:-3}
 MAX_PAIR_DIST=${MAX_PAIR_DIST:-2.5}
@@ -78,4 +78,4 @@ else
 fi
 
 export PYTHONUNBUFFERED=1
-uv run -m css.prepare_triplet_manifest "${ARGS[@]}"
+python -m css.prepare_triplet_manifest "${ARGS[@]}"

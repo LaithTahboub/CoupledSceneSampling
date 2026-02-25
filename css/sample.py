@@ -12,7 +12,8 @@ from css.data.dataset import (
     load_image_name_set,
     read_scene_prompt_name,
 )
-from css.models.pose_conditioned_sd import PoseConditionedSD, load_pose_sd_checkpoint
+from css.models.EMA import load_pose_sd_checkpoint
+from css.models.pose_conditioned_sd import PoseConditionedSD
 from css.scene_sampling import (
     build_comparison_grid,
     build_single_sample,
@@ -36,9 +37,9 @@ def main():
     parser.add_argument("--apg-momentum", type=float, default=-0.5, help="APG momentum (ignored unless --apg)")
     parser.add_argument("--apg-norm-threshold", type=float, default=0.0, help="APG norm threshold (ignored unless --apg)")
     parser.add_argument("--apg-eps", type=float, default=1e-12, help="APG epsilon (ignored unless --apg)")
-    parser.add_argument("--max-pair-dist", type=float, default=2.0, help="Max ref-target camera distance")
-    parser.add_argument("--min-dir-sim", type=float, default=0.3, help="Min view direction similarity")
-    parser.add_argument("--min-ref-spacing", type=float, default=0.3, help="Min distance between refs")
+    parser.add_argument("--max-pair-dist", type=float, default=2.5, help="Max ref-target camera distance")
+    parser.add_argument("--min-dir-sim", type=float, default=0.2, help="Min view direction similarity")
+    parser.add_argument("--min-ref-spacing", type=float, default=0.25, help="Min distance between refs")
     parser.add_argument("--exclude-image-list", type=str, default=None)
     parser.add_argument("--target-include-image-list", type=str, default=None)
     parser.add_argument("--reference-include-image-list", type=str, default=None)
@@ -48,7 +49,11 @@ def main():
     parser.add_argument("--start-t", type=int, default=500, help="t value for noisy-target start")
     parser.add_argument("--H", type=int, default=512)
     parser.add_argument("--W", type=int, default=512)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
     scene_dir = Path(args.scene)
     prompt = args.prompt

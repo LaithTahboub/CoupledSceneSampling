@@ -1,6 +1,13 @@
 /MegaScenes/
 /train_ready_data/
 wandb/
+/outputs/
+/experimental_output/
+/splits/
+/checkpoints/
+/css/logs/
+/sample.png
+/holdnode.out
 /mysore_palace_dreambooth_*
 GEN3C/
 Coupled-Diffusion

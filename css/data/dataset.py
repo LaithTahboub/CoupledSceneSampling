@@ -472,7 +472,29 @@ class MegaScenesDataset(Dataset):
             triplets_scored.append((best[0], triplet))
 
         triplets_scored.sort(key=lambda x: x[0])
-        return [triplet for _, triplet in triplets_scored[:max_triplets]]
+
+        # Prefer target diversity first, then fill remaining slots by score.
+        selected_indices: list[int] = []
+        used_targets: set[str] = set()
+        for i, (_, triplet) in enumerate(triplets_scored):
+            target_name = str(triplet[4])
+            if target_name in used_targets:
+                continue
+            used_targets.add(target_name)
+            selected_indices.append(i)
+            if len(selected_indices) >= max_triplets:
+                break
+
+        if len(selected_indices) < max_triplets:
+            selected_set = set(selected_indices)
+            for i in range(len(triplets_scored)):
+                if i in selected_set:
+                    continue
+                selected_indices.append(i)
+                if len(selected_indices) >= max_triplets:
+                    break
+
+        return [triplets_scored[i][1] for i in selected_indices]
 
     @staticmethod
     def _get_viewing_direction(c2w: np.ndarray) -> np.ndarray:
