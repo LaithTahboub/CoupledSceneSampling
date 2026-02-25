@@ -53,7 +53,7 @@ class PoseConditionedSD(nn.Module):
     experiment 1: no cross-view attention.
 
     we concatenate three "views" along channel axis into a single unet input:
-      [ref1_lat, pl1, m1, ref2_lat, pl2, m2, tgt_lat_noisy, plt, mt]
+      [tgt_lat_noisy, plt, mt, ref1_lat, pl1, m1, ref2_lat, pl2, m2]
     where per-view channels = 4(latent) + 6(plucker) + 1(mask) = 11,
     and total channels = 3 * 11 = 33.
 
