@@ -2,29 +2,30 @@
 # Infer a sample from a checkpoint by train/test split index.
 
 set -euo pipefail
-
+#/fs/nexus-scratch/ltahboub/CoupledSceneSampling/splits/multiscene_scenes_test0p10_seed9
 ROOT=${ROOT:-/fs/nexus-scratch/ltahboub/CoupledSceneSampling}
 SCENES_ROOT=${SCENES_ROOT:-$ROOT}
-CHECKPOINT=${CHECKPOINT:-}
-SPLIT_DIR=${SPLIT_DIR:-}
-SPLIT_SET=${SPLIT_SET:-test}          # train | test
-SPLIT_INDEX=${SPLIT_INDEX:-0}         # 0-based index into split file
-TARGET_IDX=${TARGET_IDX:-0}           # target index inside selected scene (scene-split mode)
+CHECKPOINT=${CHECKPOINT:-/fs/nexus-scratch/ltahboub/CoupledSceneSampling/checkpoints/pose_sd_multiscene_test0p10_seed9/unet_final.pt}
+SPLIT_DIR=${SPLIT_DIR:-/fs/nexus-scratch/ltahboub/CoupledSceneSampling/splits/multiscene_scenes_test0p10_seed9}
+SPLIT_SET=${SPLIT_SET:-train}          # train | test
+SPLIT_INDEX=${SPLIT_INDEX:-}         # 0-based index into split file
+TARGET_IDX=${TARGET_IDX:-1}           # target index inside selected scene (scene-split mode)
 SCENE=${SCENE:-}
 REF_SPLIT_SET=${REF_SPLIT_SET:-auto}  # auto | train | test | same
 
 PROMPT=${PROMPT:-""}
 PROMPT_TEMPLATE=${PROMPT_TEMPLATE:-"a photo of {scene}"}
 NUM_STEPS=${NUM_STEPS:-50}
-CFG_SCALE=${CFG_SCALE:-7.5}
+CFG_SCALE=${CFG_SCALE:-3.5}
 MAX_PAIR_DIST=${MAX_PAIR_DIST:-2.5}
-MIN_DIR_SIM=${MIN_DIR_SIM:-0.2}
+MIN_PAIR_IOU=${MIN_PAIR_IOU:-0.15}
 MIN_REF_SPACING=${MIN_REF_SPACING:-0.25}
 H=${H:-512}
 W=${W:-512}
 START_T=${START_T:-500}
 NOISY_TARGET_START=${NOISY_TARGET_START:-0}
-SEED=${SEED:-42}
+SHOW_PLUCKERS=${SHOW_PLUCKERS:-0}
+SEED=${SEED:-4}
 
 OUT_DIR=${OUT_DIR:-$ROOT/outputs}
 OUT_NAME=${OUT_NAME:-}
@@ -76,7 +77,7 @@ ARGS=(
     --num-steps "$NUM_STEPS"
     --cfg-scale "$CFG_SCALE"
     --max-pair-dist "$MAX_PAIR_DIST"
-    --min-dir-sim "$MIN_DIR_SIM"
+    --min-pair-iou "$MIN_PAIR_IOU"
     --min-ref-spacing "$MIN_REF_SPACING"
     --prompt-template "$PROMPT_TEMPLATE"
     --H "$H"
@@ -90,6 +91,9 @@ if [[ -n "$PROMPT" ]]; then
 fi
 if [[ "$NOISY_TARGET_START" == "1" ]]; then
     ARGS+=(--noisy-target-start)
+fi
+if [[ "$SHOW_PLUCKERS" == "1" ]]; then
+    ARGS+=(--show-pluckers)
 fi
 
 # Image-split mode: choose exact target image by index.

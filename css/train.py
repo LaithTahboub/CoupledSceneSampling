@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import math
 import random
 import re
 import signal
@@ -51,17 +50,14 @@ def _set_seed(seed: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _get_cosine_schedule_with_warmup(
+def _get_constant_schedule_with_warmup(
     optimizer: torch.optim.Optimizer,
     num_warmup_steps: int,
-    num_training_steps: int,
-    min_lr_ratio: float = 0.0,
 ) -> LambdaLR:
     def lr_lambda(current_step: int) -> float:
         if current_step < num_warmup_steps:
             return current_step / max(1, num_warmup_steps)
-        progress = (current_step - num_warmup_steps) / max(1, num_training_steps - num_warmup_steps)
-        return min_lr_ratio + (1.0 - min_lr_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+        return 1.0
 
     return LambdaLR(optimizer, lr_lambda)
 
@@ -123,9 +119,7 @@ def _read_lines(path: str | None) -> list[str]:
 def _resolve_scenes(args) -> list[str]:
     merged = list(args.scenes or []) + _read_lines(args.scenes_file)
     if not merged:
-        if args.triplets_manifest:
-            return []
-        raise ValueError("Provide --scenes/--scenes-file or --triplets-manifest")
+        raise ValueError("Provide --scenes or --scenes-file")
 
     scenes = list(OrderedDict.fromkeys(merged))
     if args.max_scenes is not None and len(scenes) > args.max_scenes:
@@ -150,50 +144,79 @@ def _autocast_context(device: torch.device, mixed_precision: str):
 # ---------------------------------------------------------------------------
 
 
+def _generate_sample_grid(
+    model: PoseConditionedSD,
+    dataset: MegaScenesDataset,
+    prompt: str,
+    cfg_scale: float,
+    num_steps: int,
+) -> tuple[np.ndarray, int, str] | None:
+    """Generate a comparison grid from a random dataset sample. Returns (grid, idx, prompt) or None."""
+    if len(dataset) == 0:
+        return None
+    sample_idx = np.random.randint(0, len(dataset))
+    sample = dataset[sample_idx]
+    sample_prompt = sample.get("prompt", prompt)
+    generated = model.sample(
+        sample["ref1_img"].unsqueeze(0),
+        sample["ref2_img"].unsqueeze(0),
+        sample["plucker_ref1"].unsqueeze(0),
+        sample["plucker_ref2"].unsqueeze(0),
+        sample["plucker_tgt"].unsqueeze(0),
+        prompt=sample_prompt,
+        num_steps=num_steps,
+        cfg_scale=cfg_scale,
+    )
+    pluckers = (
+        sample["plucker_ref1"],
+        sample["plucker_ref2"],
+        sample["plucker_tgt"],
+    )
+    grid = build_comparison_grid(
+        sample["ref1_img"],
+        sample["ref2_img"],
+        sample["target_img"],
+        generated[0],
+        prompt=sample_prompt,
+        pluckers=pluckers,
+    )
+    return grid, sample_idx, sample_prompt
+
+
 def _log_sample(
     model: PoseConditionedSD,
     ema: EMAModel,
     trainable_params: list[torch.nn.Parameter],
-    dataset: MegaScenesDataset,
+    train_dataset: MegaScenesDataset,
+    test_dataset: MegaScenesDataset | None,
     prompt: str,
     step: int,
     cfg_scale: float,
     num_steps: int,
 ) -> None:
     try:
-        sample_idx = np.random.randint(0, len(dataset))
-        sample = dataset[sample_idx]
         model.eval()
-
         ema.apply_shadow(trainable_params)
 
-        sample_prompt = sample.get("prompt", prompt)
-        generated = model.sample(
-            sample["ref1_img"].unsqueeze(0),
-            sample["ref2_img"].unsqueeze(0),
-            sample["plucker_ref1"].unsqueeze(0),
-            sample["plucker_ref2"].unsqueeze(0),
-            sample["plucker_tgt"].unsqueeze(0),
-            prompt=sample_prompt,
-            num_steps=num_steps,
-            cfg_scale=cfg_scale,
-        )
-        grid = build_comparison_grid(
-            sample["ref1_img"],
-            sample["ref2_img"],
-            sample["target_img"],
-            generated[0],
-            prompt=sample_prompt,
-        )
-        wandb.log(
-            {
-                "samples/comparison": wandb.Image(
-                    grid,
-                    caption=f'idx={sample_idx} prompt="{sample_prompt}"',
+        log_dict = {}
+
+        train_result = _generate_sample_grid(model, train_dataset, prompt, cfg_scale, num_steps)
+        if train_result is not None:
+            grid, idx, sample_prompt = train_result
+            log_dict["samples/train"] = wandb.Image(
+                grid, caption=f'idx={idx} prompt="{sample_prompt}"',
+            )
+
+        if test_dataset is not None and len(test_dataset) > 0:
+            test_result = _generate_sample_grid(model, test_dataset, prompt, cfg_scale, num_steps)
+            if test_result is not None:
+                grid, idx, sample_prompt = test_result
+                log_dict["samples/test"] = wandb.Image(
+                    grid, caption=f'idx={idx} prompt="{sample_prompt}"',
                 )
-            },
-            step=step,
-        )
+
+        if log_dict:
+            wandb.log(log_dict, step=step)
 
     except Exception as exc:
         print(f"[warning] sample generation failed: {exc}")
@@ -264,6 +287,7 @@ def train(
     grad_clip: float,
     mixed_precision: str,
     resume_from: str | None,
+    test_dataset: MegaScenesDataset | None = None,
 ) -> None:
     global _save_requested
 
@@ -302,12 +326,9 @@ def train(
         weight_decay=weight_decay,
     )
 
-    steps_per_epoch = math.ceil(len(dataloader) / grad_accum_steps)
-    total_training_steps = num_epochs * steps_per_epoch
-    lr_scheduler = _get_cosine_schedule_with_warmup(
+    lr_scheduler = _get_constant_schedule_with_warmup(
         optimizer,
         num_warmup_steps=warmup_steps,
-        num_training_steps=total_training_steps,
     )
 
     ema = EMAModel(trainable_params, decay=ema_decay)
@@ -451,6 +472,7 @@ def train(
                     ema,
                     trainable_params,
                     dataset,
+                    test_dataset,
                     prompt,
                     global_step,
                     cfg_scale=sample_cfg_scale,
@@ -517,7 +539,6 @@ def main() -> None:
     p.add_argument("--scenes", nargs="*", default=None)
     p.add_argument("--scenes-file", type=str, default=None)
     p.add_argument("--max-scenes", type=int, default=None)
-    p.add_argument("--triplets-manifest", type=str, default=None, help="Optional packed triplet jsonl")
 
     p.add_argument("--output", required=True)
     p.add_argument("--epochs", type=int, default=100)
@@ -538,11 +559,11 @@ def main() -> None:
     p.add_argument("--mixed-precision", choices=["no", "fp16", "bf16"], default="bf16")
     p.add_argument("--seed", type=int, default=42)
 
-    p.add_argument("--prompt", default="a photo of a scene")
-    p.add_argument("--prompt-template", type=str, default="a photo of {scene}")
+    p.add_argument("--prompt", default="")
+    p.add_argument("--prompt-template", type=str, default="")
 
     p.add_argument("--max-pair-dist", type=float, default=2.5)
-    p.add_argument("--min-dir-sim", type=float, default=0.2)
+    p.add_argument("--min-pair-iou", type=float, default=0.15)
     p.add_argument("--min-ref-spacing", type=float, default=0.25)
     p.add_argument("--max-triplets", type=int, default=24)
 
@@ -552,7 +573,7 @@ def main() -> None:
     p.add_argument("--min-timestep", type=int, default=20)
     p.add_argument("--max-timestep", type=int, default=980)
 
-    p.add_argument("--sample-cfg-scale", type=float, default=7.5)
+    p.add_argument("--sample-cfg-scale", type=float, default=3.5)
     p.add_argument("--sample-steps", type=int, default=50)
     p.add_argument("--sample-every", type=int, default=1)
 
@@ -563,6 +584,8 @@ def main() -> None:
     p.add_argument("--unet-train-mode", choices=["full", "cond"], default="cond")
     p.add_argument("--gradient-checkpointing", action="store_true")
     p.add_argument("--xformers-attention", action="store_true")
+
+    p.add_argument("--test-scenes-file", type=str, default=None, help="Test scenes file for visualization sampling")
 
     p.add_argument("--exclude-image-list", type=str, default=None)
     p.add_argument("--target-include-image-list", type=str, default=None)
@@ -606,10 +629,7 @@ def main() -> None:
     reference_include_image_names = load_image_name_set(args.reference_include_image_list)
 
     scenes = _resolve_scenes(args)
-    if args.triplets_manifest is not None:
-        print(f"Using triplets manifest: {args.triplets_manifest}")
-    else:
-        print(f"Using {len(scenes)} scenes")
+    print(f"Using {len(scenes)} scenes")
 
     dataset = MegaScenesDataset(
         scenes,
@@ -617,17 +637,33 @@ def main() -> None:
         W=args.W,
         max_pair_distance=args.max_pair_dist,
         max_triplets_per_scene=args.max_triplets,
-        min_dir_similarity=args.min_dir_sim,
+        min_pair_iou=args.min_pair_iou,
         min_ref_spacing=args.min_ref_spacing,
         exclude_image_names=exclude_image_names,
         target_include_image_names=target_include_image_names,
         reference_include_image_names=reference_include_image_names,
         prompt_template=args.prompt_template,
-        triplets_manifest=args.triplets_manifest,
     )
     print(f"Found {len(dataset)} training triplets")
     if len(dataset) == 0:
         raise ValueError("Dataset has 0 triplets. Relax constraints or adjust split files.")
+
+    test_dataset = None
+    if args.test_scenes_file:
+        test_scenes = _read_lines(args.test_scenes_file)
+        if test_scenes:
+            print(f"Loading test dataset ({len(test_scenes)} scenes)...")
+            test_dataset = MegaScenesDataset(
+                test_scenes,
+                H=args.H,
+                W=args.W,
+                max_pair_distance=args.max_pair_dist,
+                max_triplets_per_scene=3,
+                min_pair_iou=args.min_pair_iou,
+                min_ref_spacing=args.min_ref_spacing,
+                prompt_template=args.prompt_template,
+            )
+            print(f"Found {len(test_dataset)} test triplets")
 
     print("Starting training...")
     train(
@@ -660,6 +696,7 @@ def main() -> None:
         grad_clip=args.grad_clip,
         mixed_precision=args.mixed_precision,
         resume_from=args.resume_from,
+        test_dataset=test_dataset,
     )
 
     wandb.finish()

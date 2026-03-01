@@ -9,7 +9,9 @@ from PIL import Image, ImageDraw
 from css.data.colmap_reader import Camera, ImageData, read_scene
 from css.data.dataset import (
     build_cropped_scaled_intrinsics,
+    compute_frustum_iou,
     compute_plucker_tensor,
+    compute_reference_depth,
     load_image_tensor,
     name_allowed,
 )
@@ -115,43 +117,48 @@ def load_scene_pools(
     return cameras, images_dir, target_images, reference_images
 
 
-def compute_viewing_direction(c2w: np.ndarray) -> np.ndarray:
-    return -c2w[:3, 2]
-
-
 def find_best_references(
     target_img: ImageData,
     all_images: list[ImageData],
-    max_dist: float = 2.0,
-    min_dir_sim: float = 0.3,
+    cameras: dict[int, Camera],
+    H: int = 512,
+    W: int = 512,
+    max_dist: float = 2.5,
+    min_pair_iou: float = 0.15,
     min_ref_spacing: float = 0.3,
 ) -> tuple[ImageData, ImageData]:
     target_pos = target_img.c2w[:3, 3]
-    target_dir = compute_viewing_direction(target_img.c2w)
+    K_tgt = build_cropped_scaled_intrinsics(cameras[target_img.camera_id], H, W)
+
+    positions = {img.id: img.c2w[:3, 3] for img in all_images}
+    positions[target_img.id] = target_pos
+    d_ref = compute_reference_depth(positions)
 
     candidates = []
     for img in all_images:
         if img.id == target_img.id:
             continue
 
-        pos = img.c2w[:3, 3]
-        direction = compute_viewing_direction(img.c2w)
-
-        distance = np.linalg.norm(pos - target_pos)
+        distance = float(np.linalg.norm(img.c2w[:3, 3] - target_pos))
         if distance > max_dist:
             continue
 
-        dir_sim = float(np.dot(target_dir, direction))
-        if dir_sim < min_dir_sim:
+        K_ref = build_cropped_scaled_intrinsics(cameras[img.camera_id], H, W)
+        iou = compute_frustum_iou(
+            target_img.c2w, K_tgt,
+            img.c2w, K_ref,
+            H, W, d_ref,
+        )
+        if iou < min_pair_iou:
             continue
 
-        score = distance * (2.0 - dir_sim)
-        candidates.append((score, img))
+        candidates.append((iou, img))
 
     if len(candidates) < 2:
         raise ValueError(f"Not enough valid references found for target {target_img.name}")
 
-    candidates.sort(key=lambda x: x[0])
+    # Sort by IoU descending (best overlap first).
+    candidates.sort(key=lambda x: x[0], reverse=True)
     ref1 = candidates[0][1]
 
     for _, img in candidates[1:]:
@@ -200,19 +207,67 @@ def to_uint8(t: torch.Tensor) -> np.ndarray:
     return ((t.clamp(-1, 1) + 1) / 2 * 255).byte().permute(1, 2, 0).cpu().numpy()
 
 
+def plucker_to_rgb(plucker: torch.Tensor, H: int, W: int) -> np.ndarray:
+    """Visualize Plucker ray map as RGB using direction channels.
+
+    The first 3 channels are the normalized ray direction (d_x, d_y, d_z),
+    mapped from [-1, 1] to [0, 255] and upsampled to (H, W).
+
+    Args:
+        plucker: (6, h, w) Plucker ray tensor at latent resolution.
+        H, W: target output resolution.
+
+    Returns:
+        (H, W, 3) uint8 numpy array.
+    """
+    dirs = plucker[:3].float().cpu()  # (3, h, w)
+    dirs = torch.nn.functional.interpolate(
+        dirs.unsqueeze(0), size=(H, W), mode="bilinear", align_corners=False,
+    )[0]  # (3, H, W)
+    return ((dirs.clamp(-1, 1) + 1) / 2 * 255).byte().permute(1, 2, 0).numpy()
+
+
 def build_comparison_grid(
     ref1_img: torch.Tensor,
     ref2_img: torch.Tensor,
     target_img: torch.Tensor,
     generated_img: torch.Tensor,
     prompt: str | None = None,
+    pluckers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> np.ndarray:
-    grid = np.concatenate([
+    """Build a horizontal comparison grid.
+
+    Args:
+        ref1_img, ref2_img, target_img, generated_img: (3, H, W) image tensors.
+        prompt: optional text overlay.
+        pluckers: optional (pl_ref1, pl_ref2, pl_tgt) each (6, h, w).
+            When provided, a second row of Plucker direction visualizations
+            is appended below the images.  The fourth column (generated) gets
+            a blank placeholder since there is no Plucker map for it.
+    """
+    H = ref1_img.shape[1]
+    W = ref1_img.shape[2]
+
+    img_row = np.concatenate([
         to_uint8(ref1_img),
         to_uint8(ref2_img),
         to_uint8(target_img),
         to_uint8(generated_img),
     ], axis=1)
+
+    if pluckers is not None:
+        pl_ref1, pl_ref2, pl_tgt = pluckers
+        blank = np.zeros((H, W, 3), dtype=np.uint8)
+        pl_row = np.concatenate([
+            plucker_to_rgb(pl_ref1, H, W),
+            plucker_to_rgb(pl_ref2, H, W),
+            plucker_to_rgb(pl_tgt, H, W),
+            blank,
+        ], axis=1)
+        grid = np.concatenate([img_row, pl_row], axis=0)
+    else:
+        grid = img_row
+
     if not prompt:
         return grid
 

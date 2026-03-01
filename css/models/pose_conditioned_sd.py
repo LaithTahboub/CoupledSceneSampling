@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from einops import rearrange
-from diffusers import AutoencoderKL, UNet2DConditionModel, DDPMScheduler
+from diffusers import AutoencoderKL, UNet2DConditionModel, DDPMScheduler, DPMSolverMultistepScheduler, EulerDiscreteScheduler
 from transformers import CLIPTextModel, CLIPTokenizer
 from tqdm import tqdm
 
@@ -51,9 +51,7 @@ def expand_conv_in(unet: UNet2DConditionModel, new_in_channels: int) -> None:
 # channel-concat cat3d-style conditioning (no cross-view attention)
 class PoseConditionedSD(nn.Module):
     """
-    experiment 1: no cross-view attention.
-
-    we concatenate three "views" along channel axis into a single unet input:
+    concatenate three "views" along channel axis into a single unet input:
       [tgt_lat_noisy, plt, mt, ref1_lat, pl1, m1, ref2_lat, pl2, m2]
     where per-view channels = 4(latent) + 6(plucker) + 1(mask) = 11,
     and total channels = 3 * 11 = 33.
@@ -76,7 +74,8 @@ class PoseConditionedSD(nn.Module):
         self.text_encoder = CLIPTextModel.from_pretrained(pretrained_model, subfolder="text_encoder").to(self.device)
         self.tokenizer = CLIPTokenizer.from_pretrained(pretrained_model, subfolder="tokenizer")
         self.scheduler = DDPMScheduler.from_pretrained(pretrained_model, subfolder="scheduler")
-
+        self.inference_scheduler = EulerDiscreteScheduler.from_config(self.scheduler.config)
+        
         self.vae.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
         self.vae.eval()
@@ -315,18 +314,20 @@ class PoseConditionedSD(nn.Module):
         text_cond = self.get_text_embedding(prompt).expand(b, -1, -1)
         text_uncond = self.null_text_emb.expand(b, -1, -1)
 
-        self.scheduler.set_timesteps(num_steps)
+        scheduler = self.scheduler
+
+        scheduler.set_timesteps(num_steps)
 
         if target is not None:
             tgt_lat = self.encode_image(target.to(self.device))
             noise = torch.randn_like(tgt_lat)
-            start_t = max(0, min(int(self.scheduler.config.num_train_timesteps) - 1, int(start_t)))
+            start_t = max(0, min(int(scheduler.config.num_train_timesteps) - 1, int(start_t)))
             t0 = torch.full((b,), start_t, device=self.device, dtype=torch.long)
-            latent = self.scheduler.add_noise(tgt_lat, noise, t0)
-            timesteps = self.scheduler.timesteps[self.scheduler.timesteps <= start_t]
+            latent = scheduler.add_noise(tgt_lat, noise, t0)
+            timesteps = scheduler.timesteps[scheduler.timesteps <= start_t]
         else:
             latent = torch.randn_like(ref1_lat)
-            timesteps = self.scheduler.timesteps
+            timesteps = scheduler.timesteps
 
         use_apg_guidance = use_apg and cfg_scale > 1.0
         use_cfg = (not use_apg_guidance) and cfg_scale > 1.0
@@ -345,6 +346,8 @@ class PoseConditionedSD(nn.Module):
             t_val = int(t.item()) if isinstance(t, torch.Tensor) else int(t)
             t_b = torch.full((b,), t_val, device=self.device, dtype=torch.long)
 
+            latent = scheduler.scale_model_input(latent, t)
+            
             if use_cfg or use_apg_guidance:
                 x_cond = self._pack_cat33(ref1_lat, ref2_lat, latent, pl1, pl2, plt, ref_keep_mask=None)
                 eps_cond = self.unet(x_cond, t_b, encoder_hidden_states=text_cond).sample
@@ -362,6 +365,6 @@ class PoseConditionedSD(nn.Module):
                 x = self._pack_cat33(ref1_lat, ref2_lat, latent, pl1, pl2, plt, ref_keep_mask=None)
                 eps = self.unet(x, t_b, encoder_hidden_states=text_cond).sample
 
-            latent = self.scheduler.step(eps, t, latent).prev_sample
+            latent = scheduler.step(eps, t, latent).prev_sample
 
         return self.decode_latent(latent)

@@ -36,7 +36,7 @@ WANDB_ID=${WANDB_ID:-}
 
 PROMPT=${PROMPT:-"a photo of ${SCENE_TEXT}"}
 MAX_PAIR_DIST=${MAX_PAIR_DIST:-2.0}
-MIN_DIR_SIM=${MIN_DIR_SIM:-0.3}
+MIN_PAIR_IOU=${MIN_PAIR_IOU:-0.15}
 MIN_REF_SPACING=${MIN_REF_SPACING:-0.3}
 MAX_TRIPLETS=${MAX_TRIPLETS:-24}
 
@@ -98,7 +98,7 @@ TRAIN_ARGS=(
     --mixed-precision "$MIXED_PRECISION"
     --seed "$SEED"
     --max-pair-dist "$MAX_PAIR_DIST"
-    --min-dir-sim "$MIN_DIR_SIM"
+    --min-pair-iou "$MIN_PAIR_IOU"
     --min-ref-spacing "$MIN_REF_SPACING"
     --max-triplets "$MAX_TRIPLETS"
     --save-every "$SAVE_EVERY"

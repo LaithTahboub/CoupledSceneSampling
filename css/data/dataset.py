@@ -6,7 +6,6 @@ notes:
 - plucker rays are computed per view and can be anchored to any camera pose.
 """
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -244,23 +243,100 @@ def compute_plucker_tensor(
     return plucker[0]
 
 
+def compute_reference_depth(positions: dict[int, np.ndarray]) -> float:
+    """Median distance from camera positions to their centroid.
+
+    Provides a scene-adaptive reference depth for frustum IoU computation.
+    """
+    pos_list = list(positions.values())
+    if len(pos_list) < 2:
+        return 1.0
+    centroid = np.mean(pos_list, axis=0)
+    dists = [float(np.linalg.norm(p - centroid)) for p in pos_list]
+    return float(np.median(dists))
+
+
+def compute_frustum_iou(
+    c2w_i: np.ndarray,
+    K_i: np.ndarray,
+    c2w_j: np.ndarray,
+    K_j: np.ndarray,
+    H: int,
+    W: int,
+    d_ref: float,
+    M: int = 16,
+) -> float:
+    """Approximate frustum IoU between two cameras at reference depth d_ref.
+
+    Samples an MxM pixel grid in each camera, backprojects to 3D at d_ref,
+    projects into the other camera, and counts in-bounds hits.  Combines
+    the two directional coverages into an IoU estimate:
+        IoU = (r_ij * r_ji) / (r_ij + r_ji - r_ij * r_ji)
+    where r_ij = fraction of camera-i samples visible in camera j.
+    """
+    n = M * M
+    u = np.linspace(0.5, W - 0.5, M)
+    v = np.linspace(0.5, H - 0.5, M)
+    uu, vv = np.meshgrid(u, v)
+    pixels = np.stack([uu.ravel(), vv.ravel(), np.ones(n)], axis=0)  # (3, n)
+
+    # -- forward: sample camera i, project into camera j ----------------
+    K_i_inv = np.linalg.inv(K_i)
+    rays_cam = K_i_inv @ pixels                       # (3, n) camera-i frame
+    pts_cam = rays_cam * (d_ref / rays_cam[2:3, :])   # depth along optical axis
+    pts_world = c2w_i[:3, :3] @ pts_cam + c2w_i[:3, 3:4]
+
+    R_j_T = c2w_j[:3, :3].T
+    t_j = c2w_j[:3, 3]
+    pts_cam_j = R_j_T @ (pts_world - t_j[:, None])
+    valid = pts_cam_j[2, :] > 0
+    z_safe = np.where(valid, pts_cam_j[2, :], 1.0)
+    proj = K_j @ pts_cam_j
+    u_j = proj[0, :] / z_safe
+    v_j = proj[1, :] / z_safe
+    hits_ij = valid & (u_j >= 0) & (u_j < W) & (v_j >= 0) & (v_j < H)
+    r_ij = hits_ij.sum() / n
+
+    # -- reverse: sample camera j, project into camera i ----------------
+    K_j_inv = np.linalg.inv(K_j)
+    rays_cam_j = K_j_inv @ pixels
+    pts_cam_j2 = rays_cam_j * (d_ref / rays_cam_j[2:3, :])
+    pts_world2 = c2w_j[:3, :3] @ pts_cam_j2 + c2w_j[:3, 3:4]
+
+    R_i_T = c2w_i[:3, :3].T
+    t_i = c2w_i[:3, 3]
+    pts_cam_i = R_i_T @ (pts_world2 - t_i[:, None])
+    valid2 = pts_cam_i[2, :] > 0
+    z_safe2 = np.where(valid2, pts_cam_i[2, :], 1.0)
+    proj2 = K_i @ pts_cam_i
+    u_i = proj2[0, :] / z_safe2
+    v_i = proj2[1, :] / z_safe2
+    hits_ji = valid2 & (u_i >= 0) & (u_i < W) & (v_i >= 0) & (v_i < H)
+    r_ji = hits_ji.sum() / n
+
+    # -- combine into IoU -----------------------------------------------
+    denom = r_ij + r_ji - r_ij * r_ji
+    if denom < 1e-12:
+        return 0.0
+    return float((r_ij * r_ji) / denom)
+
+
 class MegaScenesDataset(Dataset):
     """Lazy dataset: load images and compute Plucker maps per sample."""
 
     def __init__(
         self,
-        scene_dirs: list[str] | None = None,
+        scene_dirs: list[str],
         H: int = 512,
         W: int = 512,
         max_pair_distance: float = 2.0,
         max_triplets_per_scene: int = 8,
-        min_dir_similarity: float = 0.3,
+        min_pair_iou: float = 0.15,
         min_ref_spacing: float = 0.3,
         exclude_image_names: set[str] | None = None,
         target_include_image_names: set[str] | None = None,
         reference_include_image_names: set[str] | None = None,
         prompt_template: str | None = None,
-        triplets_manifest: str | None = None,
     ):
         self.H, self.W = H, W
         self.latent_h, self.latent_w = H // 8, W // 8
@@ -279,24 +355,20 @@ class MegaScenesDataset(Dataset):
             raise ValueError("max_triplets_per_scene must be >= 1")
 
         self.triplets = []
-        if triplets_manifest is not None:
-            self.triplets.extend(self._load_triplets_manifest(Path(triplets_manifest)))
-        else:
-            scene_specs = list(scene_dirs or [])
-            for scene_spec in scene_specs:
-                scene_dir = Path(scene_spec)
-                scene_key = scene_dir.name
-                self.scene_prompt_names[scene_key] = clean_scene_prompt_name(read_scene_prompt_name(scene_dir))
-                self.triplets.extend(
-                    self._build_triplets(
-                        scene_dir,
-                        scene_key,
-                        max_pair_distance,
-                        max_triplets_per_scene,
-                        min_dir_similarity,
-                        min_ref_spacing,
-                    )
+        for scene_spec in scene_dirs:
+            scene_dir = Path(scene_spec)
+            scene_key = scene_dir.name
+            self.scene_prompt_names[scene_key] = clean_scene_prompt_name(read_scene_prompt_name(scene_dir))
+            self.triplets.extend(
+                self._build_triplets(
+                    scene_dir,
+                    scene_key,
+                    max_pair_distance,
+                    max_triplets_per_scene,
+                    min_pair_iou,
+                    min_ref_spacing,
                 )
+            )
 
         self.n = len(self.triplets)
         if self.n == 0:
@@ -312,57 +384,7 @@ class MegaScenesDataset(Dataset):
             unique_images.add(str(images_dir / tgt_name))
         print(f"Dataset ready: {self.n} triplets, {len(unique_images)} unique images, {len(scene_names)} scenes")
 
-    def _load_triplets_manifest(self, manifest_path: Path):
-        if not manifest_path.exists():
-            raise FileNotFoundError(f"Triplets manifest not found: {manifest_path}")
-
-        base_dir = manifest_path.parent
-        triplets = []
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            for line_no, raw in enumerate(f, start=1):
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-
-                row = json.loads(line)
-                scene_name = str(row["scene_name"])
-                scene_prompt_name = str(row.get("scene_prompt_name", scene_name))
-                images_dir_raw = str(row["images_dir"])
-                images_dir = Path(images_dir_raw)
-                if not images_dir.is_absolute():
-                    images_dir = (base_dir / images_dir).resolve()
-
-                ref1_c2w = np.asarray(row["ref1_c2w"], dtype=np.float32)
-                ref2_c2w = np.asarray(row["ref2_c2w"], dtype=np.float32)
-                tgt_c2w = np.asarray(row["target_c2w"], dtype=np.float32)
-                K_ref1 = np.asarray(row["K_ref1"], dtype=np.float32)
-                K_ref2 = np.asarray(row["K_ref2"], dtype=np.float32)
-                K_tgt = np.asarray(row["K_tgt"], dtype=np.float32)
-
-                if ref1_c2w.shape != (4, 4) or ref2_c2w.shape != (4, 4) or tgt_c2w.shape != (4, 4):
-                    raise ValueError(f"{manifest_path}:{line_no} invalid c2w shape")
-                if K_ref1.shape != (3, 3) or K_ref2.shape != (3, 3) or K_tgt.shape != (3, 3):
-                    raise ValueError(f"{manifest_path}:{line_no} invalid intrinsics shape")
-
-                self.scene_prompt_names[scene_name] = clean_scene_prompt_name(scene_prompt_name)
-                triplets.append(
-                    (
-                        scene_name,
-                        images_dir,
-                        str(row["ref1_name"]),
-                        str(row["ref2_name"]),
-                        str(row["target_name"]),
-                        ref1_c2w,
-                        ref2_c2w,
-                        tgt_c2w,
-                        K_ref1,
-                        K_ref2,
-                        K_tgt,
-                    )
-                )
-        return triplets
-
-    def _build_triplets(self, scene_dir: Path, scene_key: str, max_dist, max_triplets, min_dir_sim, min_ref_spacing):
+    def _build_triplets(self, scene_dir: Path, scene_key: str, max_dist, max_triplets, min_pair_iou, min_ref_spacing):
         cameras, images = read_scene(scene_dir)
         images_dir = scene_dir / "images"
         rel_set, unique_basename = _index_scene_images(images_dir)
@@ -390,63 +412,67 @@ class MegaScenesDataset(Dataset):
             return []
 
         positions = {img.id: img.c2w[:3, 3] for img in valid}
-        directions = {img.id: self._get_viewing_direction(img.c2w) for img in valid}
+        K_by_id = {img.id: self._build_K(cameras[img.camera_id]) for img in valid}
         target_ids = {img.id for img in targets}
+        d_ref = compute_reference_depth(positions)
 
         triplets_scored: list[tuple[float, tuple]] = []
         for ref1 in refs_pool:
             ref1_pos = positions[ref1.id]
-            ref1_dir = directions[ref1.id]
+            ref1_K = K_by_id[ref1.id]
 
-            strict_ref2: list[tuple[float, object]] = []
-            relaxed_ref2: list[tuple[float, object]] = []
+            # Candidate ref2 cameras (strict only, no fallback).
+            ref2_candidates: list[tuple[float, object]] = []
             for ref2 in refs_pool:
                 if ref2.id == ref1.id:
                     continue
                 dist = float(np.linalg.norm(positions[ref2.id] - ref1_pos))
-                sim = float(np.dot(ref1_dir, directions[ref2.id]))
-                score = dist * (2.0 - sim)
-                relaxed_ref2.append((score, ref2))
                 if dist < min_ref_spacing:
                     continue
                 if max_dist > 0 and dist > max_dist:
                     continue
-                if sim < min_dir_sim:
+                iou = compute_frustum_iou(
+                    ref1.c2w, ref1_K,
+                    ref2.c2w, K_by_id[ref2.id],
+                    self.H, self.W, d_ref,
+                )
+                if iou < min_pair_iou:
                     continue
-                strict_ref2.append((score, ref2))
+                ref2_candidates.append((iou, ref2))
 
-            strict_targets: list[tuple[float, object]] = []
-            relaxed_targets: list[tuple[float, object]] = []
+            # Candidate targets (strict only, no fallback).
+            target_candidates: list[tuple[float, object]] = []
             for tgt in valid:
                 if tgt.id == ref1.id:
                     continue
                 if tgt.id not in target_ids:
                     continue
                 dist = float(np.linalg.norm(positions[tgt.id] - ref1_pos))
-                sim = float(np.dot(ref1_dir, directions[tgt.id]))
-                score = dist * (2.0 - sim)
-                relaxed_targets.append((score, tgt))
                 if max_dist > 0 and dist > max_dist:
                     continue
-                if sim < min_dir_sim:
+                iou = compute_frustum_iou(
+                    ref1.c2w, ref1_K,
+                    tgt.c2w, K_by_id[tgt.id],
+                    self.H, self.W, d_ref,
+                )
+                if iou < min_pair_iou:
                     continue
-                strict_targets.append((score, tgt))
+                target_candidates.append((iou, tgt))
 
-            ref2_pool = strict_ref2 if len(strict_ref2) > 0 else relaxed_ref2
-            target_pool = strict_targets if len(strict_targets) > 0 else relaxed_targets
-            if len(ref2_pool) == 0 or len(target_pool) == 0:
+            if len(ref2_candidates) == 0 or len(target_candidates) == 0:
                 continue
 
-            ref2_pool.sort(key=lambda x: x[0])
-            target_pool.sort(key=lambda x: x[0])
+            # Sort by IoU descending (higher = better overlap).
+            ref2_candidates.sort(key=lambda x: x[0], reverse=True)
+            target_candidates.sort(key=lambda x: x[0], reverse=True)
 
             best = None
-            for ref2_score, ref2 in ref2_pool[:20]:
-                for tgt_score, tgt in target_pool[:20]:
+            for ref2_iou, ref2 in ref2_candidates[:20]:
+                for tgt_iou, tgt in target_candidates[:20]:
                     if tgt.id == ref2.id:
                         continue
-                    combo = ref2_score + tgt_score
-                    if best is None or combo < best[0]:
+                    combo = ref2_iou + tgt_iou
+                    if best is None or combo > best[0]:
                         best = (combo, ref2, tgt)
                     break
             if best is None:
@@ -471,7 +497,8 @@ class MegaScenesDataset(Dataset):
             )
             triplets_scored.append((best[0], triplet))
 
-        triplets_scored.sort(key=lambda x: x[0])
+        # Sort by score descending (higher IoU = better).
+        triplets_scored.sort(key=lambda x: x[0], reverse=True)
 
         # Prefer target diversity first, then fill remaining slots by score.
         selected_indices: list[int] = []
@@ -495,10 +522,6 @@ class MegaScenesDataset(Dataset):
                     break
 
         return [triplets_scored[i][1] for i in selected_indices]
-
-    @staticmethod
-    def _get_viewing_direction(c2w: np.ndarray) -> np.ndarray:
-        return -c2w[:3, 2]
 
     def _scene_prompt(self, scene_name: str) -> str:
         if not self.prompt_template:

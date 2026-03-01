@@ -38,7 +38,7 @@ def main():
     parser.add_argument("--apg-norm-threshold", type=float, default=0.0, help="APG norm threshold (ignored unless --apg)")
     parser.add_argument("--apg-eps", type=float, default=1e-12, help="APG epsilon (ignored unless --apg)")
     parser.add_argument("--max-pair-dist", type=float, default=2.5, help="Max ref-target camera distance")
-    parser.add_argument("--min-dir-sim", type=float, default=0.2, help="Min view direction similarity")
+    parser.add_argument("--min-pair-iou", type=float, default=0.15, help="Min frustum IoU between paired cameras")
     parser.add_argument("--min-ref-spacing", type=float, default=0.25, help="Min distance between refs")
     parser.add_argument("--exclude-image-list", type=str, default=None)
     parser.add_argument("--target-include-image-list", type=str, default=None)
@@ -46,6 +46,7 @@ def main():
     parser.add_argument("--output", default="sample.png", help="Output path")
     parser.add_argument("--noisy-target-start", action="store_true")
     parser.add_argument("--show-refs", action="store_true", help="Also save reference images")
+    parser.add_argument("--show-pluckers", action="store_true", help="Include Plucker ray direction maps in grid")
     parser.add_argument("--start-t", type=int, default=500, help="t value for noisy-target start")
     parser.add_argument("--H", type=int, default=512)
     parser.add_argument("--W", type=int, default=512)
@@ -98,8 +99,11 @@ def main():
     ref1_img, ref2_img = find_best_references(
         target_img,
         reference_images,
+        cameras,
+        H=args.H,
+        W=args.W,
         max_dist=args.max_pair_dist,
-        min_dir_sim=args.min_dir_sim,
+        min_pair_iou=args.min_pair_iou,
         min_ref_spacing=args.min_ref_spacing,
     )
     print(f"Selected refs: {ref1_img.name}, {ref2_img.name}")
@@ -109,7 +113,7 @@ def main():
     guidance_mode = "apg" if args.apg else "cfg"
     print(
         f'\nGenerating with {args.num_steps} steps, guidance={guidance_mode}, '
-        f'cfg_scale={args.cfg_scale}, prompt="{prompt}"'
+        f'cfg_scale={args.cfg_scale}, prompt="{prompt}", seed={args.seed}'
     )
     with torch.inference_mode():
         generated = model.sample(
@@ -127,12 +131,20 @@ def main():
             apg_eps=args.apg_eps,
         )
 
+    pluckers = None
+    if args.show_pluckers:
+        pluckers = (
+            sample["plucker_ref1"][0],
+            sample["plucker_ref2"][0],
+            sample["plucker_tgt"][0],
+        )
     grid = build_comparison_grid(
         sample["ref1_img"][0],
         sample["ref2_img"][0],
         sample["target_img"][0],
         generated[0],
         prompt=prompt,
+        pluckers=pluckers,
     )
 
     output_path = Path(args.output)
