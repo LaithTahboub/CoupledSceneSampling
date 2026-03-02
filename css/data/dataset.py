@@ -272,6 +272,10 @@ def _effective_focal(K: np.ndarray) -> float:
     return float(np.sqrt(fx * fy))
 
 
+def _clamp_int(value: int, low: int, high: int) -> int:
+    return max(low, min(high, int(value)))
+
+
 class MegaScenesDataset(Dataset):
     """Lazy dataset: load images and compute Plucker maps per sample."""
 
@@ -399,12 +403,22 @@ class MegaScenesDataset(Dataset):
         iou_cache: dict[tuple[int, int], float] = {}
         metric_cache: dict[tuple[int, int], dict[str, float]] = {}
         dist_scale = max(max_pair_distance, d_ref, 1e-6)
-        prefilter_k = max(1, int(pair_prefilter_topk))
-        pool_k = max(1, int(candidate_pool_topk))
+        prefilter_k_req = max(1, int(pair_prefilter_topk))
+        pool_k_req = max(1, int(candidate_pool_topk))
+        # Safety caps: prevent pathological runtimes from huge user-provided values.
+        prefilter_k = _clamp_int(prefilter_k_req, 1, 512)
+        pool_k = _clamp_int(pool_k_req, 1, 64)
+        triplets_per_ref1 = 2
+        max_combo_checks_per_ref1 = max(128, min(2048, pool_k * pool_k))
         # Two-stage retrieval:
         # 1) cheap pose/focal gating + ranking
         # 2) true volumetric frustum IoU on top-k only
         # This preserves geometric quality while keeping build time reasonable.
+        if prefilter_k != prefilter_k_req or pool_k != pool_k_req:
+            print(
+                f"{scene_key}: clamped pair_prefilter_topk {prefilter_k_req}->{prefilter_k}, "
+                f"candidate_pool_topk {pool_k_req}->{pool_k}",
+            )
 
         def pair_key(i_id: int, j_id: int) -> tuple[int, int]:
             return (i_id, j_id) if i_id < j_id else (j_id, i_id)
@@ -514,44 +528,56 @@ class MegaScenesDataset(Dataset):
             ref2_candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
             target_candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
 
-            best = None
+            scored_pairs: list[tuple[float, object, object]] = []
+            combo_checks = 0
             for ref2_iou, ref2_pref, ref2 in ref2_candidates[:pool_k]:
                 for tgt_iou, tgt_pref, tgt in target_candidates[:pool_k]:
+                    combo_checks += 1
+                    if combo_checks > max_combo_checks_per_ref1:
+                        break
                     if tgt.id == ref2.id:
                         continue
                     # Ensure target is also close/similar to ref2.
                     if not passes_pair(ref2.id, tgt.id):
                         continue
                     iou_r2_t = pair_iou(ref2.id, tgt.id)
-                    if iou_r2_t < min_pair_iou:
-                        continue
                     combo = (
-                        ref2_iou + tgt_iou + iou_r2_t
+                        ref2_iou + tgt_iou + 0.35 * iou_r2_t
                         + 0.10 * (ref2_pref + tgt_pref + pair_prefilter_score(ref2.id, tgt.id))
                     )
-                    if best is None or combo > best[0]:
-                        best = (combo, ref2, tgt)
-            if best is None:
+                    scored_pairs.append((combo, ref2, tgt))
+                if combo_checks > max_combo_checks_per_ref1:
+                    break
+            if len(scored_pairs) == 0:
                 continue
 
-            _, ref2, target = best
-            cam1 = cameras[ref1.camera_id]
-            cam2 = cameras[ref2.camera_id]
-            cam_t = cameras[target.camera_id]
-            triplet = (
-                scene_key,
-                images_dir,
-                resolved_name_by_id[ref1.id],
-                resolved_name_by_id[ref2.id],
-                resolved_name_by_id[target.id],
-                ref1.c2w.astype(np.float32),
-                ref2.c2w.astype(np.float32),
-                target.c2w.astype(np.float32),
-                self._build_K(cam1).astype(np.float32),
-                self._build_K(cam2).astype(np.float32),
-                self._build_K(cam_t).astype(np.float32),
-            )
-            triplets_scored.append((best[0], triplet))
+            scored_pairs.sort(key=lambda x: x[0], reverse=True)
+            chosen_targets: set[int] = set()
+            emitted = 0
+            for combo, ref2, target in scored_pairs:
+                if target.id in chosen_targets:
+                    continue
+                chosen_targets.add(target.id)
+                cam1 = cameras[ref1.camera_id]
+                cam2 = cameras[ref2.camera_id]
+                cam_t = cameras[target.camera_id]
+                triplet = (
+                    scene_key,
+                    images_dir,
+                    resolved_name_by_id[ref1.id],
+                    resolved_name_by_id[ref2.id],
+                    resolved_name_by_id[target.id],
+                    ref1.c2w.astype(np.float32),
+                    ref2.c2w.astype(np.float32),
+                    target.c2w.astype(np.float32),
+                    self._build_K(cam1).astype(np.float32),
+                    self._build_K(cam2).astype(np.float32),
+                    self._build_K(cam_t).astype(np.float32),
+                )
+                triplets_scored.append((combo, triplet))
+                emitted += 1
+                if emitted >= triplets_per_ref1:
+                    break
 
         # Sort by score descending (higher IoU = better).
         triplets_scored.sort(key=lambda x: x[0], reverse=True)

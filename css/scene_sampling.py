@@ -123,8 +123,8 @@ def find_best_references(
     cameras: dict[int, Camera],
     H: int = 512,
     W: int = 512,
-    min_pair_iou: float = 0.15,
-    min_ref_spacing: float = 0.3,
+    min_pair_iou: float = 0.10,
+    min_ref_spacing: float = 0.2,
 ) -> tuple[ImageData, ImageData]:
     target_pos = target_img.c2w[:3, 3]
     K_tgt = build_cropped_scaled_intrinsics(cameras[target_img.camera_id], H, W)

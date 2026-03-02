@@ -21,6 +21,9 @@ from css.models.EMA import load_pose_sd_checkpoint
 from css.models.pose_conditioned_sd import PoseConditionedSD
 from css.scene_sampling import plucker_to_rgb, to_uint8
 
+# NOTE:
+# Directions below are defined in *camera local coordinates*.
+# We will convert them to world-space using the anchor camera's rotation.
 DIRECTIONS = {
     "left": np.array([-1, 0, 0], dtype=np.float64),
     "right": np.array([1, 0, 0], dtype=np.float64),
@@ -85,7 +88,8 @@ def run_dust3r(ref1_path: str, ref2_path: str) -> tuple[np.ndarray, np.ndarray]:
     pipeline = Dust3rPipeline(device="cuda")
     print("Running pose estimation...")
     _imgs, Ks, c2ws, _pts, _colors = pipeline.infer_cameras_and_points(
-        [ref1_path, ref2_path], niter=300,
+        [ref1_path, ref2_path],
+        niter=300,
     )
     return Ks, c2ws
 
@@ -96,7 +100,10 @@ def main():
     p.add_argument("--ref2", required=True, help="Path to second reference photo")
     p.add_argument("--checkpoint", required=True, help="UNet checkpoint (.pt)")
     p.add_argument("--direction", default="right", choices=list(DIRECTIONS.keys()))
-    p.add_argument("--distance", type=float, default=0.3, help="Translation magnitude")
+    # IMPORTANT:
+    # --distance is interpreted as a *fraction of the DUSt3R baseline* between ref1 and ref2.
+    # This avoids scale ambiguity in DUSt3R reconstructions.
+    p.add_argument("--distance", type=float, default=0.3, help="Offset magnitude as fraction of DUSt3R baseline")
     p.add_argument("--anchor", default="ref1", choices=["ref1", "ref2"], help="Which ref to offset from")
     p.add_argument("--prompt", default="a photo of a scene")
     p.add_argument("--output", default="output.png")
@@ -106,6 +113,20 @@ def main():
     p.add_argument("--W", type=int, default=512)
     p.add_argument("--show-pluckers", action="store_true", help="Include Plucker ray direction maps in grid")
     p.add_argument("--seed", type=int, default=42)
+
+    # Coordinate-system safety:
+    # DUSt3R camera axis conventions can vary depending on the implementation.
+    # We expose flips so that "up" and "forward" behave as expected for your setup.
+    p.add_argument(
+        "--flip-y",
+        action="store_true",
+        help="Flip the camera-local Y axis (use if 'up' moves down in results)",
+    )
+    p.add_argument(
+        "--flip-z",
+        action="store_true",
+        help="Flip the camera-local Z axis (use if 'forward' moves backward in results)",
+    )
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -122,7 +143,7 @@ def main():
     K_ref2_orig = Ks[1].astype(np.float64)
 
     baseline = np.linalg.norm(c2w_ref2[:3, 3] - c2w_ref1[:3, 3])
-    print(f"DUSt3R baseline: {baseline:.4f}")
+    print(f"DUSt3R baseline (arbitrary scale): {baseline:.4f}")
 
     # 2. Load images
     ref1_tensor, w1, h1 = load_and_preprocess(args.ref1, H, W)
@@ -135,15 +156,39 @@ def main():
     # 4. Build target camera: same rotation as anchor, shifted position
     anchor_idx = 0 if args.anchor == "ref1" else 1
     anchor_c2w = c2ws[anchor_idx].astype(np.float64)
-    local_dir = DIRECTIONS[args.direction]
-    offset_world = anchor_c2w[:3, :3] @ (local_dir * args.distance)
+
+    # (A) Fix 1: handle DUSt3R scale ambiguity by making distance relative to baseline.
+    # If baseline is zero (degenerate), fall back to an absolute small move.
+    if baseline > 1e-9:
+        delta = args.distance * baseline
+    else:
+        delta = args.distance
+    # (B) Fix 2: handle potential axis convention flips for "up" and "forward".
+    local_dir = DIRECTIONS[args.direction].copy()
+    if args.flip_y:
+        local_dir[1] *= -1.0
+    if args.flip_z:
+        local_dir[2] *= -1.0
+
+    # Convert camera-local direction to world direction using anchor rotation.
+    offset_world = anchor_c2w[:3, :3] @ (local_dir * delta)
 
     target_c2w = anchor_c2w.copy()
     target_c2w[:3, 3] += offset_world
     # Target uses anchor's intrinsics
     K_tgt = (K_ref1 if anchor_idx == 0 else K_ref2).copy()
 
-    print(f"Target offset: {args.direction} {args.distance} from {args.anchor}")
+    # Useful debug: print effective move in DUSt3R units and any axis flips.
+    flip_str = []
+    if args.flip_y:
+        flip_str.append("Y")
+    if args.flip_z:
+        flip_str.append("Z")
+    flip_str = f" (flips: {','.join(flip_str)})" if flip_str else ""
+    print(
+        f"Target offset: dir={args.direction}, frac={args.distance:.4f} of baseline => delta={delta:.4f} "
+        f"from {args.anchor}{flip_str}"
+    )
 
     # 5. Compute ref1-anchored Plucker rays
     plucker_ref1 = compute_plucker_tensor(c2w_ref1, c2w_ref1, K_ref1, H, W, latent_h, latent_w)
@@ -175,17 +220,23 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Save grid: [ref1 | ref2 | generated], optionally with Plucker row below
-    img_row = np.concatenate([
-        to_uint8(ref1_tensor),
-        to_uint8(ref2_tensor),
-        to_uint8(generated[0]),
-    ], axis=1)
+    img_row = np.concatenate(
+        [
+            to_uint8(ref1_tensor),
+            to_uint8(ref2_tensor),
+            to_uint8(generated[0]),
+        ],
+        axis=1,
+    )
     if args.show_pluckers:
-        pl_row = np.concatenate([
-            plucker_to_rgb(plucker_ref1, H, W),
-            plucker_to_rgb(plucker_ref2, H, W),
-            plucker_to_rgb(plucker_tgt, H, W),
-        ], axis=1)
+        pl_row = np.concatenate(
+            [
+                plucker_to_rgb(plucker_ref1, H, W),
+                plucker_to_rgb(plucker_ref2, H, W),
+                plucker_to_rgb(plucker_tgt, H, W),
+            ],
+            axis=1,
+        )
         grid = np.concatenate([img_row, pl_row], axis=0)
     else:
         grid = img_row

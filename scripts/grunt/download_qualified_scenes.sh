@@ -26,7 +26,7 @@ SCRIPT_DIR="${ROOT}/scripts"
 DOWNLOAD_SCRIPT="${ROOT}/scripts/grunt/download_scene_data.sh"
 
 OUT_ROOT="${OUT_ROOT:-${ROOT}/MegaScenes}"
-COUNT="${COUNT:-150}"
+COUNT="${COUNT:-1000}"
 CATEGORIES_JSON="${CATEGORIES_JSON:-${OUT_ROOT}/metadata/categories.json}"
 SCENES_READY_FILE="${SCENES_READY_FILE:-${OUT_ROOT}/scenes_colmap_ready.txt}"
 MIN_IMAGES_PER_SUBFOLDER="${MIN_IMAGES_PER_SUBFOLDER:-50}"
