@@ -31,9 +31,9 @@ This repo is intentionally trimmed to the 2D pipeline only.
 
 ## Recommended baseline settings
 Defaults in `css/train.py`/scripts are tuned for this project direction:
-- `--max-pair-dist 2.5`
-- `--min-dir-sim 0.2`
-- `--min-ref-spacing 0.25`
+- `--max-pair-dist 2.0`
+- `--min-pair-iou 0.22`
+- `--min-ref-spacing 0.35`
 - `--max-triplets 24`
 - `--cond-drop-prob 0.15`
 - `--noise-offset 0.05`

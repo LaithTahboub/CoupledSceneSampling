@@ -562,8 +562,9 @@ def main() -> None:
     p.add_argument("--prompt", default="")
     p.add_argument("--prompt-template", type=str, default="")
 
-    p.add_argument("--min-pair-iou", type=float, default=0.15)
-    p.add_argument("--min-ref-spacing", type=float, default=0.25)
+    p.add_argument("--max-pair-dist", type=float, default=2.0)
+    p.add_argument("--min-pair-iou", type=float, default=0.22)
+    p.add_argument("--min-ref-spacing", type=float, default=0.35)
     p.add_argument("--max-triplets", type=int, default=24)
 
     p.add_argument("--cond-drop-prob", type=float, default=0.15)

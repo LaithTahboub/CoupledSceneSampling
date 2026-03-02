@@ -6,6 +6,7 @@ notes:
 - plucker rays are computed per view and can be anchored to any camera pose.
 """
 
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -256,6 +257,318 @@ def compute_reference_depth(positions: dict[int, np.ndarray]) -> float:
     return float(np.median(dists))
 
 
+def _frustum_vertices_world(
+    c2w: np.ndarray,
+    K: np.ndarray,
+    H: int,
+    W: int,
+    near: float,
+    far: float,
+) -> np.ndarray:
+    """Build 8 frustum corner vertices in world coordinates.
+
+    Vertex order:
+      0..3 near plane corners (tl, tr, br, bl)
+      4..7 far  plane corners (tl, tr, br, bl)
+    """
+    fx = float(K[0, 0])
+    fy = float(K[1, 1])
+    cx = float(K[0, 2])
+    cy = float(K[1, 2])
+    if abs(fx) < 1e-9 or abs(fy) < 1e-9:
+        return np.zeros((0, 3), dtype=np.float64)
+
+    # Use image bounds (not pixel centers) so frustum matches the full raster.
+    pix = np.array(
+        [
+            [0.0, 0.0],
+            [float(W), 0.0],
+            [float(W), float(H)],
+            [0.0, float(H)],
+        ],
+        dtype=np.float64,
+    )
+
+    def backproject(depth: float) -> np.ndarray:
+        x = (pix[:, 0] - cx) / fx * depth
+        y = (pix[:, 1] - cy) / fy * depth
+        z = np.full((4,), depth, dtype=np.float64)
+        return np.stack([x, y, z], axis=1)
+
+    near_cam = backproject(float(near))
+    far_cam = backproject(float(far))
+    cam_pts = np.concatenate([near_cam, far_cam], axis=0)  # (8, 3)
+
+    R = c2w[:3, :3].astype(np.float64)
+    t = c2w[:3, 3].astype(np.float64)
+    return (R @ cam_pts.T).T + t[None, :]
+
+
+def _frustum_planes(vertices: np.ndarray) -> list[tuple[np.ndarray, float]]:
+    """Get outward-facing half-space planes for a convex frustum.
+
+    Each plane is represented as (n, d) with inside inequality:
+        n . x + d <= 0
+    """
+    if vertices.shape[0] != 8:
+        return []
+
+    faces = [
+        (0, 1, 2, 3),  # near
+        (4, 5, 6, 7),  # far
+        (0, 3, 7, 4),  # left
+        (1, 5, 6, 2),  # right
+        (0, 4, 5, 1),  # top
+        (3, 2, 6, 7),  # bottom
+    ]
+    centroid = vertices.mean(axis=0)
+    planes: list[tuple[np.ndarray, float]] = []
+
+    for i0, i1, i2, _ in faces:
+        p0 = vertices[i0]
+        p1 = vertices[i1]
+        p2 = vertices[i2]
+        n = np.cross(p1 - p0, p2 - p0)
+        n_norm = float(np.linalg.norm(n))
+        if n_norm < 1e-12:
+            continue
+        d = -float(np.dot(n, p0))
+        # Flip so centroid stays inside (<= 0).
+        if float(np.dot(n, centroid) + d) > 0:
+            n = -n
+            d = -d
+        planes.append((n, d))
+    return _dedupe_planes(planes, tol=1e-9)
+
+
+def _normalize_plane(n: np.ndarray, d: float) -> tuple[np.ndarray, float] | None:
+    n = np.asarray(n, dtype=np.float64)
+    n_norm = float(np.linalg.norm(n))
+    if n_norm < 1e-12:
+        return None
+    n = n / n_norm
+    d = float(d) / n_norm
+
+    # Canonical sign for deterministic dedupe.
+    for comp in n:
+        if abs(comp) > 1e-10:
+            if comp < 0:
+                n = -n
+                d = -d
+            break
+    return n, d
+
+
+def _dedupe_planes(
+    planes: list[tuple[np.ndarray, float]],
+    tol: float = 1e-7,
+) -> list[tuple[np.ndarray, float]]:
+    unique: list[tuple[np.ndarray, float]] = []
+    for n_raw, d_raw in planes:
+        normalized = _normalize_plane(n_raw, d_raw)
+        if normalized is None:
+            continue
+        n, d = normalized
+        exists = False
+        for n_u, d_u in unique:
+            if np.allclose(n, n_u, atol=tol, rtol=0.0) and abs(d - d_u) <= tol:
+                exists = True
+                break
+        if not exists:
+            unique.append((n, d))
+    return unique
+
+
+def _halfspace_intersection_vertices(
+    planes: list[tuple[np.ndarray, float]],
+    inside_tol: float = 1e-7,
+    dedupe_tol: float = 1e-5,
+) -> np.ndarray:
+    """Enumerate vertices of a convex polyhedron from half-space triplets."""
+    if len(planes) < 4:
+        return np.zeros((0, 3), dtype=np.float64)
+
+    candidates: list[np.ndarray] = []
+    for i, j, k in combinations(range(len(planes)), 3):
+        n1, d1 = planes[i]
+        n2, d2 = planes[j]
+        n3, d3 = planes[k]
+        A = np.stack([n1, n2, n3], axis=0)
+        if abs(float(np.linalg.det(A))) < 1e-10:
+            continue
+        b = -np.array([d1, d2, d3], dtype=np.float64)
+        try:
+            x = np.linalg.solve(A, b)
+        except np.linalg.LinAlgError:
+            continue
+        if all(float(np.dot(n, x) + d) <= inside_tol for n, d in planes):
+            candidates.append(x)
+
+    if not candidates:
+        return np.zeros((0, 3), dtype=np.float64)
+
+    unique: list[np.ndarray] = []
+    for x in candidates:
+        if not any(float(np.linalg.norm(x - y)) <= dedupe_tol for y in unique):
+            unique.append(x)
+    return np.asarray(unique, dtype=np.float64)
+
+
+def _cross2(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+    return float((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+
+
+def _convex_hull_2d(points: np.ndarray) -> list[int]:
+    n = points.shape[0]
+    if n <= 1:
+        return list(range(n))
+
+    order = sorted(range(n), key=lambda i: (float(points[i, 0]), float(points[i, 1])))
+    lower: list[int] = []
+    for idx in order:
+        while len(lower) >= 2 and _cross2(points[lower[-2]], points[lower[-1]], points[idx]) <= 1e-12:
+            lower.pop()
+        lower.append(idx)
+
+    upper: list[int] = []
+    for idx in reversed(order):
+        while len(upper) >= 2 and _cross2(points[upper[-2]], points[upper[-1]], points[idx]) <= 1e-12:
+            upper.pop()
+        upper.append(idx)
+
+    hull = lower[:-1] + upper[:-1]
+    deduped: list[int] = []
+    seen: set[int] = set()
+    for idx in hull:
+        if idx not in seen:
+            seen.add(idx)
+            deduped.append(idx)
+    return deduped
+
+
+def _order_face_vertices(face_vertices: np.ndarray, plane_normal: np.ndarray) -> np.ndarray:
+    if face_vertices.shape[0] < 3:
+        return np.zeros((0, 3), dtype=np.float64)
+
+    n = np.asarray(plane_normal, dtype=np.float64)
+    n_norm = float(np.linalg.norm(n))
+    if n_norm < 1e-12:
+        return np.zeros((0, 3), dtype=np.float64)
+    n = n / n_norm
+
+    centroid = face_vertices.mean(axis=0)
+    ref = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    if abs(float(np.dot(ref, n))) > 0.9:
+        ref = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    u = np.cross(n, ref)
+    u_norm = float(np.linalg.norm(u))
+    if u_norm < 1e-12:
+        ref = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        u = np.cross(n, ref)
+        u_norm = float(np.linalg.norm(u))
+        if u_norm < 1e-12:
+            return np.zeros((0, 3), dtype=np.float64)
+    u = u / u_norm
+    v = np.cross(n, u)
+
+    rel = face_vertices - centroid[None, :]
+    coords = np.stack([rel @ u, rel @ v], axis=1)
+    hull_idx = _convex_hull_2d(coords)
+    if len(hull_idx) < 3:
+        return np.zeros((0, 3), dtype=np.float64)
+
+    ordered = face_vertices[hull_idx]
+
+    # Ensure CCW when viewed from outside (aligned with outward normal).
+    poly_normal = np.zeros((3,), dtype=np.float64)
+    for i in range(ordered.shape[0]):
+        poly_normal += np.cross(ordered[i], ordered[(i + 1) % ordered.shape[0]])
+    if float(np.dot(poly_normal, n)) < 0:
+        ordered = ordered[::-1]
+    return ordered
+
+
+def _polyhedron_volume_from_planes(
+    planes: list[tuple[np.ndarray, float]],
+    vertices: np.ndarray,
+    plane_tol: float = 1e-6,
+) -> float:
+    """Volume of a convex polyhedron from its supporting planes + vertices."""
+    if vertices.shape[0] < 4 or not planes:
+        return 0.0
+
+    total = 0.0
+    for n, d in planes:
+        distances = vertices @ n + d
+        face_vertices = vertices[np.abs(distances) <= plane_tol]
+        if face_vertices.shape[0] < 3:
+            continue
+        ordered = _order_face_vertices(face_vertices, n)
+        if ordered.shape[0] < 3:
+            continue
+        p0 = ordered[0]
+        for i in range(1, ordered.shape[0] - 1):
+            p1 = ordered[i]
+            p2 = ordered[i + 1]
+            total += float(np.dot(p0, np.cross(p1, p2)) / 6.0)
+    return float(abs(total))
+
+
+def build_camera_frustum_geometry(
+    c2w: np.ndarray,
+    K: np.ndarray,
+    H: int,
+    W: int,
+    d_ref: float,
+    near_scale: float = 0.1,
+    far_scale: float = 2.5,
+) -> dict[str, object]:
+    """Build truncated frustum geometry used for true volumetric IoU."""
+    d_scene = max(float(d_ref), 1e-3)
+    near = max(1e-3, float(near_scale) * d_scene)
+    far = max(near + 1e-3, float(far_scale) * d_scene)
+    vertices = _frustum_vertices_world(c2w, K, H, W, near, far)
+    planes = _frustum_planes(vertices)
+    volume = _polyhedron_volume_from_planes(planes, vertices)
+    return {
+        "near": near,
+        "far": far,
+        "vertices": vertices,
+        "planes": planes,
+        "volume": volume,
+    }
+
+
+def compute_frustum_iou_from_geometries(
+    geom_i: dict[str, object],
+    geom_j: dict[str, object],
+) -> float:
+    """True IoU between two truncated camera frustum volumes."""
+    vol_i = float(geom_i.get("volume", 0.0))
+    vol_j = float(geom_j.get("volume", 0.0))
+    if vol_i <= 1e-12 or vol_j <= 1e-12:
+        return 0.0
+
+    planes_i = geom_i.get("planes", [])
+    planes_j = geom_j.get("planes", [])
+    if not planes_i or not planes_j:
+        return 0.0
+
+    inter_planes = _dedupe_planes(list(planes_i) + list(planes_j))
+    inter_vertices = _halfspace_intersection_vertices(inter_planes)
+    if inter_vertices.shape[0] < 4:
+        return 0.0
+    inter_vol = _polyhedron_volume_from_planes(inter_planes, inter_vertices)
+    if inter_vol <= 1e-12:
+        return 0.0
+
+    union = vol_i + vol_j - inter_vol
+    if union <= 1e-12:
+        return 0.0
+    iou = inter_vol / union
+    return float(np.clip(iou, 0.0, 1.0))
+
+
 def compute_frustum_iou(
     c2w_i: np.ndarray,
     K_i: np.ndarray,
@@ -264,61 +577,13 @@ def compute_frustum_iou(
     H: int,
     W: int,
     d_ref: float,
-    M: int = 16,
+    near_scale: float = 0.1,
+    far_scale: float = 2.5,
 ) -> float:
-    """Approximate frustum IoU between two cameras at reference depth d_ref.
-
-    Samples an MxM pixel grid in each camera, backprojects to 3D at d_ref,
-    projects into the other camera, and counts in-bounds hits.  Combines
-    the two directional coverages into an IoU estimate:
-        IoU = (r_ij * r_ji) / (r_ij + r_ji - r_ij * r_ji)
-    where r_ij = fraction of camera-i samples visible in camera j.
-    """
-    n = M * M
-    u = np.linspace(0.5, W - 0.5, M)
-    v = np.linspace(0.5, H - 0.5, M)
-    uu, vv = np.meshgrid(u, v)
-    pixels = np.stack([uu.ravel(), vv.ravel(), np.ones(n)], axis=0)  # (3, n)
-
-    # -- forward: sample camera i, project into camera j ----------------
-    K_i_inv = np.linalg.inv(K_i)
-    rays_cam = K_i_inv @ pixels                       # (3, n) camera-i frame
-    pts_cam = rays_cam * (d_ref / rays_cam[2:3, :])   # depth along optical axis
-    pts_world = c2w_i[:3, :3] @ pts_cam + c2w_i[:3, 3:4]
-
-    R_j_T = c2w_j[:3, :3].T
-    t_j = c2w_j[:3, 3]
-    pts_cam_j = R_j_T @ (pts_world - t_j[:, None])
-    valid = pts_cam_j[2, :] > 0
-    z_safe = np.where(valid, pts_cam_j[2, :], 1.0)
-    proj = K_j @ pts_cam_j
-    u_j = proj[0, :] / z_safe
-    v_j = proj[1, :] / z_safe
-    hits_ij = valid & (u_j >= 0) & (u_j < W) & (v_j >= 0) & (v_j < H)
-    r_ij = hits_ij.sum() / n
-
-    # -- reverse: sample camera j, project into camera i ----------------
-    K_j_inv = np.linalg.inv(K_j)
-    rays_cam_j = K_j_inv @ pixels
-    pts_cam_j2 = rays_cam_j * (d_ref / rays_cam_j[2:3, :])
-    pts_world2 = c2w_j[:3, :3] @ pts_cam_j2 + c2w_j[:3, 3:4]
-
-    R_i_T = c2w_i[:3, :3].T
-    t_i = c2w_i[:3, 3]
-    pts_cam_i = R_i_T @ (pts_world2 - t_i[:, None])
-    valid2 = pts_cam_i[2, :] > 0
-    z_safe2 = np.where(valid2, pts_cam_i[2, :], 1.0)
-    proj2 = K_i @ pts_cam_i
-    u_i = proj2[0, :] / z_safe2
-    v_i = proj2[1, :] / z_safe2
-    hits_ji = valid2 & (u_i >= 0) & (u_i < W) & (v_i >= 0) & (v_i < H)
-    r_ji = hits_ji.sum() / n
-
-    # -- combine into IoU -----------------------------------------------
-    denom = r_ij + r_ji - r_ij * r_ji
-    if denom < 1e-12:
-        return 0.0
-    return float((r_ij * r_ji) / denom)
+    """True IoU between two truncated frustum volumes."""
+    geom_i = build_camera_frustum_geometry(c2w_i, K_i, H, W, d_ref, near_scale=near_scale, far_scale=far_scale)
+    geom_j = build_camera_frustum_geometry(c2w_j, K_j, H, W, d_ref, near_scale=near_scale, far_scale=far_scale)
+    return compute_frustum_iou_from_geometries(geom_i, geom_j)
 
 
 class MegaScenesDataset(Dataset):
@@ -329,9 +594,10 @@ class MegaScenesDataset(Dataset):
         scene_dirs: list[str],
         H: int = 512,
         W: int = 512,
+        max_pair_distance: float = 2.0,
         max_triplets_per_scene: int = 8,
-        min_pair_iou: float = 0.15,
-        min_ref_spacing: float = 0.3,
+        min_pair_iou: float = 0.22,
+        min_ref_spacing: float = 0.35,
         exclude_image_names: set[str] | None = None,
         target_include_image_names: set[str] | None = None,
         reference_include_image_names: set[str] | None = None,
@@ -362,6 +628,7 @@ class MegaScenesDataset(Dataset):
                 self._build_triplets(
                     scene_dir,
                     scene_key,
+                    max_pair_distance,
                     max_triplets_per_scene,
                     min_pair_iou,
                     min_ref_spacing,
@@ -382,7 +649,15 @@ class MegaScenesDataset(Dataset):
             unique_images.add(str(images_dir / tgt_name))
         print(f"Dataset ready: {self.n} triplets, {len(unique_images)} unique images, {len(scene_names)} scenes")
 
-    def _build_triplets(self, scene_dir: Path, scene_key: str, max_triplets, min_pair_iou, min_ref_spacing):
+    def _build_triplets(
+        self,
+        scene_dir: Path,
+        scene_key: str,
+        max_pair_distance: float,
+        max_triplets: int,
+        min_pair_iou: float,
+        min_ref_spacing: float,
+    ):
         cameras, images = read_scene(scene_dir)
         images_dir = scene_dir / "images"
         rel_set, unique_basename = _index_scene_images(images_dir)
@@ -413,11 +688,24 @@ class MegaScenesDataset(Dataset):
         K_by_id = {img.id: self._build_K(cameras[img.camera_id]) for img in valid}
         target_ids = {img.id for img in targets}
         d_ref = compute_reference_depth(positions)
+        frustum_by_id: dict[int, dict[str, object]] = {
+            img.id: build_camera_frustum_geometry(img.c2w, K_by_id[img.id], self.H, self.W, d_ref)
+            for img in valid
+        }
+        iou_cache: dict[tuple[int, int], float] = {}
+
+        def pair_iou(i_id: int, j_id: int) -> float:
+            key = (i_id, j_id) if i_id < j_id else (j_id, i_id)
+            if key not in iou_cache:
+                iou_cache[key] = compute_frustum_iou_from_geometries(
+                    frustum_by_id[key[0]],
+                    frustum_by_id[key[1]],
+                )
+            return iou_cache[key]
 
         triplets_scored: list[tuple[float, tuple]] = []
         for ref1 in refs_pool:
             ref1_pos = positions[ref1.id]
-            ref1_K = K_by_id[ref1.id]
 
             # Candidate ref2 cameras (strict only, no fallback).
             ref2_candidates: list[tuple[float, object]] = []
@@ -427,11 +715,9 @@ class MegaScenesDataset(Dataset):
                 dist = float(np.linalg.norm(positions[ref2.id] - ref1_pos))
                 if dist < min_ref_spacing:
                     continue
-                iou = compute_frustum_iou(
-                    ref1.c2w, ref1_K,
-                    ref2.c2w, K_by_id[ref2.id],
-                    self.H, self.W, d_ref,
-                )
+                if max_pair_distance > 0 and dist > max_pair_distance:
+                    continue
+                iou = pair_iou(ref1.id, ref2.id)
                 if iou < min_pair_iou:
                     continue
                 ref2_candidates.append((iou, ref2))
@@ -443,11 +729,10 @@ class MegaScenesDataset(Dataset):
                     continue
                 if tgt.id not in target_ids:
                     continue
-                iou = compute_frustum_iou(
-                    ref1.c2w, ref1_K,
-                    tgt.c2w, K_by_id[tgt.id],
-                    self.H, self.W, d_ref,
-                )
+                dist = float(np.linalg.norm(positions[tgt.id] - ref1_pos))
+                if max_pair_distance > 0 and dist > max_pair_distance:
+                    continue
+                iou = pair_iou(ref1.id, tgt.id)
                 if iou < min_pair_iou:
                     continue
                 target_candidates.append((iou, tgt))
