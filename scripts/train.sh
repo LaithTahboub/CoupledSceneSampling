@@ -2,7 +2,8 @@
 # Default training entrypoint: multiscene training with a held-out scene split.
 
 #SBATCH --job-name=css-train
-#SBATCH --partition=vulcan-ampere#SBATCH --ntasks=1
+#SBATCH --partition=vulcan-ampere
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=48gb
 #SBATCH --gres=gpu:rtxa6000:1

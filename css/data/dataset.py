@@ -329,7 +329,6 @@ class MegaScenesDataset(Dataset):
         scene_dirs: list[str],
         H: int = 512,
         W: int = 512,
-        max_pair_distance: float = 2.0,
         max_triplets_per_scene: int = 8,
         min_pair_iou: float = 0.15,
         min_ref_spacing: float = 0.3,
@@ -363,7 +362,6 @@ class MegaScenesDataset(Dataset):
                 self._build_triplets(
                     scene_dir,
                     scene_key,
-                    max_pair_distance,
                     max_triplets_per_scene,
                     min_pair_iou,
                     min_ref_spacing,
@@ -384,7 +382,7 @@ class MegaScenesDataset(Dataset):
             unique_images.add(str(images_dir / tgt_name))
         print(f"Dataset ready: {self.n} triplets, {len(unique_images)} unique images, {len(scene_names)} scenes")
 
-    def _build_triplets(self, scene_dir: Path, scene_key: str, max_dist, max_triplets, min_pair_iou, min_ref_spacing):
+    def _build_triplets(self, scene_dir: Path, scene_key: str, max_triplets, min_pair_iou, min_ref_spacing):
         cameras, images = read_scene(scene_dir)
         images_dir = scene_dir / "images"
         rel_set, unique_basename = _index_scene_images(images_dir)
@@ -429,8 +427,6 @@ class MegaScenesDataset(Dataset):
                 dist = float(np.linalg.norm(positions[ref2.id] - ref1_pos))
                 if dist < min_ref_spacing:
                     continue
-                if max_dist > 0 and dist > max_dist:
-                    continue
                 iou = compute_frustum_iou(
                     ref1.c2w, ref1_K,
                     ref2.c2w, K_by_id[ref2.id],
@@ -446,9 +442,6 @@ class MegaScenesDataset(Dataset):
                 if tgt.id == ref1.id:
                     continue
                 if tgt.id not in target_ids:
-                    continue
-                dist = float(np.linalg.norm(positions[tgt.id] - ref1_pos))
-                if max_dist > 0 and dist > max_dist:
                     continue
                 iou = compute_frustum_iou(
                     ref1.c2w, ref1_K,

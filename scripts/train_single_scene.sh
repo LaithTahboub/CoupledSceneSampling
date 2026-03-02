@@ -35,7 +35,6 @@ RUN_NAME=${RUN_NAME:-${SCENE_TAG}-${SPLIT_TAG}}
 WANDB_ID=${WANDB_ID:-}
 
 PROMPT=${PROMPT:-"a photo of ${SCENE_TEXT}"}
-MAX_PAIR_DIST=${MAX_PAIR_DIST:-2.0}
 MIN_PAIR_IOU=${MIN_PAIR_IOU:-0.15}
 MIN_REF_SPACING=${MIN_REF_SPACING:-0.3}
 MAX_TRIPLETS=${MAX_TRIPLETS:-24}
@@ -97,7 +96,6 @@ TRAIN_ARGS=(
     --grad-clip "$GRAD_CLIP"
     --mixed-precision "$MIXED_PRECISION"
     --seed "$SEED"
-    --max-pair-dist "$MAX_PAIR_DIST"
     --min-pair-iou "$MIN_PAIR_IOU"
     --min-ref-spacing "$MIN_REF_SPACING"
     --max-triplets "$MAX_TRIPLETS"

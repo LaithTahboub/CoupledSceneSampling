@@ -562,7 +562,6 @@ def main() -> None:
     p.add_argument("--prompt", default="")
     p.add_argument("--prompt-template", type=str, default="")
 
-    p.add_argument("--max-pair-dist", type=float, default=2.5)
     p.add_argument("--min-pair-iou", type=float, default=0.15)
     p.add_argument("--min-ref-spacing", type=float, default=0.25)
     p.add_argument("--max-triplets", type=int, default=24)
@@ -635,7 +634,6 @@ def main() -> None:
         scenes,
         H=args.H,
         W=args.W,
-        max_pair_distance=args.max_pair_dist,
         max_triplets_per_scene=args.max_triplets,
         min_pair_iou=args.min_pair_iou,
         min_ref_spacing=args.min_ref_spacing,
@@ -657,7 +655,6 @@ def main() -> None:
                 test_scenes,
                 H=args.H,
                 W=args.W,
-                max_pair_distance=args.max_pair_dist,
                 max_triplets_per_scene=3,
                 min_pair_iou=args.min_pair_iou,
                 min_ref_spacing=args.min_ref_spacing,

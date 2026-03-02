@@ -37,7 +37,6 @@ def main():
     parser.add_argument("--apg-momentum", type=float, default=-0.5, help="APG momentum (ignored unless --apg)")
     parser.add_argument("--apg-norm-threshold", type=float, default=0.0, help="APG norm threshold (ignored unless --apg)")
     parser.add_argument("--apg-eps", type=float, default=1e-12, help="APG epsilon (ignored unless --apg)")
-    parser.add_argument("--max-pair-dist", type=float, default=2.5, help="Max ref-target camera distance")
     parser.add_argument("--min-pair-iou", type=float, default=0.15, help="Min frustum IoU between paired cameras")
     parser.add_argument("--min-ref-spacing", type=float, default=0.25, help="Min distance between refs")
     parser.add_argument("--exclude-image-list", type=str, default=None)
@@ -102,7 +101,6 @@ def main():
         cameras,
         H=args.H,
         W=args.W,
-        max_dist=args.max_pair_dist,
         min_pair_iou=args.min_pair_iou,
         min_ref_spacing=args.min_ref_spacing,
     )

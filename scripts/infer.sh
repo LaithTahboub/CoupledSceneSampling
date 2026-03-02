@@ -17,7 +17,6 @@ PROMPT=${PROMPT:-""}
 PROMPT_TEMPLATE=${PROMPT_TEMPLATE:-"a photo of {scene}"}
 NUM_STEPS=${NUM_STEPS:-50}
 CFG_SCALE=${CFG_SCALE:-3.5}
-MAX_PAIR_DIST=${MAX_PAIR_DIST:-2.5}
 MIN_PAIR_IOU=${MIN_PAIR_IOU:-0.15}
 MIN_REF_SPACING=${MIN_REF_SPACING:-0.25}
 H=${H:-512}
@@ -76,7 +75,6 @@ ARGS=(
     --checkpoint "$CHECKPOINT"
     --num-steps "$NUM_STEPS"
     --cfg-scale "$CFG_SCALE"
-    --max-pair-dist "$MAX_PAIR_DIST"
     --min-pair-iou "$MIN_PAIR_IOU"
     --min-ref-spacing "$MIN_REF_SPACING"
     --prompt-template "$PROMPT_TEMPLATE"
