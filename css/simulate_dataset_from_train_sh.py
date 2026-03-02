@@ -216,6 +216,11 @@ def main() -> None:
     parser.add_argument("--max-pair-dist", type=float, default=None)
     parser.add_argument("--min-pair-iou", type=float, default=None)
     parser.add_argument("--min-ref-spacing", type=float, default=None)
+    parser.add_argument("--min-view-cos", type=float, default=None)
+    parser.add_argument("--max-rotation-deg", type=float, default=None)
+    parser.add_argument("--max-focal-ratio", type=float, default=None)
+    parser.add_argument("--pair-prefilter-topk", type=int, default=None)
+    parser.add_argument("--candidate-pool-topk", type=int, default=None)
     parser.add_argument("--max-triplets", type=int, default=None)
     parser.add_argument("--H", type=int, default=None)
     parser.add_argument("--W", type=int, default=None)
@@ -266,6 +271,31 @@ def main() -> None:
         if args.min_ref_spacing is not None
         else _to_float(defaults.get("MIN_REF_SPACING"), 0.35)
     )
+    min_view_cos = (
+        args.min_view_cos
+        if args.min_view_cos is not None
+        else _to_float(defaults.get("MIN_VIEW_COS"), 0.90)
+    )
+    max_rotation_deg = (
+        args.max_rotation_deg
+        if args.max_rotation_deg is not None
+        else _to_float(defaults.get("MAX_ROTATION_DEG"), 35.0)
+    )
+    max_focal_ratio = (
+        args.max_focal_ratio
+        if args.max_focal_ratio is not None
+        else _to_float(defaults.get("MAX_FOCAL_RATIO"), 1.35)
+    )
+    pair_prefilter_topk = (
+        args.pair_prefilter_topk
+        if args.pair_prefilter_topk is not None
+        else _to_int(defaults.get("PAIR_PREFILTER_TOPK"), 48)
+    )
+    candidate_pool_topk = (
+        args.candidate_pool_topk
+        if args.candidate_pool_topk is not None
+        else _to_int(defaults.get("CANDIDATE_POOL_TOPK"), 20)
+    )
     max_triplets = args.max_triplets if args.max_triplets is not None else _to_int(defaults.get("MAX_TRIPLETS"), 24)
     H = args.H if args.H is not None else _to_int(defaults.get("H"), 512)
     W = args.W if args.W is not None else _to_int(defaults.get("W"), 512)
@@ -286,7 +316,10 @@ def main() -> None:
     print(
         "[sim] dataset params: "
         f"max_pair_dist={max_pair_dist} min_pair_iou={min_pair_iou} "
-        f"min_ref_spacing={min_ref_spacing} max_triplets={max_triplets} H={H} W={W}",
+        f"min_ref_spacing={min_ref_spacing} min_view_cos={min_view_cos} "
+        f"max_rot_deg={max_rotation_deg} max_focal_ratio={max_focal_ratio} "
+        f"prefilter_topk={pair_prefilter_topk} pool_topk={candidate_pool_topk} "
+        f"max_triplets={max_triplets} H={H} W={W}",
     )
 
     train_dataset = MegaScenesDataset(
@@ -297,6 +330,11 @@ def main() -> None:
         max_triplets_per_scene=int(max_triplets),
         min_pair_iou=float(min_pair_iou),
         min_ref_spacing=float(min_ref_spacing),
+        min_view_cos=float(min_view_cos),
+        max_rotation_deg=float(max_rotation_deg),
+        max_focal_ratio=float(max_focal_ratio),
+        pair_prefilter_topk=int(pair_prefilter_topk),
+        candidate_pool_topk=int(candidate_pool_topk),
         prompt_template=prompt_template,
     )
     test_dataset = MegaScenesDataset(
@@ -307,6 +345,11 @@ def main() -> None:
         max_triplets_per_scene=int(max_triplets),
         min_pair_iou=float(min_pair_iou),
         min_ref_spacing=float(min_ref_spacing),
+        min_view_cos=float(min_view_cos),
+        max_rotation_deg=float(max_rotation_deg),
+        max_focal_ratio=float(max_focal_ratio),
+        pair_prefilter_topk=int(pair_prefilter_topk),
+        candidate_pool_topk=int(candidate_pool_topk),
         prompt_template=prompt_template,
     )
 
@@ -343,6 +386,11 @@ def main() -> None:
             "max_pair_dist": float(max_pair_dist),
             "min_pair_iou": float(min_pair_iou),
             "min_ref_spacing": float(min_ref_spacing),
+            "min_view_cos": float(min_view_cos),
+            "max_rotation_deg": float(max_rotation_deg),
+            "max_focal_ratio": float(max_focal_ratio),
+            "pair_prefilter_topk": int(pair_prefilter_topk),
+            "candidate_pool_topk": int(candidate_pool_topk),
             "max_triplets": int(max_triplets),
             "H": int(H),
             "W": int(W),

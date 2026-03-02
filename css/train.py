@@ -565,6 +565,11 @@ def main() -> None:
     p.add_argument("--max-pair-dist", type=float, default=2.0)
     p.add_argument("--min-pair-iou", type=float, default=0.22)
     p.add_argument("--min-ref-spacing", type=float, default=0.35)
+    p.add_argument("--min-view-cos", type=float, default=0.90)
+    p.add_argument("--max-rotation-deg", type=float, default=35.0)
+    p.add_argument("--max-focal-ratio", type=float, default=1.35)
+    p.add_argument("--pair-prefilter-topk", type=int, default=48)
+    p.add_argument("--candidate-pool-topk", type=int, default=20)
     p.add_argument("--max-triplets", type=int, default=24)
 
     p.add_argument("--cond-drop-prob", type=float, default=0.15)
@@ -635,9 +640,15 @@ def main() -> None:
         scenes,
         H=args.H,
         W=args.W,
+        max_pair_distance=args.max_pair_dist,
         max_triplets_per_scene=args.max_triplets,
         min_pair_iou=args.min_pair_iou,
         min_ref_spacing=args.min_ref_spacing,
+        min_view_cos=args.min_view_cos,
+        max_rotation_deg=args.max_rotation_deg,
+        max_focal_ratio=args.max_focal_ratio,
+        pair_prefilter_topk=args.pair_prefilter_topk,
+        candidate_pool_topk=args.candidate_pool_topk,
         exclude_image_names=exclude_image_names,
         target_include_image_names=target_include_image_names,
         reference_include_image_names=reference_include_image_names,
@@ -656,9 +667,15 @@ def main() -> None:
                 test_scenes,
                 H=args.H,
                 W=args.W,
+                max_pair_distance=args.max_pair_dist,
                 max_triplets_per_scene=3,
                 min_pair_iou=args.min_pair_iou,
                 min_ref_spacing=args.min_ref_spacing,
+                min_view_cos=args.min_view_cos,
+                max_rotation_deg=args.max_rotation_deg,
+                max_focal_ratio=args.max_focal_ratio,
+                pair_prefilter_topk=args.pair_prefilter_topk,
+                candidate_pool_topk=args.candidate_pool_topk,
                 prompt_template=args.prompt_template,
             )
             print(f"Found {len(test_dataset)} test triplets")

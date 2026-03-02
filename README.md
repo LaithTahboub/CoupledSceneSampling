@@ -34,6 +34,9 @@ Defaults in `css/train.py`/scripts are tuned for this project direction:
 - `--max-pair-dist 2.0`
 - `--min-pair-iou 0.22`
 - `--min-ref-spacing 0.35`
+- `--min-view-cos 0.90`
+- `--max-rotation-deg 35`
+- `--max-focal-ratio 1.35`
 - `--max-triplets 24`
 - `--cond-drop-prob 0.15`
 - `--noise-offset 0.05`

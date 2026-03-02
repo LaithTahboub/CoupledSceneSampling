@@ -38,6 +38,11 @@ PROMPT=${PROMPT:-"a photo of ${SCENE_TEXT}"}
 MAX_PAIR_DIST=${MAX_PAIR_DIST:-2.0}
 MIN_PAIR_IOU=${MIN_PAIR_IOU:-0.22}
 MIN_REF_SPACING=${MIN_REF_SPACING:-0.35}
+MIN_VIEW_COS=${MIN_VIEW_COS:-0.90}
+MAX_ROTATION_DEG=${MAX_ROTATION_DEG:-35.0}
+MAX_FOCAL_RATIO=${MAX_FOCAL_RATIO:-1.35}
+PAIR_PREFILTER_TOPK=${PAIR_PREFILTER_TOPK:-48}
+CANDIDATE_POOL_TOPK=${CANDIDATE_POOL_TOPK:-20}
 MAX_TRIPLETS=${MAX_TRIPLETS:-24}
 
 BATCH_SIZE=${BATCH_SIZE:-4}
@@ -100,6 +105,11 @@ TRAIN_ARGS=(
     --max-pair-dist "$MAX_PAIR_DIST"
     --min-pair-iou "$MIN_PAIR_IOU"
     --min-ref-spacing "$MIN_REF_SPACING"
+    --min-view-cos "$MIN_VIEW_COS"
+    --max-rotation-deg "$MAX_ROTATION_DEG"
+    --max-focal-ratio "$MAX_FOCAL_RATIO"
+    --pair-prefilter-topk "$PAIR_PREFILTER_TOPK"
+    --candidate-pool-topk "$CANDIDATE_POOL_TOPK"
     --max-triplets "$MAX_TRIPLETS"
     --save-every "$SAVE_EVERY"
     --keep-checkpoints "$KEEP_CHECKPOINTS"
