@@ -6,12 +6,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from einops import rearrange
-from diffusers import AutoencoderKL, UNet2DConditionModel, DDPMScheduler, DPMSolverMultistepScheduler, EulerDiscreteScheduler
+from diffusers import AutoencoderKL, DDPMScheduler, EulerDiscreteScheduler, UNet2DConditionModel
 from transformers import CLIPTextModel, CLIPTokenizer
 from tqdm import tqdm
 
 from css.models.apg import AdaptiveProjectedGuidance
+from css.models.cross_view_attention import CrossViewAttention
 
 
 
@@ -48,18 +48,20 @@ def expand_conv_in(unet: UNet2DConditionModel, new_in_channels: int) -> None:
 
 
 
-# channel-concat cat3d-style conditioning (no cross-view attention)
 class PoseConditionedSD(nn.Module):
     """
-    concatenate three "views" along channel axis into a single unet input:
-      [tgt_lat_noisy, plt, mt, ref1_lat, pl1, m1, ref2_lat, pl2, m2]
-    where per-view channels = 4(latent) + 6(plucker) + 1(mask) = 11,
-    and total channels = 3 * 11 = 33.
+    CAT3D-style multi-view conditioning with cross-view attention.
 
-    - refs are clean, target is noisy.
+    Input views are packed as `(batch * 3, 11, h, w)` in fixed order:
+      [target, ref1, ref2]
+    with per-view channels:
+      [latent(4), plucker(6), mask(1)].
+
+    - refs are clean; target is noisy.
+    - cross-view attention lets self-attention exchange tokens across views.
     - unet predicts epsilon for the target latent (still 4 channels output).
     - loss is mse(eps_pred, noise) on the target noise (standard ddpm training).
-    - cfg unconditional branch: null text + zeroed ref blocks (lat+pl+mask).
+    - cfg unconditional branch: null text + zeroed ref view blocks.
     """
 
     def __init__(self, pretrained_model: str = "manojb/stable-diffusion-2-1-base", device: str = "cuda"):
@@ -86,11 +88,14 @@ class PoseConditionedSD(nn.Module):
         self.mask_ch = 1
         self.per_view_ch = self.latent_ch + self.plucker_ch + self.mask_ch  # 11
         self.num_views = 3
-        self.in_ch = self.num_views * self.per_view_ch  # 33
+        self.in_ch = self.per_view_ch
 
         expand_conv_in(self.unet, new_in_channels=self.in_ch)
-        self._cache_null_embeddings()
+        self.cross_view_attention = CrossViewAttention(num_views=self.num_views, include_high_res=False)
+        self.cross_view_attention.attach(self.unet)
+
         self._text_cache_limit = 4096
+        self._cache_null_embeddings()
 
     def configure_trainable(self, unet_train_mode: str = "full") -> None:
         if unet_train_mode == "full":
@@ -118,6 +123,8 @@ class PoseConditionedSD(nn.Module):
                 self.unet.enable_xformers_memory_efficient_attention()
             except Exception as exc:  # pragma: no cover - env-dependent
                 print(f"[pose-sd] xformers attention unavailable: {exc}")
+        # xformers can swap processors; reattach cross-view wrappers afterwards.
+        self.cross_view_attention.attach(self.unet)
 
     def get_trainable_parameters(self) -> list[nn.Parameter]:
         return [p for p in self.unet.parameters() if p.requires_grad]
@@ -153,7 +160,7 @@ class PoseConditionedSD(nn.Module):
     def decode_latent(self, latent: torch.Tensor) -> torch.Tensor:
         return self.vae.decode(latent / self.vae.config.scaling_factor).sample
 
-    def _pack_cat33(
+    def _pack_views(
         self,
         ref1_lat: torch.Tensor,
         ref2_lat: torch.Tensor,
@@ -164,11 +171,10 @@ class PoseConditionedSD(nn.Module):
         ref_keep_mask: torch.Tensor | None = None,  # (b,) bool, true=keep refs
     ) -> torch.Tensor:
         """
-        returns x: (b, 33, h, w)
+        returns packed views: (b * 3, 11, h, w) in order [target, ref1, ref2]
 
-        complicated bit: conditional dropout must make the *entire* ref blocks
-        disappear in a way that matches inference-time uncond exactly. so we
-        multiply (ref_lat, ref_plucker, ref_mask) by keep ∈ {0,1}.
+        conditional dropout must hide full reference blocks in both training
+        and CFG-unconditional inference (lat + plucker + mask).
         """
         b, _, h, w = tgt_lat.shape
         dtype = tgt_lat.dtype
@@ -182,8 +188,7 @@ class PoseConditionedSD(nn.Module):
         mt = zeros
 
         if ref_keep_mask is not None:
-            keep = ref_keep_mask.to(device=device, dtype=dtype)
-            keep = rearrange(keep, "b -> b 1 1 1")  # broadcast over c,h,w
+            keep = ref_keep_mask.to(device=device, dtype=dtype).view(b, 1, 1, 1)
             ref1_lat = ref1_lat * keep
             ref2_lat = ref2_lat * keep
             pl1 = pl1 * keep
@@ -191,12 +196,35 @@ class PoseConditionedSD(nn.Module):
             m1 = m1 * keep
             m2 = m2 * keep
 
-        v1 = torch.cat([ref1_lat, pl1, m1], dim=1)  
+        v1 = torch.cat([ref1_lat, pl1, m1], dim=1)
         v2 = torch.cat([ref2_lat, pl2, m2], dim=1)
-        vt = torch.cat([tgt_lat,  plt, mt], dim=1)
+        vt = torch.cat([tgt_lat, plt, mt], dim=1)
 
-        x = torch.cat([vt, v1, v2], dim=1)
-        return x
+        views = torch.stack([vt, v1, v2], dim=1)  # (b, 3, 11, h, w)
+        return views.reshape(b * self.num_views, self.per_view_ch, h, w)
+
+    def _repeat_text_for_views(self, text_emb: torch.Tensor) -> torch.Tensor:
+        return text_emb.repeat_interleave(self.num_views, dim=0)
+
+    def _extract_target_view(self, pred_views: torch.Tensor, batch_size: int) -> torch.Tensor:
+        if pred_views.shape[0] != batch_size * self.num_views:
+            raise ValueError(
+                f"unexpected view-packed batch: got {pred_views.shape[0]}, "
+                f"expected {batch_size * self.num_views}",
+            )
+        return pred_views.view(batch_size, self.num_views, *pred_views.shape[1:])[:, 0]
+
+    def _predict_target_eps(
+        self,
+        packed_views: torch.Tensor,
+        timesteps: torch.Tensor,
+        text_emb: torch.Tensor,
+        batch_size: int,
+    ) -> torch.Tensor:
+        t_views = timesteps.repeat_interleave(self.num_views)
+        text_views = self._repeat_text_for_views(text_emb)
+        pred_views = self.unet(packed_views, t_views, encoder_hidden_states=text_views).sample
+        return self._extract_target_view(pred_views, batch_size)
 
     def training_step(
         self,
@@ -257,8 +285,10 @@ class PoseConditionedSD(nn.Module):
                 text_emb[drop] = self.null_text_emb.expand(int(drop.sum().item()), -1, -1)
                 ref_keep_mask = ~drop
 
-        x = self._pack_cat33(ref1_lat, ref2_lat, tgt_lat_noisy, pl1, pl2, plt, ref_keep_mask=ref_keep_mask)
-        pred = self.unet(x, timesteps, encoder_hidden_states=text_emb).sample
+        packed_views = self._pack_views(
+            ref1_lat, ref2_lat, tgt_lat_noisy, pl1, pl2, plt, ref_keep_mask=ref_keep_mask,
+        )
+        pred = self._predict_target_eps(packed_views, timesteps, text_emb, batch_size=b)
 
         prediction_type = getattr(self.scheduler.config, "prediction_type", "epsilon")
         if prediction_type == "epsilon":
@@ -347,23 +377,23 @@ class PoseConditionedSD(nn.Module):
             t_b = torch.full((b,), t_val, device=self.device, dtype=torch.long)
 
             latent = scheduler.scale_model_input(latent, t)
-            
+
             if use_cfg or use_apg_guidance:
-                x_cond = self._pack_cat33(ref1_lat, ref2_lat, latent, pl1, pl2, plt, ref_keep_mask=None)
-                eps_cond = self.unet(x_cond, t_b, encoder_hidden_states=text_cond).sample
+                x_cond = self._pack_views(ref1_lat, ref2_lat, latent, pl1, pl2, plt, ref_keep_mask=None)
+                eps_cond = self._predict_target_eps(x_cond, t_b, text_cond, batch_size=b)
 
                 # unconditional: zero refs (lat+pl+mask), keep same noisy target + target plucker
                 keep_none = torch.zeros((b,), device=self.device, dtype=torch.bool)
-                x_uncond = self._pack_cat33(ref1_lat, ref2_lat, latent, pl1, pl2, plt, ref_keep_mask=keep_none)
-                eps_uncond = self.unet(x_uncond, t_b, encoder_hidden_states=text_uncond).sample
+                x_uncond = self._pack_views(ref1_lat, ref2_lat, latent, pl1, pl2, plt, ref_keep_mask=keep_none)
+                eps_uncond = self._predict_target_eps(x_uncond, t_b, text_uncond, batch_size=b)
 
                 if use_apg_guidance and apg is not None:
                     eps = apg.guide(pred_cond=eps_cond, pred_uncond=eps_uncond)
                 else:
                     eps = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
             else:
-                x = self._pack_cat33(ref1_lat, ref2_lat, latent, pl1, pl2, plt, ref_keep_mask=None)
-                eps = self.unet(x, t_b, encoder_hidden_states=text_cond).sample
+                x = self._pack_views(ref1_lat, ref2_lat, latent, pl1, pl2, plt, ref_keep_mask=None)
+                eps = self._predict_target_eps(x, t_b, text_cond, batch_size=b)
 
             latent = scheduler.step(eps, t, latent).prev_sample
 
