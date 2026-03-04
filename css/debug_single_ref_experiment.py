@@ -24,6 +24,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel
 from PIL import Image, ImageDraw
 from torch.optim.lr_scheduler import LambdaLR
@@ -905,6 +906,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-debug-pairs", type=int, default=4)
     p.add_argument("--num-debug-samples", type=int, default=6)
     p.add_argument("--sample-seed-base", type=int, default=1234)
+
+    p.add_argument("--wandb-project", type=str, default="CoupledSceneSampling")
+    p.add_argument("--wandb-name", type=str, default=None)
+    p.add_argument("--wandb-id", type=str, default=None)
+    p.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
     return p.parse_args()
 
 
@@ -923,6 +929,18 @@ def main() -> None:
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    wandb.init(
+        project=args.wandb_project,
+        name=args.wandb_name,
+        id=args.wandb_id,
+        mode=args.wandb_mode,
+        resume="allow",
+        config=vars(args),
+        settings=wandb.Settings(x_stats_sampling_interval=10),
+    )
+    if wandb.run is not None:
+        wandb.run.log_code("css")
 
     scenes = list(dict.fromkeys((args.scenes or []) + _read_lines(args.scenes_file)))
     if len(scenes) == 0:
@@ -960,6 +978,14 @@ def main() -> None:
     train_dataset = PairRecordViewDataset(train_pairs, H=args.H, W=args.W)
     val_dataset = PairRecordViewDataset(val_pairs, H=args.H, W=args.W)
     print(f"Train pairs: {len(train_dataset)} | Val pairs: {len(val_dataset)}")
+    wandb.log(
+        {
+            "data/train_pairs": len(train_dataset),
+            "data/val_pairs": len(val_dataset),
+            "data/all_pairs": len(dataset_all),
+        },
+        step=0,
+    )
 
     model = SingleRefPoseSD(pretrained_model=args.pretrained_model)
     model.configure_trainable(args.train_mode)
@@ -988,91 +1014,127 @@ def main() -> None:
     scaler = torch.cuda.amp.GradScaler(enabled=(model.device.type == "cuda" and args.mixed_precision == "fp16"))
 
     global_step = 0
-    for epoch in range(args.epochs):
-        model.train()
-        epoch_loss = 0.0
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.epochs}")
-        for batch in pbar:
-            optimizer.zero_grad(set_to_none=True)
-            with _autocast_context(model.device, args.mixed_precision):
-                loss = model.training_step(
-                    batch,
-                    cond_drop_prob=args.cond_drop_prob,
-                    min_timestep=args.min_timestep,
-                    max_timestep=args.max_timestep,
-                    noise_offset=args.noise_offset,
-                    min_snr_gamma=args.min_snr_gamma,
+    try:
+        for epoch in range(args.epochs):
+            model.train()
+            epoch_loss = 0.0
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.epochs}")
+            for batch in pbar:
+                optimizer.zero_grad(set_to_none=True)
+                with _autocast_context(model.device, args.mixed_precision):
+                    loss = model.training_step(
+                        batch,
+                        cond_drop_prob=args.cond_drop_prob,
+                        min_timestep=args.min_timestep,
+                        max_timestep=args.max_timestep,
+                        noise_offset=args.noise_offset,
+                        min_snr_gamma=args.min_snr_gamma,
+                    )
+
+                if scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                else:
+                    loss.backward()
+
+                if args.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=args.grad_clip)
+
+                if scaler.is_enabled():
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                lr_scheduler.step()
+
+                epoch_loss += float(loss.item())
+                global_step += 1
+                pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{lr_scheduler.get_last_lr()[0]:.2e}")
+                wandb.log(
+                    {
+                        "train/loss": float(loss.item()),
+                        "train/lr": float(lr_scheduler.get_last_lr()[0]),
+                    },
+                    step=global_step,
                 )
 
-            if scaler.is_enabled():
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-            else:
-                loss.backward()
+            avg_loss = epoch_loss / max(1, len(train_loader))
+            print(f"Epoch {epoch + 1}: avg_loss={avg_loss:.5f}")
+            wandb.log(
+                {
+                    "train/epoch_loss": float(avg_loss),
+                    "train/epoch": int(epoch + 1),
+                },
+                step=global_step,
+            )
 
-            if args.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=args.grad_clip)
+            if (epoch + 1) % args.sample_every_epochs == 0 and len(val_dataset) > 0:
+                model.eval()
+                stats = evaluate_diversity(
+                    model,
+                    val_dataset,
+                    output_dir=output_dir / "debug_grids" / f"epoch_{epoch + 1:03d}",
+                    num_pairs=args.num_debug_pairs,
+                    num_samples=args.num_debug_samples,
+                    sample_seed_base=args.sample_seed_base + epoch * 100_000,
+                    num_steps=args.sample_steps,
+                    cfg_scale=args.sample_cfg_scale,
+                )
+                stats_path = output_dir / "debug_grids" / f"epoch_{epoch + 1:03d}" / "metrics.json"
+                stats_path.parent.mkdir(parents=True, exist_ok=True)
+                stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+                if len(stats) > 0:
+                    diversity_vals = [s["diversity_l1"] for s in stats]
+                    ref_copy_vals = [s["ref_copy_l1"] for s in stats]
+                    print(
+                        f"  sample diversity_l1 mean={np.mean(diversity_vals):.4f} "
+                        f"(saved {len(stats)} grids to {stats_path.parent})"
+                    )
+                    wandb.log(
+                        {
+                            "eval/diversity_l1_mean": float(np.mean(diversity_vals)),
+                            "eval/ref_copy_l1_mean": float(np.mean(ref_copy_vals)),
+                            "eval/epoch": int(epoch + 1),
+                        },
+                        step=global_step,
+                    )
 
-            if scaler.is_enabled():
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-            lr_scheduler.step()
+        ckpt_path = output_dir / "unet_final.pt"
+        torch.save({"unet": model.unet.state_dict(), "global_step": global_step}, ckpt_path)
+        print(f"Saved checkpoint: {ckpt_path}")
 
-            epoch_loss += float(loss.item())
-            global_step += 1
-            pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{lr_scheduler.get_last_lr()[0]:.2e}")
-
-        avg_loss = epoch_loss / max(1, len(train_loader))
-        print(f"Epoch {epoch + 1}: avg_loss={avg_loss:.5f}")
-
-        if (epoch + 1) % args.sample_every_epochs == 0 and len(val_dataset) > 0:
+        if len(val_dataset) > 0:
             model.eval()
-            stats = evaluate_diversity(
+            final_stats = evaluate_diversity(
                 model,
                 val_dataset,
-                output_dir=output_dir / "debug_grids" / f"epoch_{epoch + 1:03d}",
+                output_dir=output_dir / "debug_grids" / "final",
                 num_pairs=args.num_debug_pairs,
                 num_samples=args.num_debug_samples,
-                sample_seed_base=args.sample_seed_base + epoch * 100_000,
+                sample_seed_base=args.sample_seed_base + 999_999,
                 num_steps=args.sample_steps,
                 cfg_scale=args.sample_cfg_scale,
             )
-            stats_path = output_dir / "debug_grids" / f"epoch_{epoch + 1:03d}" / "metrics.json"
-            stats_path.parent.mkdir(parents=True, exist_ok=True)
-            stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
-            if len(stats) > 0:
-                diversity_vals = [s["diversity_l1"] for s in stats]
-                print(
-                    f"  sample diversity_l1 mean={np.mean(diversity_vals):.4f} "
-                    f"(saved {len(stats)} grids to {stats_path.parent})"
+            final_stats_path = output_dir / "debug_grids" / "final" / "metrics.json"
+            final_stats_path.parent.mkdir(parents=True, exist_ok=True)
+            final_stats_path.write_text(json.dumps(final_stats, indent=2), encoding="utf-8")
+            print(f"Saved final debug outputs: {final_stats_path.parent}")
+            if len(final_stats) > 0:
+                diversity_vals = [s["diversity_l1"] for s in final_stats]
+                ref_copy_vals = [s["ref_copy_l1"] for s in final_stats]
+                wandb.log(
+                    {
+                        "eval_final/diversity_l1_mean": float(np.mean(diversity_vals)),
+                        "eval_final/ref_copy_l1_mean": float(np.mean(ref_copy_vals)),
+                    },
+                    step=global_step,
                 )
 
-    ckpt_path = output_dir / "unet_final.pt"
-    torch.save({"unet": model.unet.state_dict(), "global_step": global_step}, ckpt_path)
-    print(f"Saved checkpoint: {ckpt_path}")
-
-    if len(val_dataset) > 0:
-        model.eval()
-        final_stats = evaluate_diversity(
-            model,
-            val_dataset,
-            output_dir=output_dir / "debug_grids" / "final",
-            num_pairs=args.num_debug_pairs,
-            num_samples=args.num_debug_samples,
-            sample_seed_base=args.sample_seed_base + 999_999,
-            num_steps=args.sample_steps,
-            cfg_scale=args.sample_cfg_scale,
-        )
-        final_stats_path = output_dir / "debug_grids" / "final" / "metrics.json"
-        final_stats_path.parent.mkdir(parents=True, exist_ok=True)
-        final_stats_path.write_text(json.dumps(final_stats, indent=2), encoding="utf-8")
-        print(f"Saved final debug outputs: {final_stats_path.parent}")
-
-    run_config_path = output_dir / "run_config.json"
-    run_config_path.write_text(json.dumps(vars(args), indent=2), encoding="utf-8")
-    print(f"Saved run config: {run_config_path}")
+        run_config_path = output_dir / "run_config.json"
+        run_config_path.write_text(json.dumps(vars(args), indent=2), encoding="utf-8")
+        print(f"Saved run config: {run_config_path}")
+    finally:
+        wandb.finish()
 
 
 if __name__ == "__main__":
