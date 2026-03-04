@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT=${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 SCENE=${SCENE:-MegaScenes/Mysore_Palace}
+SCENES=${SCENES:-}
+SCENES_FILE=${SCENES_FILE:-}
 OUTPUT=${OUTPUT:-$ROOT/checkpoints/single_ref_debug}
 SEED=${SEED:-42}
 
@@ -32,23 +34,37 @@ fi
 
 cd "$ROOT"
 
-python3 -m css.debug_single_ref_experiment \
-    --scenes "$SCENE" \
-    --output "$OUTPUT" \
-    --seed "$SEED" \
-    --epochs "$EPOCHS" \
-    --batch-size "$BATCH_SIZE" \
-    --lr "$LR" \
-    --H "$H" \
-    --W "$W" \
-    --min-pair-iou "$MIN_PAIR_IOU" \
-    --max-pair-iou "$MAX_PAIR_IOU" \
-    --min-pair-distance "$MIN_PAIR_DISTANCE" \
-    --max-pair-distance "$MAX_PAIR_DISTANCE" \
-    --min-view-cos "$MIN_VIEW_COS" \
-    --min-rotation-deg "$MIN_ROTATION_DEG" \
-    --max-rotation-deg "$MAX_ROTATION_DEG" \
-    --sample-steps "$SAMPLE_STEPS" \
-    --sample-cfg-scale "$SAMPLE_CFG_SCALE" \
-    --num-debug-pairs "$NUM_DEBUG_PAIRS" \
+ARGS=(
+    --output "$OUTPUT"
+    --seed "$SEED"
+    --epochs "$EPOCHS"
+    --batch-size "$BATCH_SIZE"
+    --lr "$LR"
+    --H "$H"
+    --W "$W"
+    --min-pair-iou "$MIN_PAIR_IOU"
+    --max-pair-iou "$MAX_PAIR_IOU"
+    --min-pair-distance "$MIN_PAIR_DISTANCE"
+    --max-pair-distance "$MAX_PAIR_DISTANCE"
+    --min-view-cos "$MIN_VIEW_COS"
+    --min-rotation-deg "$MIN_ROTATION_DEG"
+    --max-rotation-deg "$MAX_ROTATION_DEG"
+    --sample-steps "$SAMPLE_STEPS"
+    --sample-cfg-scale "$SAMPLE_CFG_SCALE"
+    --num-debug-pairs "$NUM_DEBUG_PAIRS"
     --num-debug-samples "$NUM_DEBUG_SAMPLES"
+)
+
+if [[ -n "$SCENES_FILE" ]]; then
+    ARGS+=(--scenes-file "$SCENES_FILE")
+elif [[ -n "$SCENES" ]]; then
+    # SCENES should be a space-separated list of scene paths.
+    # shellcheck disable=SC2206
+    SCENE_LIST=($SCENES)
+    ARGS+=(--scenes "${SCENE_LIST[@]}")
+else
+    ARGS+=(--scenes "$SCENE")
+fi
+
+python3 -m css.debug_single_ref_experiment \
+    "${ARGS[@]}"
