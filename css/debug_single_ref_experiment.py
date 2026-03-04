@@ -781,6 +781,57 @@ def save_multisample_grid(
     canvas.save(output_path)
 
 
+def build_sample_strip(ref_img: torch.Tensor, target_img: torch.Tensor, generated_img: torch.Tensor) -> np.ndarray:
+    return np.concatenate(
+        [
+            _to_uint8(ref_img),
+            _to_uint8(target_img),
+            _to_uint8(generated_img),
+        ],
+        axis=1,
+    )
+
+
+@torch.inference_mode()
+def log_train_sample_to_wandb(
+    model: SingleRefPoseSD,
+    dataset: PairRecordViewDataset,
+    *,
+    output_dir: Path,
+    epoch: int,
+    global_step: int,
+    num_steps: int,
+    cfg_scale: float,
+    sample_seed: int,
+) -> None:
+    if len(dataset) == 0:
+        return
+    try:
+        idx = int((epoch - 1) % len(dataset))
+        item = dataset[idx]
+        rec = dataset.pairs[idx]
+        prompt = item["prompt"]
+        ref = item["ref_img"].unsqueeze(0).to(model.device)
+        generated = model.sample(
+            ref_img=ref,
+            prompt=prompt,
+            num_steps=num_steps,
+            cfg_scale=cfg_scale,
+            seed=sample_seed,
+        )[0].detach().cpu()
+        strip = build_sample_strip(item["ref_img"], item["target_img"], generated)
+        out_path = output_dir / "train_samples" / f"epoch_{epoch:03d}.png"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(strip).save(out_path)
+        caption = (
+            f'epoch={epoch} idx={idx} scene={rec.scene_name} '
+            f'ref={rec.ref_name} tgt={rec.target_name} iou={rec.iou:.3f}'
+        )
+        wandb.log({"samples/train": wandb.Image(strip, caption=caption)}, step=global_step)
+    except Exception as exc:
+        print(f"[warning] failed to log train sample at epoch {epoch}: {exc}")
+
+
 @torch.inference_mode()
 def evaluate_diversity(
     model: SingleRefPoseSD,
@@ -1068,8 +1119,19 @@ def main() -> None:
                 step=global_step,
             )
 
+            model.eval()
+            log_train_sample_to_wandb(
+                model,
+                train_dataset,
+                output_dir=output_dir,
+                epoch=epoch + 1,
+                global_step=global_step,
+                num_steps=args.sample_steps,
+                cfg_scale=args.sample_cfg_scale,
+                sample_seed=args.sample_seed_base + epoch,
+            )
+
             if (epoch + 1) % args.sample_every_epochs == 0 and len(val_dataset) > 0:
-                model.eval()
                 stats = evaluate_diversity(
                     model,
                     val_dataset,
