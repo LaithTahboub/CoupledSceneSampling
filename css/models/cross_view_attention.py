@@ -10,15 +10,6 @@ from einops import rearrange
 class CrossViewAttentionProcessor(nn.Module):
     """
     self-attn processor that mixes tokens across views.
-
-    expected layout: batch is packed as (batch_scenes * num_views, ...),
-    with the num_views samples for each scene contiguous in the batch.
-
-    behavior:
-    - for self-attn (encoder_hidden_states is None): concatenate tokens from all
-      views along sequence length, run the original attention processor once,
-      then unpack back to per-view tokens.
-    - for cross-attn (encoder_hidden_states is not None): do nothing special.
     """
 
     def __init__(self, num_views: int, base_processor: Any):
@@ -56,18 +47,6 @@ class CrossViewAttentionProcessor(nn.Module):
         v: int,
         seq: int,
     ) -> torch.Tensor | None:
-        """
-        pack a per-view self-attn mask into a per-scene packed mask.
-
-        supported mask layouts (common in diffusers processors):
-        - (b, seq)
-        - (b, 1, seq)
-
-        output:
-        - (bs, v*seq) or (bs, 1, v*seq)
-
-        if we see an unexpected shape, return None so we can safely fallback.
-        """
         if attention_mask.ndim == 2:
             b, s = attention_mask.shape
             if s != seq:
@@ -94,7 +73,7 @@ class CrossViewAttentionProcessor(nn.Module):
         *args,
         **kwargs,
     ) -> torch.Tensor:
-        # cross-attn path: untouched
+        # dont change text conditioning
         if encoder_hidden_states is not None:
             return self._call_base(
                 attn,
@@ -143,10 +122,10 @@ class CrossViewAttentionProcessor(nn.Module):
 
         bs = b // v
 
-        # pack: (bs*v, seq, c) -> (bs, v*seq, c)
+        # (bs*v, seq, c) -> (bs, v*seq, c)
         packed_tokens = rearrange(tokens, "(bs v) s c -> bs (v s) c", bs=bs, v=v, s=seq)
 
-        # if a mask is present, try to pack it; otherwise fallback (safer than wrong masking)
+        # if a mask is present, try to pack it
         packed_mask = None
         if attention_mask is not None:
             packed_mask = self._pack_attention_mask(attention_mask, bs=bs, v=v, seq=seq)
@@ -167,7 +146,7 @@ class CrossViewAttentionProcessor(nn.Module):
             packed_tokens,
             encoder_hidden_states=None,
             attention_mask=packed_mask,
-            temb=temb,  # keep temb: processors may accept it even if unused
+            temb=temb,  
             *args,
             **kwargs,
         )
@@ -194,14 +173,14 @@ class CrossViewAttention:
         self.enabled_processor_names: list[str] = []
 
     def _should_wrap(self, name: str) -> bool:
-        # diffusers convention: attn1 = self-attn, attn2 = cross-attn
+        # diffusers convention is attn1 = self-attn, attn2 = cross-attn
         if not name.endswith("attn1.processor"):
             return False
         if self.include_high_res:
             return True
 
         # sd2.1 @ 512: 64x64 self-attn lives in down_blocks.0 and up_blocks.3
-        # cat3d skips 64x64 by default due to cost; keep that behavior.
+        # cat3d skips 64x64 by default due to cost,we also do that
         if name.startswith("down_blocks.0.") or name.startswith("up_blocks.3."):
             return False
         return True
