@@ -15,9 +15,9 @@
 
 set -euo pipefail
 
-ROOT=${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
+ROOT="/fs/nexus-scratch/ltahboub/CoupledSceneSampling"
 MEGASCENES_ROOT=${MEGASCENES_ROOT:-$ROOT/MegaScenes}
-SCENES_FILE=${SCENES_FILE:-$MEGASCENES_ROOT/scenes_colmap_ready.txt}
+SCENES_FILE=${SCENES_FILE:-"/fs/nexus-scratch/ltahboub/CoupledSceneSampling/MegaScenes/scenes_colmap_ready.txt"}
 SCENES=${SCENES:-}
 
 OUTPUT=${OUTPUT:-$ROOT/checkpoints/single_ref_debug}
@@ -82,4 +82,4 @@ else
     exit 1
 fi
 
-python -m css.debug_single_ref_experiment "${ARGS[@]}"
+uv run -m css.debug_single_ref_experiment "${ARGS[@]}"
