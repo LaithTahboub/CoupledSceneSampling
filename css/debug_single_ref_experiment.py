@@ -24,7 +24,7 @@ from css.data.dataset import (
     load_image_tensor,
     read_scene_prompt_name,
 )
-from css.data.frustum_iou import compute_covisibility
+from css.data.iou import compute_covisibility
 from css.models.cross_view_attention import CrossViewAttention
 
 

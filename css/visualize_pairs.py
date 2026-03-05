@@ -16,7 +16,7 @@ from css.data.dataset import (
     load_image_tensor,
     read_scene_prompt_name,
 )
-from css.data.frustum_iou import (
+from css.data.iou import (
     build_camera_frustum_geometry,
     compute_covisibility,
     compute_frustum_iou_from_geometries,

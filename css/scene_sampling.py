@@ -13,7 +13,7 @@ from css.data.dataset import (
     load_image_tensor,
     name_allowed,
 )
-from css.data.frustum_iou import compute_covisibility
+from css.data.iou import compute_covisibility
 
 
 def _index_scene_images(images_dir: Path) -> tuple[set[str], dict[str, str]]:

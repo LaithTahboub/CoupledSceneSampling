@@ -14,7 +14,7 @@ from PIL import Image, ImageFile
 from torch.utils.data import Dataset
 
 from css.data.colmap_reader import Camera, read_scene
-from css.data.frustum_iou import (
+from css.data.iou import (
     compute_covisibility,
 )
 from seva.geometry import get_plucker_coordinates, to_hom_pose
