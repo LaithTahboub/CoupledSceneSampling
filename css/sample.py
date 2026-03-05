@@ -37,8 +37,9 @@ def main():
     parser.add_argument("--apg-momentum", type=float, default=-0.5, help="APG momentum (ignored unless --apg)")
     parser.add_argument("--apg-norm-threshold", type=float, default=0.0, help="APG norm threshold (ignored unless --apg)")
     parser.add_argument("--apg-eps", type=float, default=1e-12, help="APG epsilon (ignored unless --apg)")
-    parser.add_argument("--min-pair-iou", type=float, default=0.15, help="Min frustum IoU between paired cameras")
-    parser.add_argument("--min-ref-spacing", type=float, default=0.25, help="Min distance between refs")
+    parser.add_argument("--min-covisibility", type=float, default=0.15, help="Minimum target-reference co-visibility")
+    parser.add_argument("--max-covisibility", type=float, default=0.80, help="Maximum target-reference co-visibility")
+    parser.add_argument("--min-distance", type=float, default=0.20, help="Minimum camera distance")
     parser.add_argument("--exclude-image-list", type=str, default=None)
     parser.add_argument("--target-include-image-list", type=str, default=None)
     parser.add_argument("--reference-include-image-list", type=str, default=None)
@@ -98,11 +99,9 @@ def main():
     ref1_img, ref2_img = find_best_references(
         target_img,
         reference_images,
-        cameras,
-        H=args.H,
-        W=args.W,
-        min_pair_iou=args.min_pair_iou,
-        min_ref_spacing=args.min_ref_spacing,
+        min_covisibility=args.min_covisibility,
+        max_covisibility=args.max_covisibility,
+        min_distance=args.min_distance,
     )
     print(f"Selected refs: {ref1_img.name}, {ref2_img.name}")
 

@@ -17,8 +17,9 @@ PROMPT=${PROMPT:-""}
 PROMPT_TEMPLATE=${PROMPT_TEMPLATE:-""}
 NUM_STEPS=${NUM_STEPS:-50}
 CFG_SCALE=${CFG_SCALE:-3.5}
-MIN_PAIR_IOU=${MIN_PAIR_IOU:-0.0}
-MIN_REF_SPACING=${MIN_REF_SPACING:-0.2}
+MIN_COVISIBILITY=${MIN_COVISIBILITY:-0.15}
+MAX_COVISIBILITY=${MAX_COVISIBILITY:-0.80}
+MIN_DISTANCE=${MIN_DISTANCE:-0.2}
 H=${H:-512}
 W=${W:-512}
 START_T=${START_T:-500}
@@ -75,8 +76,9 @@ ARGS=(
     --checkpoint "$CHECKPOINT"
     --num-steps "$NUM_STEPS"
     --cfg-scale "$CFG_SCALE"
-    --min-pair-iou "$MIN_PAIR_IOU"
-    --min-ref-spacing "$MIN_REF_SPACING"
+    --min-covisibility "$MIN_COVISIBILITY"
+    --max-covisibility "$MAX_COVISIBILITY"
+    --min-distance "$MIN_DISTANCE"
     --prompt-template "$PROMPT_TEMPLATE"
     --H "$H"
     --W "$W"

@@ -9,12 +9,11 @@ from PIL import Image, ImageDraw
 from css.data.colmap_reader import Camera, ImageData, read_scene
 from css.data.dataset import (
     build_cropped_scaled_intrinsics,
-    compute_frustum_iou,
     compute_plucker_tensor,
-    compute_reference_depth,
     load_image_tensor,
     name_allowed,
 )
+from css.data.frustum_iou import compute_covisibility
 
 
 def _index_scene_images(images_dir: Path) -> tuple[set[str], dict[str, str]]:
@@ -75,6 +74,7 @@ def load_scene_pools(
                 camera_id=img.camera_id,
                 name=resolved,
                 c2w=img.c2w,
+                point3d_ids=img.point3d_ids,
             )
         )
     valid_images.sort(key=lambda x: x.id)
@@ -120,48 +120,50 @@ def load_scene_pools(
 def find_best_references(
     target_img: ImageData,
     all_images: list[ImageData],
-    cameras: dict[int, Camera],
-    H: int = 512,
-    W: int = 512,
-    min_pair_iou: float = 0.10,
-    min_ref_spacing: float = 0.2,
+    min_covisibility: float = 0.10,
+    max_covisibility: float = 0.80,
+    min_distance: float = 0.2,
 ) -> tuple[ImageData, ImageData]:
-    target_pos = target_img.c2w[:3, 3]
-    K_tgt = build_cropped_scaled_intrinsics(cameras[target_img.camera_id], H, W)
-
-    positions = {img.id: img.c2w[:3, 3] for img in all_images}
-    positions[target_img.id] = target_pos
-    d_ref = compute_reference_depth(positions)
-
-    candidates = []
+    target_pos = target_img.c2w[:3, 3].astype(np.float64)
+    candidates: list[tuple[float, float, ImageData]] = []
     for img in all_images:
         if img.id == target_img.id:
             continue
-
-        K_ref = build_cropped_scaled_intrinsics(cameras[img.camera_id], H, W)
-        iou = compute_frustum_iou(
-            target_img.c2w, K_tgt,
-            img.c2w, K_ref,
-            H, W, d_ref,
-        )
-        if iou < min_pair_iou:
+        dist = float(np.linalg.norm(img.c2w[:3, 3].astype(np.float64) - target_pos))
+        if dist < min_distance:
             continue
-
-        candidates.append((iou, img))
+        covis = float(compute_covisibility(target_img, img))
+        if covis < min_covisibility or covis > max_covisibility:
+            continue
+        candidates.append((covis, dist, img))
 
     if len(candidates) < 2:
         raise ValueError(f"Not enough valid references found for target {target_img.name}")
 
-    # Sort by IoU descending (best overlap first).
+    # Sort by target co-visibility descending (best overlap first).
     candidates.sort(key=lambda x: x[0], reverse=True)
-    ref1 = candidates[0][1]
+    ref1 = candidates[0][2]
 
-    for _, img in candidates[1:]:
-        spacing = np.linalg.norm(img.c2w[:3, 3] - ref1.c2w[:3, 3])
-        if spacing >= min_ref_spacing:
-            return ref1, img
+    ref2_candidates: list[tuple[float, float, ImageData]] = []
+    for cov2, _, img in candidates[1:]:
+        ref_dist = float(np.linalg.norm(img.c2w[:3, 3] - ref1.c2w[:3, 3]))
+        if ref_dist < min_distance:
+            continue
+        cov_refs = float(compute_covisibility(ref1, img))
+        ref2_candidates.append((cov2, cov_refs, img))
 
-    return ref1, candidates[1][1]
+    if not ref2_candidates:
+        return ref1, candidates[1][2]
+
+    max_ref_ref_covis = min(0.95, max_covisibility + 0.15)
+    preferred = [x for x in ref2_candidates if x[1] <= max_ref_ref_covis]
+    if preferred:
+        preferred.sort(key=lambda x: x[0], reverse=True)
+        return ref1, preferred[0][2]
+
+    # Fallback: least similar ref2 (low ref-ref covis), break ties by target covis.
+    ref2_candidates.sort(key=lambda x: (x[1], -x[0]))
+    return ref1, ref2_candidates[0][2]
 
 
 def build_single_sample(

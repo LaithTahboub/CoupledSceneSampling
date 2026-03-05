@@ -15,10 +15,7 @@ from torch.utils.data import Dataset
 
 from css.data.colmap_reader import Camera, read_scene
 from css.data.frustum_iou import (
-    build_camera_frustum_geometry,
-    compute_frustum_iou,
-    compute_frustum_iou_from_geometries,
-    compute_reference_depth,
+    compute_covisibility,
 )
 from seva.geometry import get_plucker_coordinates, to_hom_pose
 
@@ -249,55 +246,30 @@ def compute_plucker_tensor(
     return plucker[0]
 
 
-def _camera_forward(c2w: np.ndarray) -> np.ndarray:
-    """Return normalized camera forward axis in world coordinates."""
-    f = c2w[:3, 2].astype(np.float64)
-    norm = float(np.linalg.norm(f))
-    if norm < 1e-12:
-        return np.array([0.0, 0.0, 1.0], dtype=np.float64)
-    return f / norm
-
-
-def _rotation_angle_deg(R_a: np.ndarray, R_b: np.ndarray) -> float:
-    """Geodesic rotation angle between two camera orientations."""
-    R_rel = R_a.T @ R_b
-    cos_theta = (float(np.trace(R_rel)) - 1.0) * 0.5
-    cos_theta = float(np.clip(cos_theta, -1.0, 1.0))
-    return float(np.degrees(np.arccos(cos_theta)))
-
-
-def _effective_focal(K: np.ndarray) -> float:
-    fx = max(float(K[0, 0]), 1e-9)
-    fy = max(float(K[1, 1]), 1e-9)
-    return float(np.sqrt(fx * fy))
-
-
-def _clamp_int(value: int, low: int, high: int) -> int:
-    return max(low, min(high, int(value)))
-
-
 class MegaScenesDataset(Dataset):
-    """Lazy dataset: load images and compute Plucker maps per sample."""
+    """Lazy dataset: build triplets with co-visibility + min-distance constraints."""
 
     def __init__(
         self,
         scene_dirs: list[str],
         H: int = 512,
         W: int = 512,
-        max_pair_distance: float = 2.0,
-        max_triplets_per_scene: int = 8,
-        min_pair_iou: float = 0.22,
-        min_ref_spacing: float = 0.35,
-        min_view_cos: float = 0.90,
-        max_rotation_deg: float = 35.0,
-        max_focal_ratio: float = 1.35,
-        pair_prefilter_topk: int = 48,
-        candidate_pool_topk: int = 20,
+        max_triplets_per_scene: int = 24,
+        min_covisibility: float = 0.22,
+        max_covisibility: float = 0.58,
+        min_distance: float = 0.20,
         exclude_image_names: set[str] | None = None,
         target_include_image_names: set[str] | None = None,
         reference_include_image_names: set[str] | None = None,
         prompt_template: str | None = None,
     ):
+        if not (0.0 <= min_covisibility < max_covisibility <= 1.0):
+            raise ValueError("Expected 0 <= min_covisibility < max_covisibility <= 1")
+        if min_distance < 0:
+            raise ValueError("min_distance must be >= 0")
+        if max_triplets_per_scene <= 0:
+            raise ValueError("max_triplets_per_scene must be >= 1")
+
         self.H, self.W = H, W
         self.latent_h, self.latent_w = H // 8, W // 8
         self.exclude_image_names = exclude_image_names
@@ -305,14 +277,6 @@ class MegaScenesDataset(Dataset):
         self.reference_include_image_names = reference_include_image_names
         self.prompt_template = prompt_template
         self.scene_prompt_names: dict[str, str] = {}
-        self._bad_image_paths: set[str] = set()
-        self._bad_triplet_indices: set[int] = set()
-        self._max_io_retries = 64
-        self._io_error_logs = 0
-        self._max_io_error_logs = 20
-
-        if max_triplets_per_scene <= 0:
-            raise ValueError("max_triplets_per_scene must be >= 1")
 
         self.triplets = []
         for scene_spec in scene_dirs:
@@ -323,15 +287,10 @@ class MegaScenesDataset(Dataset):
                 self._build_triplets(
                     scene_dir,
                     scene_key,
-                    max_pair_distance,
                     max_triplets_per_scene,
-                    min_pair_iou,
-                    min_ref_spacing,
-                    min_view_cos,
-                    max_rotation_deg,
-                    max_focal_ratio,
-                    pair_prefilter_topk,
-                    candidate_pool_topk,
+                    min_covisibility,
+                    max_covisibility,
+                    min_distance,
                 )
             )
 
@@ -353,15 +312,10 @@ class MegaScenesDataset(Dataset):
         self,
         scene_dir: Path,
         scene_key: str,
-        max_pair_distance: float,
         max_triplets: int,
-        min_pair_iou: float,
-        min_ref_spacing: float,
-        min_view_cos: float,
-        max_rotation_deg: float,
-        max_focal_ratio: float,
-        pair_prefilter_topk: int,
-        candidate_pool_topk: int,
+        min_covisibility: float,
+        max_covisibility: float,
+        min_distance: float,
     ):
         cameras, images = read_scene(scene_dir)
         images_dir = scene_dir / "images"
@@ -389,200 +343,83 @@ class MegaScenesDataset(Dataset):
         if len(targets) == 0 or len(refs_pool) < 2:
             return []
 
+        images_by_id = {img.id: img for img in valid}
         positions = {img.id: img.c2w[:3, 3].astype(np.float64) for img in valid}
-        R_by_id = {img.id: img.c2w[:3, :3].astype(np.float64) for img in valid}
         K_by_id = {img.id: self._build_K(cameras[img.camera_id]) for img in valid}
-        forward_by_id = {img.id: _camera_forward(img.c2w) for img in valid}
-        focal_by_id = {img_id: _effective_focal(K_by_id[img_id]) for img_id in K_by_id}
-
-        d_ref = compute_reference_depth(positions)
-        frustum_by_id: dict[int, dict[str, object]] = {
-            img.id: build_camera_frustum_geometry(img.c2w, K_by_id[img.id], self.H, self.W, d_ref)
-            for img in valid
-        }
-        iou_cache: dict[tuple[int, int], float] = {}
-        metric_cache: dict[tuple[int, int], dict[str, float]] = {}
-        dist_scale = max(max_pair_distance, d_ref, 1e-6)
-        prefilter_k_req = max(1, int(pair_prefilter_topk))
-        pool_k_req = max(1, int(candidate_pool_topk))
-        # Safety caps: prevent pathological runtimes from huge user-provided values.
-        prefilter_k = _clamp_int(prefilter_k_req, 1, 512)
-        pool_k = _clamp_int(pool_k_req, 1, 64)
-        triplets_per_ref1 = 2
-        max_combo_checks_per_ref1 = max(128, min(2048, pool_k * pool_k))
-        # Two-stage retrieval:
-        # 1) cheap pose/focal gating + ranking
-        # 2) true volumetric frustum IoU on top-k only
-        # This preserves geometric quality while keeping build time reasonable.
-        if prefilter_k != prefilter_k_req or pool_k != pool_k_req:
-            print(
-                f"{scene_key}: clamped pair_prefilter_topk {prefilter_k_req}->{prefilter_k}, "
-                f"candidate_pool_topk {pool_k_req}->{pool_k}",
-            )
+        dist_cache: dict[tuple[int, int], float] = {}
+        covis_cache: dict[tuple[int, int], float] = {}
 
         def pair_key(i_id: int, j_id: int) -> tuple[int, int]:
             return (i_id, j_id) if i_id < j_id else (j_id, i_id)
 
-        def pair_iou(i_id: int, j_id: int) -> float:
+        def pair_distance(i_id: int, j_id: int) -> float:
             key = pair_key(i_id, j_id)
-            if key not in iou_cache:
-                iou_cache[key] = compute_frustum_iou_from_geometries(
-                    frustum_by_id[key[0]],
-                    frustum_by_id[key[1]],
-                )
-            return iou_cache[key]
+            if key not in dist_cache:
+                dist_cache[key] = float(np.linalg.norm(positions[key[0]] - positions[key[1]]))
+            return dist_cache[key]
 
-        def pair_metrics(i_id: int, j_id: int) -> dict[str, float]:
+        def pair_covis(i_id: int, j_id: int) -> float:
             key = pair_key(i_id, j_id)
-            cached = metric_cache.get(key)
-            if cached is not None:
-                return cached
+            if key not in covis_cache:
+                covis_cache[key] = float(compute_covisibility(images_by_id[key[0]], images_by_id[key[1]]))
+            return covis_cache[key]
 
-            dist = float(np.linalg.norm(positions[i_id] - positions[j_id]))
-            dir_cos = float(np.clip(np.dot(forward_by_id[i_id], forward_by_id[j_id]), -1.0, 1.0))
-            rot_deg = _rotation_angle_deg(R_by_id[i_id], R_by_id[j_id])
-            fi = max(focal_by_id[i_id], 1e-9)
-            fj = max(focal_by_id[j_id], 1e-9)
-            focal_ratio = max(fi / fj, fj / fi)
-            data = {
-                "dist": dist,
-                "dir_cos": dir_cos,
-                "rot_deg": rot_deg,
-                "focal_ratio": float(focal_ratio),
-            }
-            metric_cache[key] = data
-            return data
-
-        def passes_pair(
-            i_id: int,
-            j_id: int,
-            *,
-            min_spacing: float = 0.0,
-        ) -> bool:
-            m = pair_metrics(i_id, j_id)
-            if m["dist"] < min_spacing:
-                return False
-            if max_pair_distance > 0 and m["dist"] > max_pair_distance:
-                return False
-            if m["dir_cos"] < min_view_cos:
-                return False
-            if m["rot_deg"] > max_rotation_deg:
-                return False
-            if m["focal_ratio"] > max_focal_ratio:
-                return False
-            return True
-
-        def pair_prefilter_score(i_id: int, j_id: int) -> float:
-            m = pair_metrics(i_id, j_id)
-            dist_term = m["dist"] / dist_scale
-            rot_term = m["rot_deg"] / 180.0
-            focal_term = abs(float(np.log(max(m["focal_ratio"], 1e-9))))
-            return (
-                2.0 * m["dir_cos"]
-                - 0.7 * dist_term
-                - 0.7 * rot_term
-                - 0.6 * focal_term
-            )
-
+        max_ref_ref_covis = min(0.95, max_covisibility + 0.15)
         triplets_scored: list[tuple[float, tuple]] = []
-        for ref1 in refs_pool:
-            # Candidate ref2 cameras: cheap prefilter first, IoU second.
-            ref2_prefiltered: list[tuple[float, object]] = []
-            for ref2 in refs_pool:
-                if ref2.id == ref1.id:
-                    continue
-                if not passes_pair(ref1.id, ref2.id, min_spacing=min_ref_spacing):
-                    continue
-                pref_score = pair_prefilter_score(ref1.id, ref2.id)
-                ref2_prefiltered.append((pref_score, ref2))
-            ref2_prefiltered.sort(key=lambda x: x[0], reverse=True)
 
-            ref2_candidates: list[tuple[float, float, object]] = []
-            for pref_score, ref2 in ref2_prefiltered[:prefilter_k]:
-                iou_r1_r2 = pair_iou(ref1.id, ref2.id)
-                if iou_r1_r2 < min_pair_iou:
+        for tgt in targets:
+            ref_candidates: list[tuple[float, object]] = []
+            for ref in refs_pool:
+                if ref.id == tgt.id:
                     continue
-                ref2_candidates.append((iou_r1_r2, pref_score, ref2))
+                if pair_distance(ref.id, tgt.id) < min_distance:
+                    continue
+                covis = pair_covis(ref.id, tgt.id)
+                if covis < min_covisibility or covis > max_covisibility:
+                    continue
+                ref_candidates.append((covis, ref))
 
-            # Candidate targets: cheap prefilter first, IoU second.
-            target_prefiltered: list[tuple[float, object]] = []
-            for tgt in targets:
-                if tgt.id == ref1.id:
-                    continue
-                if not passes_pair(ref1.id, tgt.id):
-                    continue
-                pref_score = pair_prefilter_score(ref1.id, tgt.id)
-                target_prefiltered.append((pref_score, tgt))
-            target_prefiltered.sort(key=lambda x: x[0], reverse=True)
-
-            target_candidates: list[tuple[float, float, object]] = []
-            for pref_score, tgt in target_prefiltered[:prefilter_k]:
-                iou_r1_t = pair_iou(ref1.id, tgt.id)
-                if iou_r1_t < min_pair_iou:
-                    continue
-                target_candidates.append((iou_r1_t, pref_score, tgt))
-
-            if len(ref2_candidates) == 0 or len(target_candidates) == 0:
+            if len(ref_candidates) < 2:
                 continue
+            ref_candidates.sort(key=lambda x: x[0], reverse=True)
 
-            ref2_candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-            target_candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-
-            scored_pairs: list[tuple[float, object, object]] = []
-            combo_checks = 0
-            for ref2_iou, ref2_pref, ref2 in ref2_candidates[:pool_k]:
-                for tgt_iou, tgt_pref, tgt in target_candidates[:pool_k]:
-                    combo_checks += 1
-                    if combo_checks > max_combo_checks_per_ref1:
-                        break
-                    if tgt.id == ref2.id:
-                        continue
-                    # Ensure target is also close/similar to ref2.
-                    if not passes_pair(ref2.id, tgt.id):
-                        continue
-                    iou_r2_t = pair_iou(ref2.id, tgt.id)
-                    combo = (
-                        ref2_iou + tgt_iou + 0.35 * iou_r2_t
-                        + 0.10 * (ref2_pref + tgt_pref + pair_prefilter_score(ref2.id, tgt.id))
-                    )
-                    scored_pairs.append((combo, ref2, tgt))
-                if combo_checks > max_combo_checks_per_ref1:
-                    break
-            if len(scored_pairs) == 0:
-                continue
-
-            scored_pairs.sort(key=lambda x: x[0], reverse=True)
-            chosen_targets: set[int] = set()
-            emitted = 0
-            for combo, ref2, target in scored_pairs:
-                if target.id in chosen_targets:
+            cov1, ref1 = ref_candidates[0]
+            best_ref2 = None
+            fallback_ref2 = None
+            for cov2, ref2 in ref_candidates[1:]:
+                if pair_distance(ref1.id, ref2.id) < min_distance:
                     continue
-                chosen_targets.add(target.id)
-                cam1 = cameras[ref1.camera_id]
-                cam2 = cameras[ref2.camera_id]
-                cam_t = cameras[target.camera_id]
-                triplet = (
-                    scene_key,
-                    images_dir,
-                    resolved_name_by_id[ref1.id],
-                    resolved_name_by_id[ref2.id],
-                    resolved_name_by_id[target.id],
-                    ref1.c2w.astype(np.float32),
-                    ref2.c2w.astype(np.float32),
-                    target.c2w.astype(np.float32),
-                    self._build_K(cam1).astype(np.float32),
-                    self._build_K(cam2).astype(np.float32),
-                    self._build_K(cam_t).astype(np.float32),
-                )
-                triplets_scored.append((combo, triplet))
-                emitted += 1
-                if emitted >= triplets_per_ref1:
+                cov_refs = pair_covis(ref1.id, ref2.id)
+                candidate = (cov2, ref2, cov_refs)
+                if fallback_ref2 is None or cov_refs < fallback_ref2[2]:
+                    fallback_ref2 = candidate
+                if cov_refs <= max_ref_ref_covis:
+                    best_ref2 = candidate
                     break
 
-        # Sort by score descending (higher IoU = better).
+            chosen_ref2 = best_ref2 if best_ref2 is not None else fallback_ref2
+            if chosen_ref2 is None:
+                continue
+            cov2, ref2, cov_refs = chosen_ref2
+
+            score = float(cov1 + cov2 - 0.25 * cov_refs)
+            triplet = (
+                scene_key,
+                images_dir,
+                resolved_name_by_id[ref1.id],
+                resolved_name_by_id[ref2.id],
+                resolved_name_by_id[tgt.id],
+                ref1.c2w.astype(np.float32),
+                ref2.c2w.astype(np.float32),
+                tgt.c2w.astype(np.float32),
+                K_by_id[ref1.id].astype(np.float32),
+                K_by_id[ref2.id].astype(np.float32),
+                K_by_id[tgt.id].astype(np.float32),
+            )
+            triplets_scored.append((score, triplet))
+
         triplets_scored.sort(key=lambda x: x[0], reverse=True)
 
-        # Prefer target diversity first, then fill remaining slots by score.
         selected_indices: list[int] = []
         used_targets: set[str] = set()
         for i, (_, triplet) in enumerate(triplets_scored):
@@ -602,8 +439,24 @@ class MegaScenesDataset(Dataset):
                 selected_indices.append(i)
                 if len(selected_indices) >= max_triplets:
                     break
+        selected_triplets = [triplets_scored[i][1] for i in selected_indices]
 
-        return [triplets_scored[i][1] for i in selected_indices]
+        if selected_triplets:
+            id_by_name = {v: k for k, v in resolved_name_by_id.items()}
+            cov_target_values: list[float] = []
+            for triplet in selected_triplets:
+                _, _, ref1_name, ref2_name, tgt_name, *_ = triplet
+                id_ref1 = id_by_name[ref1_name]
+                id_ref2 = id_by_name[ref2_name]
+                id_tgt = id_by_name[tgt_name]
+                cov_target_values.append(pair_covis(id_ref1, id_tgt))
+                cov_target_values.append(pair_covis(id_ref2, id_tgt))
+            cov_arr = np.asarray(cov_target_values, dtype=np.float64)
+            print(
+                f"{scene_key}: selected={len(selected_triplets)} "
+                f"target-covis(mean={cov_arr.mean():.3f}, min={cov_arr.min():.3f}, max={cov_arr.max():.3f})"
+            )
+        return selected_triplets
 
     def _scene_prompt(self, scene_name: str) -> str:
         if not self.prompt_template:
@@ -616,7 +469,11 @@ class MegaScenesDataset(Dataset):
     def __len__(self):
         return self.n
 
-    def _make_item_from_triplet(self, idx: int):
+    def __getitem__(self, idx):
+        if self.n == 0:
+            raise IndexError("Empty dataset")
+        idx = int(idx) % self.n
+
         (
             scene_name,
             images_dir,
@@ -630,20 +487,6 @@ class MegaScenesDataset(Dataset):
             K_ref2,
             K_tgt,
         ) = self.triplets[idx]
-
-        ref1_path = str(images_dir / ref1_name)
-        ref2_path = str(images_dir / ref2_name)
-        tgt_path = str(images_dir / tgt_name)
-        bad_path = None
-        if ref1_path in self._bad_image_paths:
-            bad_path = ref1_path
-        elif ref2_path in self._bad_image_paths:
-            bad_path = ref2_path
-        elif tgt_path in self._bad_image_paths:
-            bad_path = tgt_path
-        if bad_path is not None:
-            self._bad_triplet_indices.add(idx)
-            raise ImageLoadError(Path(bad_path), RuntimeError("Triplet references previously failed image"))
 
         ref1_img, _, _ = load_image_tensor(images_dir, ref1_name, self.H, self.W)
         ref2_img, _, _ = load_image_tensor(images_dir, ref2_name, self.H, self.W)
@@ -666,36 +509,6 @@ class MegaScenesDataset(Dataset):
         if self.prompt_template:
             out["prompt"] = self._scene_prompt(scene_name)
         return out
-
-    def __getitem__(self, idx):
-        if self.n == 0:
-            raise IndexError("Empty dataset")
-
-        last_error = None
-        for attempt in range(self._max_io_retries):
-            candidate_idx = (idx + attempt) % self.n
-            if candidate_idx in self._bad_triplet_indices:
-                continue
-            try:
-                return self._make_item_from_triplet(candidate_idx)
-            except ImageLoadError as e:
-                last_error = e
-                self._bad_image_paths.add(e.path)
-                self._bad_triplet_indices.add(candidate_idx)
-                if self._io_error_logs < self._max_io_error_logs:
-                    print(f"[dataset] skipping unreadable image: {e.path}")
-                    self._io_error_logs += 1
-            except (OSError, FileNotFoundError) as e:
-                last_error = e
-                self._bad_triplet_indices.add(candidate_idx)
-                if self._io_error_logs < self._max_io_error_logs:
-                    print(f"[dataset] skipping unreadable triplet idx={candidate_idx}: {e}")
-                    self._io_error_logs += 1
-
-        raise RuntimeError(
-            f"Failed to load sample after {self._max_io_retries} retries; "
-            f"bad_triplets={len(self._bad_triplet_indices)} bad_images={len(self._bad_image_paths)}"
-        ) from last_error
 
     def _build_K(self, cam: Camera) -> np.ndarray:
         """Build intrinsics adjusted for center-crop + resize to (self.W, self.H)."""

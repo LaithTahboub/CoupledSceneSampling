@@ -31,12 +31,9 @@ This repo is intentionally trimmed to the 2D pipeline only.
 
 ## Recommended baseline settings
 Defaults in `css/train.py`/scripts are tuned for this project direction:
-- `--max-pair-dist 2.0`
-- `--min-pair-iou 0.22`
-- `--min-ref-spacing 0.35`
-- `--min-view-cos 0.90`
-- `--max-rotation-deg 35`
-- `--max-focal-ratio 1.35`
+- `--min-covisibility 0.22`
+- `--max-covisibility 0.58`
+- `--min-distance 0.20`
 - `--max-triplets 24`
 - `--cond-drop-prob 0.15`
 - `--noise-offset 0.05`

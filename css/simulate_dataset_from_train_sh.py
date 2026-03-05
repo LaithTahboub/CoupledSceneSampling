@@ -213,14 +213,9 @@ def main() -> None:
     parser.add_argument("--max-scenes", type=int, default=None)
     parser.add_argument("--min-train-scenes", type=int, default=None)
 
-    parser.add_argument("--max-pair-dist", type=float, default=None)
-    parser.add_argument("--min-pair-iou", type=float, default=None)
-    parser.add_argument("--min-ref-spacing", type=float, default=None)
-    parser.add_argument("--min-view-cos", type=float, default=None)
-    parser.add_argument("--max-rotation-deg", type=float, default=None)
-    parser.add_argument("--max-focal-ratio", type=float, default=None)
-    parser.add_argument("--pair-prefilter-topk", type=int, default=None)
-    parser.add_argument("--candidate-pool-topk", type=int, default=None)
+    parser.add_argument("--min-covisibility", type=float, default=None)
+    parser.add_argument("--max-covisibility", type=float, default=None)
+    parser.add_argument("--min-distance", type=float, default=None)
     parser.add_argument("--max-triplets", type=int, default=None)
     parser.add_argument("--H", type=int, default=None)
     parser.add_argument("--W", type=int, default=None)
@@ -256,45 +251,20 @@ def main() -> None:
         else _to_int(defaults.get("MIN_TRAIN_SCENES"), 1)
     )
 
-    max_pair_dist = (
-        args.max_pair_dist
-        if args.max_pair_dist is not None
-        else _to_float(defaults.get("MAX_PAIR_DIST"), 2.0)
+    min_covisibility = (
+        args.min_covisibility
+        if args.min_covisibility is not None
+        else _to_float(defaults.get("MIN_COVISIBILITY"), 0.22)
     )
-    min_pair_iou = (
-        args.min_pair_iou
-        if args.min_pair_iou is not None
-        else _to_float(defaults.get("MIN_PAIR_IOU"), 0.22)
+    max_covisibility = (
+        args.max_covisibility
+        if args.max_covisibility is not None
+        else _to_float(defaults.get("MAX_COVISIBILITY"), 0.58)
     )
-    min_ref_spacing = (
-        args.min_ref_spacing
-        if args.min_ref_spacing is not None
-        else _to_float(defaults.get("MIN_REF_SPACING"), 0.35)
-    )
-    min_view_cos = (
-        args.min_view_cos
-        if args.min_view_cos is not None
-        else _to_float(defaults.get("MIN_VIEW_COS"), 0.90)
-    )
-    max_rotation_deg = (
-        args.max_rotation_deg
-        if args.max_rotation_deg is not None
-        else _to_float(defaults.get("MAX_ROTATION_DEG"), 35.0)
-    )
-    max_focal_ratio = (
-        args.max_focal_ratio
-        if args.max_focal_ratio is not None
-        else _to_float(defaults.get("MAX_FOCAL_RATIO"), 1.35)
-    )
-    pair_prefilter_topk = (
-        args.pair_prefilter_topk
-        if args.pair_prefilter_topk is not None
-        else _to_int(defaults.get("PAIR_PREFILTER_TOPK"), 48)
-    )
-    candidate_pool_topk = (
-        args.candidate_pool_topk
-        if args.candidate_pool_topk is not None
-        else _to_int(defaults.get("CANDIDATE_POOL_TOPK"), 20)
+    min_distance = (
+        args.min_distance
+        if args.min_distance is not None
+        else _to_float(defaults.get("MIN_DISTANCE"), 0.20)
     )
     max_triplets = args.max_triplets if args.max_triplets is not None else _to_int(defaults.get("MAX_TRIPLETS"), 24)
     H = args.H if args.H is not None else _to_int(defaults.get("H"), 512)
@@ -315,10 +285,8 @@ def main() -> None:
     print(f"[sim] selected scenes: {len(selected_scenes)} | train: {len(train_scenes)} | test: {len(test_scenes)}")
     print(
         "[sim] dataset params: "
-        f"max_pair_dist={max_pair_dist} min_pair_iou={min_pair_iou} "
-        f"min_ref_spacing={min_ref_spacing} min_view_cos={min_view_cos} "
-        f"max_rot_deg={max_rotation_deg} max_focal_ratio={max_focal_ratio} "
-        f"prefilter_topk={pair_prefilter_topk} pool_topk={candidate_pool_topk} "
+        f"min_covisibility={min_covisibility} max_covisibility={max_covisibility} "
+        f"min_distance={min_distance} "
         f"max_triplets={max_triplets} H={H} W={W}",
     )
 
@@ -326,30 +294,20 @@ def main() -> None:
         train_scenes,
         H=int(H),
         W=int(W),
-        max_pair_distance=float(max_pair_dist),
         max_triplets_per_scene=int(max_triplets),
-        min_pair_iou=float(min_pair_iou),
-        min_ref_spacing=float(min_ref_spacing),
-        min_view_cos=float(min_view_cos),
-        max_rotation_deg=float(max_rotation_deg),
-        max_focal_ratio=float(max_focal_ratio),
-        pair_prefilter_topk=int(pair_prefilter_topk),
-        candidate_pool_topk=int(candidate_pool_topk),
+        min_covisibility=float(min_covisibility),
+        max_covisibility=float(max_covisibility),
+        min_distance=float(min_distance),
         prompt_template=prompt_template,
     )
     test_dataset = MegaScenesDataset(
         test_scenes,
         H=int(H),
         W=int(W),
-        max_pair_distance=float(max_pair_dist),
         max_triplets_per_scene=int(max_triplets),
-        min_pair_iou=float(min_pair_iou),
-        min_ref_spacing=float(min_ref_spacing),
-        min_view_cos=float(min_view_cos),
-        max_rotation_deg=float(max_rotation_deg),
-        max_focal_ratio=float(max_focal_ratio),
-        pair_prefilter_topk=int(pair_prefilter_topk),
-        candidate_pool_topk=int(candidate_pool_topk),
+        min_covisibility=float(min_covisibility),
+        max_covisibility=float(max_covisibility),
+        min_distance=float(min_distance),
         prompt_template=prompt_template,
     )
 
@@ -383,14 +341,9 @@ def main() -> None:
             "seed": int(seed),
             "max_scenes": (None if max_scenes is None else int(max_scenes)),
             "min_train_scenes": int(min_train_scenes),
-            "max_pair_dist": float(max_pair_dist),
-            "min_pair_iou": float(min_pair_iou),
-            "min_ref_spacing": float(min_ref_spacing),
-            "min_view_cos": float(min_view_cos),
-            "max_rotation_deg": float(max_rotation_deg),
-            "max_focal_ratio": float(max_focal_ratio),
-            "pair_prefilter_topk": int(pair_prefilter_topk),
-            "candidate_pool_topk": int(candidate_pool_topk),
+            "min_covisibility": float(min_covisibility),
+            "max_covisibility": float(max_covisibility),
+            "min_distance": float(min_distance),
             "max_triplets": int(max_triplets),
             "H": int(H),
             "W": int(W),
