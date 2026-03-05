@@ -17,28 +17,22 @@ set -euo pipefail
 
 ROOT="/fs/nexus-scratch/ltahboub/CoupledSceneSampling"
 MEGASCENES_ROOT=${MEGASCENES_ROOT:-$ROOT/MegaScenes}
-SCENES_FILE=${SCENES_FILE:-"/fs/nexus-scratch/ltahboub/CoupledSceneSampling/MegaScenes/scenes_colmap_ready.txt"}
+SCENES_FILE=${SCENES_FILE:-"$ROOT/MegaScenes/scenes_colmap_ready.txt"}
 SCENES=${SCENES:-}
 
 OUTPUT=${OUTPUT:-$ROOT/checkpoints/single_ref_debug}
-SEED=${SEED:-42}
+SEED=${SEED:-3}
 
-EPOCHS=${EPOCHS:-6}
+EPOCHS=${EPOCHS:-100}
 BATCH_SIZE=${BATCH_SIZE:-2}
 LR=${LR:-1e-5}
+TEST_RATIO=${TEST_RATIO:-0.10}
 
-MIN_PAIR_IOU=${MIN_PAIR_IOU:-0.18}
-MAX_PAIR_IOU=${MAX_PAIR_IOU:-0.62}
-MIN_PAIR_DISTANCE=${MIN_PAIR_DISTANCE:-0.20}
-MAX_PAIR_DISTANCE=${MAX_PAIR_DISTANCE:-2.2}
-MIN_VIEW_COS=${MIN_VIEW_COS:-0.80}
-MIN_ROTATION_DEG=${MIN_ROTATION_DEG:-3.0}
-MAX_ROTATION_DEG=${MAX_ROTATION_DEG:-35.0}
+MIN_COVISIBILITY=${MIN_COVISIBILITY:-0.10}
+MAX_COVISIBILITY=${MAX_COVISIBILITY:-0.80}
 
-SAMPLE_STEPS=${SAMPLE_STEPS:-40}
-SAMPLE_CFG_SCALE=${SAMPLE_CFG_SCALE:-4.0}
-NUM_DEBUG_PAIRS=${NUM_DEBUG_PAIRS:-4}
-NUM_DEBUG_SAMPLES=${NUM_DEBUG_SAMPLES:-6}
+SAMPLE_STEPS=${SAMPLE_STEPS:-50}
+SAMPLE_CFG_SCALE=${SAMPLE_CFG_SCALE:-3.5}
 
 H=${H:-512}
 W=${W:-512}
@@ -54,17 +48,11 @@ ARGS=(
     --epochs "$EPOCHS"
     --batch-size "$BATCH_SIZE"
     --lr "$LR"
-    --min-pair-iou "$MIN_PAIR_IOU"
-    --max-pair-iou "$MAX_PAIR_IOU"
-    --min-pair-distance "$MIN_PAIR_DISTANCE"
-    --max-pair-distance "$MAX_PAIR_DISTANCE"
-    --min-view-cos "$MIN_VIEW_COS"
-    --min-rotation-deg "$MIN_ROTATION_DEG"
-    --max-rotation-deg "$MAX_ROTATION_DEG"
+    --test-ratio "$TEST_RATIO"
+    --min-covisibility "$MIN_COVISIBILITY"
+    --max-covisibility "$MAX_COVISIBILITY"
     --sample-steps "$SAMPLE_STEPS"
     --sample-cfg-scale "$SAMPLE_CFG_SCALE"
-    --num-debug-pairs "$NUM_DEBUG_PAIRS"
-    --num-debug-samples "$NUM_DEBUG_SAMPLES"
     --H "$H"
     --W "$W"
 )

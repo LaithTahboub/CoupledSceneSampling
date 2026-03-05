@@ -33,6 +33,7 @@ class ImageData:
     camera_id: int
     name: str
     c2w: np.ndarray  # 4x4
+    point3d_ids: np.ndarray | None = None  # matched 3D point IDs (excluding -1)
 
 
 def _quat_to_rotation(qw, qx, qy, qz):
@@ -80,7 +81,12 @@ def read_images_bin(path: str | Path) -> dict[int, ImageData]:
             name = _read_c_string(f)
 
             num_pts = struct.unpack("<Q", f.read(8))[0]
-            f.read(num_pts * 24)
+            pt3d_ids = []
+            for _ in range(num_pts):
+                _x, _y = struct.unpack("<2d", f.read(16))
+                pt3d_id = struct.unpack("<q", f.read(8))[0]
+                if pt3d_id >= 0:
+                    pt3d_ids.append(pt3d_id)
 
             R_w2c = _quat_to_rotation(qw, qx, qy, qz)
             t_w2c = np.array([tx, ty, tz])
@@ -88,7 +94,10 @@ def read_images_bin(path: str | Path) -> dict[int, ImageData]:
             c2w[:3, :3] = R_w2c.T
             c2w[:3, 3] = -R_w2c.T @ t_w2c
 
-            images[image_id] = ImageData(image_id, camera_id, name, c2w)
+            images[image_id] = ImageData(
+                image_id, camera_id, name, c2w,
+                np.array(pt3d_ids, dtype=np.int64) if pt3d_ids else np.array([], dtype=np.int64),
+            )
 
     return images
 

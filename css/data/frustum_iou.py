@@ -1,10 +1,27 @@
-"""Camera-frustum geometry and true volumetric IoU utilities."""
+"""Camera-frustum geometry, volumetric IoU, and co-visibility utilities."""
 
 from __future__ import annotations
 
 from itertools import combinations
 
 import numpy as np
+
+from css.data.colmap_reader import ImageData
+
+
+def compute_covisibility(img_i: ImageData, img_j: ImageData) -> float:
+    """Jaccard overlap of matched 3D point IDs between two images."""
+    if img_i.point3d_ids is None or img_j.point3d_ids is None:
+        return 0.0
+    if len(img_i.point3d_ids) == 0 or len(img_j.point3d_ids) == 0:
+        return 0.0
+    set_i = set(img_i.point3d_ids.tolist())
+    set_j = set(img_j.point3d_ids.tolist())
+    intersection = len(set_i & set_j)
+    union = len(set_i | set_j)
+    if union == 0:
+        return 0.0
+    return intersection / union
 
 
 def compute_reference_depth(positions: dict[int, np.ndarray]) -> float:
@@ -58,36 +75,24 @@ def _frustum_vertices_world(
     return (R @ cam_pts.T).T + t[None, :]
 
 
-def _normalize_plane(n: np.ndarray, d: float) -> tuple[np.ndarray, float] | None:
-    n = np.asarray(n, dtype=np.float64)
-    n_norm = float(np.linalg.norm(n))
-    if n_norm < 1e-12:
-        return None
-    n = n / n_norm
-    d = float(d) / n_norm
-
-    for comp in n:
-        if abs(comp) > 1e-10:
-            if comp < 0:
-                n = -n
-                d = -d
-            break
-    return n, d
-
-
 def _dedupe_planes(
     planes: list[tuple[np.ndarray, float]],
     tol: float = 1e-7,
 ) -> list[tuple[np.ndarray, float]]:
+    """Remove duplicate planes while preserving their orientation."""
     unique: list[tuple[np.ndarray, float]] = []
     for n_raw, d_raw in planes:
-        normalized = _normalize_plane(n_raw, d_raw)
-        if normalized is None:
+        n = np.asarray(n_raw, dtype=np.float64)
+        n_norm = float(np.linalg.norm(n))
+        if n_norm < 1e-12:
             continue
-        n, d = normalized
+        n = n / n_norm
+        d = float(d_raw) / n_norm
         exists = False
         for n_u, d_u in unique:
-            if np.allclose(n, n_u, atol=tol, rtol=0.0) and abs(d - d_u) <= tol:
+            # Same plane if normals are parallel (same or opposite) and offsets match
+            if (np.allclose(n, n_u, atol=tol, rtol=0.0) and abs(d - d_u) <= tol) or \
+               (np.allclose(n, -n_u, atol=tol, rtol=0.0) and abs(d + d_u) <= tol):
                 exists = True
                 break
         if not exists:
