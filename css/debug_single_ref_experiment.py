@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -137,15 +138,47 @@ class SingleRefPairDataset(Dataset):
                     prompt=prompt, covisibility=covis, distance=dist,
                 ))
 
-        if len(candidates) > max_pairs:
-            rng = np.random.default_rng(42)
-            indices = rng.choice(len(candidates), size=max_pairs, replace=False)
-            candidates = [candidates[i] for i in indices]
+        if len(candidates) <= max_pairs:
+            if candidates:
+                cv = [c.covisibility for c in candidates]
+                print(f"  {scene_name}: {len(candidates)} pairs, covis=[{min(cv):.3f}, {max(cv):.3f}]")
+            return candidates
 
-        if candidates:
-            cv = [c.covisibility for c in candidates]
-            print(f"  {scene_name}: {len(candidates)} pairs, covis=[{min(cv):.3f}, {max(cv):.3f}]")
-        return candidates
+        # Diverse selection: round-robin through targets so different target
+        # images are represented as evenly as possible.
+        by_target: dict[str, list[PairRecord]] = {}
+        for pair in candidates:
+            by_target.setdefault(pair.target_name, []).append(pair)
+
+        # Within each target, sort by covisibility (best first)
+        for pairs in by_target.values():
+            pairs.sort(key=lambda p: p.covisibility, reverse=True)
+
+        # Shuffle target order for fairness across scenes
+        rng = np.random.default_rng(42)
+        targets_order = list(by_target.keys())
+        rng.shuffle(targets_order)
+
+        selected: list[PairRecord] = []
+        round_idx = 0
+        while len(selected) < max_pairs:
+            added = False
+            for tgt in targets_order:
+                group = by_target[tgt]
+                if round_idx < len(group):
+                    selected.append(group[round_idx])
+                    added = True
+                    if len(selected) >= max_pairs:
+                        break
+            if not added:
+                break
+            round_idx += 1
+
+        if selected:
+            cv = [c.covisibility for c in selected]
+            n_targets = len(set(p.target_name for p in selected))
+            print(f"  {scene_name}: {len(selected)} pairs ({n_targets} unique targets), covis=[{min(cv):.3f}, {max(cv):.3f}]")
+        return selected
 
     def __len__(self) -> int:
         return len(self.pairs)
@@ -254,7 +287,9 @@ class SingleRefSD(nn.Module):
 
         v_tgt = torch.cat([tgt_lat, m_tgt], dim=1)
         v_ref = torch.cat([ref_lat, m_ref], dim=1)
-        return torch.cat([v_tgt, v_ref], dim=0).reshape(b * self.NUM_VIEWS, self.PER_VIEW_CH, h, w)
+        # Stack along dim=1 so views are interleaved: [tgt0, ref0, tgt1, ref1, ...]
+        # This matches CrossViewAttention's rearrange("(bs v) s c -> bs (v s) c")
+        return torch.stack([v_tgt, v_ref], dim=1).reshape(b * self.NUM_VIEWS, self.PER_VIEW_CH, h, w)
 
     def _predict_target_eps(self, packed: torch.Tensor, timesteps: torch.Tensor,
                             text_emb: torch.Tensor, batch_size: int) -> torch.Tensor:
@@ -323,6 +358,28 @@ class SingleRefSD(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Checkpoints
+# ---------------------------------------------------------------------------
+
+def _save_checkpoint(model: SingleRefSD, optimizer: torch.optim.Optimizer,
+                     epoch: int, global_step: int, path: Path) -> None:
+    torch.save({
+        "unet": model.unet.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "epoch": epoch,
+        "global_step": global_step,
+    }, path)
+    print(f"Saved checkpoint: {path}")
+
+
+def _cleanup_checkpoints(output_dir: Path, keep: int = 3) -> None:
+    ckpts = sorted(output_dir.glob("unet_epoch_*.pt"), key=lambda p: p.stat().st_mtime)
+    for p in ckpts[:-keep]:
+        print(f"Removing old checkpoint: {p.name}")
+        p.unlink()
+
+
+# ---------------------------------------------------------------------------
 # Sampling & logging
 # ---------------------------------------------------------------------------
 
@@ -342,6 +399,74 @@ def _log_sample(model: SingleRefSD, dataset: Dataset, idx: int, tag: str,
 
 
 # ---------------------------------------------------------------------------
+# Train/test split
+# ---------------------------------------------------------------------------
+
+def _build_split(
+    pairs: list[PairRecord],
+    seed: int,
+    test_scenes_pct: float,
+    test_targets_per_scene: int,
+) -> tuple[list[int], list[int], dict]:
+    """Split pairs into train/test indices.
+
+    Test set = all pairs from fully withheld scenes
+             + pairs whose target is a withheld target in train scenes.
+
+    Returns (train_indices, test_indices, split_info_dict).
+    """
+    rng = np.random.default_rng(seed)
+
+    # All unique scene names
+    scene_names = sorted(set(p.scene_name for p in pairs))
+    n_test_scenes = max(0, int(round(len(scene_names) * test_scenes_pct / 100)))
+
+    # Pick test scenes
+    perm = rng.permutation(len(scene_names))
+    test_scene_set = set(scene_names[i] for i in perm[:n_test_scenes])
+    train_scene_set = set(scene_names) - test_scene_set
+
+    # For each train scene, withhold some target images
+    test_targets_by_scene: dict[str, list[str]] = {}
+    for sn in sorted(train_scene_set):
+        scene_pairs = [p for p in pairs if p.scene_name == sn]
+        target_names = sorted(set(p.target_name for p in scene_pairs))
+        n_hold = min(test_targets_per_scene, max(0, len(target_names) - 1))
+        if n_hold > 0:
+            rng_scene = np.random.default_rng(seed + hash(sn) % (2**31))
+            held = rng_scene.choice(target_names, size=n_hold, replace=False).tolist()
+            test_targets_by_scene[sn] = held
+
+    # Partition pairs
+    withheld_targets_lookup = {
+        sn: set(tgts) for sn, tgts in test_targets_by_scene.items()
+    }
+    train_indices: list[int] = []
+    test_indices: list[int] = []
+    for i, p in enumerate(pairs):
+        if p.scene_name in test_scene_set:
+            test_indices.append(i)
+        elif p.target_name in withheld_targets_lookup.get(p.scene_name, set()):
+            test_indices.append(i)
+        else:
+            train_indices.append(i)
+
+    split_info = {
+        "seed": seed,
+        "test_scenes_pct": test_scenes_pct,
+        "test_targets_per_scene": test_targets_per_scene,
+        "test_scenes": sorted(test_scene_set),
+        "train_scenes": sorted(train_scene_set),
+        "withheld_targets_by_scene": {
+            sn: sorted(tgts) for sn, tgts in test_targets_by_scene.items()
+        },
+        "num_train_pairs": len(train_indices),
+        "num_test_pairs": len(test_indices),
+    }
+    return train_indices, test_indices, split_info
+
+
+# ---------------------------------------------------------------------------
 # CLI & main
 # ---------------------------------------------------------------------------
 
@@ -350,6 +475,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scenes", nargs="*", default=None)
     p.add_argument("--scenes-file", type=str, default=None)
     p.add_argument("--output", type=str, required=True)
+    p.add_argument("--split-dir", type=str, default=None)
 
     p.add_argument("--H", type=int, default=512)
     p.add_argument("--W", type=int, default=512)
@@ -367,7 +493,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-covisibility", type=float, default=0.10)
     p.add_argument("--max-covisibility", type=float, default=0.80)
     p.add_argument("--max-pairs-per-scene", type=int, default=128)
-    p.add_argument("--test-ratio", type=float, default=0.10)
+
+    # Split config
+    p.add_argument("--test-scenes-pct", type=float, default=5.0,
+                    help="Percent of scenes to fully withhold for testing")
+    p.add_argument("--test-targets-per-scene", type=int, default=1,
+                    help="Number of target images to withhold per train scene")
+
+    # Checkpoint config
+    p.add_argument("--save-every", type=int, default=7)
+    p.add_argument("--keep-checkpoints", type=int, default=3)
 
     p.add_argument("--sample-steps", type=int, default=40)
     p.add_argument("--sample-cfg-scale", type=float, default=4.0)
@@ -402,17 +537,26 @@ def main() -> None:
     if len(dataset) < 2:
         raise ValueError(f"Need >= 2 pairs, got {len(dataset)}")
 
-    # Train/test split
-    rng = np.random.default_rng(args.seed)
-    n = len(dataset)
-    n_test = max(1, min(n - 1, int(round(n * args.test_ratio))))
-    perm = rng.permutation(n)
-    test_indices = sorted(perm[:n_test].tolist())
-    train_indices = sorted(perm[n_test:].tolist())
+    # Train/test split: withhold full scenes + specific targets per scene
+    train_indices, test_indices, split_info = _build_split(
+        dataset.pairs, args.seed, args.test_scenes_pct, args.test_targets_per_scene,
+    )
     print(f"Train: {len(train_indices)} pairs | Test: {len(test_indices)} pairs")
+    if split_info["test_scenes"]:
+        print(f"  Withheld scenes ({len(split_info['test_scenes'])}): {split_info['test_scenes']}")
+
+    # Save split info
+    split_dir = Path(args.split_dir) if args.split_dir else output_dir / "splits"
+    split_dir.mkdir(parents=True, exist_ok=True)
+    split_path = split_dir / "split_info.json"
+    split_path.write_text(json.dumps(split_info, indent=2), encoding="utf-8")
+    print(f"Split saved to {split_path}")
 
     train_dataset = torch.utils.data.Subset(dataset, train_indices)
     test_dataset = torch.utils.data.Subset(dataset, test_indices)
+
+    if len(train_dataset) == 0:
+        raise ValueError("No training pairs after split. Relax constraints.")
 
     model = SingleRefSD(pretrained_model=args.pretrained_model)
     model.configure_trainable(args.train_mode)
@@ -453,18 +597,28 @@ def main() -> None:
             # Sample one train + one test image each epoch
             model.eval()
             train_idx = epoch % len(train_dataset)
-            test_idx = epoch % len(test_dataset)
+            test_idx = epoch % max(1, len(test_dataset))
             sample_seed = args.seed + epoch
 
             _log_sample(model, train_dataset, train_idx, "train",
                         args.sample_steps, args.sample_cfg_scale, sample_seed, global_step)
-            _log_sample(model, test_dataset, test_idx, "test",
-                        args.sample_steps, args.sample_cfg_scale, sample_seed, global_step)
+            if len(test_dataset) > 0:
+                _log_sample(model, test_dataset, test_idx, "test",
+                            args.sample_steps, args.sample_cfg_scale, sample_seed, global_step)
+
+            # Always save latest
+            _save_checkpoint(model, optimizer, epoch + 1, global_step,
+                             output_dir / "unet_latest.pt")
+
+            # Save numbered checkpoint every N epochs
+            if (epoch + 1) % args.save_every == 0:
+                _save_checkpoint(model, optimizer, epoch + 1, global_step,
+                                 output_dir / f"unet_epoch_{epoch + 1}.pt")
+                _cleanup_checkpoints(output_dir, keep=args.keep_checkpoints)
 
         # Save final checkpoint
-        ckpt_path = output_dir / "unet_final.pt"
-        torch.save({"unet": model.unet.state_dict(), "global_step": global_step}, ckpt_path)
-        print(f"Saved checkpoint: {ckpt_path}")
+        _save_checkpoint(model, optimizer, args.epochs, global_step,
+                         output_dir / "unet_final.pt")
     finally:
         wandb.finish()
 

@@ -20,6 +20,7 @@ from css.data.iou import (
 from seva.geometry import get_plucker_coordinates, to_hom_pose
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+Image.MAX_IMAGE_PIXELS = None
 
 
 class ImageLoadError(OSError):

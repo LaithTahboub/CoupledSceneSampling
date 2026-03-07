@@ -5,7 +5,7 @@ import numpy as np
 from pathlib import Path
 from dataclasses import dataclass
 
-_MODEL_PARAMS = {0: 3, 1: 4, 2: 4, 3: 5, 4: 8, 5: 12, 6: 5}
+_MODEL_PARAMS = {0: 3, 1: 4, 2: 4, 3: 5, 4: 8, 5: 8, 6: 12}
 
 
 @dataclass
