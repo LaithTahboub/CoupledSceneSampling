@@ -311,7 +311,6 @@ class CoupledDiffusionRunner:
             torch.cuda.empty_cache()
         return out
 
-    @torch.inference_mode()
     def sample_coupled(
         self,
         img_paths,
@@ -332,7 +331,12 @@ class CoupledDiffusionRunner:
         torch.manual_seed(seed)
         if str(self.device).startswith("cuda"):
             torch.cuda.empty_cache()
-        input_imgs, input_Ks, input_c2ws, (W, H) = preprocess_advanced(img_paths, self.dust3r)
+        # DUSt3R camera optimization performs backward passes internally.
+        # Force-enable grads here in case caller wrapped us in inference/no-grad mode.
+        with torch.inference_mode(False), torch.enable_grad():
+            input_imgs, input_Ks, input_c2ws, (W, H) = preprocess_advanced(
+                img_paths, self.dust3r
+            )
         if max_total_frames is not None and max_total_frames > 0:
             max_total_frames = max(2, int(max_total_frames))
             if input_imgs.shape[0] > max_total_frames:
@@ -355,127 +359,132 @@ class CoupledDiffusionRunner:
             transition_sec=transition_sec,
         )
 
-        num_inputs = input_imgs.shape[0]
-        if max_total_frames is not None and max_total_frames > num_inputs:
-            max_targets = max_total_frames - num_inputs
-            if target_c2ws.shape[0] > max_targets:
-                keep = np.linspace(0, target_c2ws.shape[0] - 1, max_targets).round().astype(int)
-                target_c2ws = target_c2ws[keep]
-                target_Ks = target_Ks[keep]
+        prev_grad = torch.is_grad_enabled()
+        torch.set_grad_enabled(False)
+        try:
+            num_inputs = input_imgs.shape[0]
+            if max_total_frames is not None and max_total_frames > num_inputs:
+                max_targets = max_total_frames - num_inputs
+                if target_c2ws.shape[0] > max_targets:
+                    keep = np.linspace(0, target_c2ws.shape[0] - 1, max_targets).round().astype(int)
+                    target_c2ws = target_c2ws[keep]
+                    target_Ks = target_Ks[keep]
 
-        input_indices = list(range(num_inputs))
-        all_c2ws = torch.cat([input_c2ws, target_c2ws], 0)
-        all_Ks = torch.cat([input_Ks, target_Ks], 0)
-        N = all_c2ws.shape[0]
-        latent_h, latent_w = H // 8, W // 8
+            input_indices = list(range(num_inputs))
+            all_c2ws = torch.cat([input_c2ws, target_c2ws], 0)
+            all_Ks = torch.cat([input_Ks, target_Ks], 0)
+            N = all_c2ws.shape[0]
+            latent_h, latent_w = H // 8, W // 8
 
-        cond_imgs = torch.zeros(N, 3, H, W, dtype=self.sample_dtype)
-        cond_imgs[:num_inputs] = (
-            input_imgs.permute(0, 3, 1, 2).to(dtype=self.sample_dtype) * 2.0 - 1.0
-        )
-        c, uc, guider, input_mask, c2w_guider, K_guider, w2c = self._build_seva_conditioning(
-            cond_imgs,
-            all_c2ws,
-            all_Ks,
-            input_indices,
-            camera_scale=camera_scale,
-            cfg_min=cfg_min,
-        )
-
-        with self._autocast_context():
-            sd_ref_latents = self.pose_sd.encode_image(
-                (
-                    input_imgs.permute(0, 3, 1, 2).to(self.device, dtype=self.sample_dtype)
-                    * 2.0
-                    - 1.0
-                )
+            cond_imgs = torch.zeros(N, 3, H, W, dtype=self.sample_dtype)
+            cond_imgs[:num_inputs] = (
+                input_imgs.permute(0, 3, 1, 2).to(dtype=self.sample_dtype) * 2.0 - 1.0
             )
-        text_cond = self.pose_sd.get_text_embeddings([prompt])
-        text_uncond = self.pose_sd.null_text_emb
-        # Offload PoseSD components not used during iterative denoising.
-        self.pose_sd.vae.to("cpu")
-        self.pose_sd.text_encoder.to("cpu")
-        if str(self.device).startswith("cuda"):
-            torch.cuda.empty_cache()
-
-        # Offload SEVA helper modules not used in iterative denoising.
-        self.ae.to("cpu")
-        self.conditioner.to("cpu")
-        if str(self.device).startswith("cuda"):
-            torch.cuda.empty_cache()
-
-        ref_pairs = self._build_ref_pairs(all_c2ws, input_indices)
-        idx_to_ref = {idx: i for i, idx in enumerate(input_indices)}
-
-        sigmas = self.discretization(num_steps, device=self.device)
-        noise = torch.randn(N, 4, latent_h, latent_w, device=self.device, dtype=self.sample_dtype)
-        x_seva = noise * torch.sqrt(1.0 + sigmas[0] ** 2)
-        x_sd = noise.clone()
-
-        for i in range(len(sigmas) - 1):
-            sigma, sigma_next = sigmas[i], sigmas[i + 1]
-
-            if self.offload_seva_model:
-                self.seva_model.to(self.device)
-                torch.cuda.empty_cache()
-            sigma_batch = x_seva.new_ones([N]) * sigma
-            x_cat, s_cat, c_merged = guider.prepare_inputs(x_seva, sigma_batch, c, uc)
-            with self._autocast_context():
-                denoised = self.denoiser(
-                    self.seva_model, x_cat, s_cat, c_merged, num_frames=N
-                )
-                x0_seva = guider(
-                    denoised,
-                    sigma_batch,
-                    cfg_seva,
-                    c2w=c2w_guider,
-                    K=K_guider,
-                    input_frame_mask=input_mask,
-                )
-            if self.offload_seva_model:
-                self.seva_model.to("cpu")
-                torch.cuda.empty_cache()
-
-            sd_t = self._sigma_to_sd_t(sigma)
-            x0_sd = self._sd_x0(
-                x_sd,
-                sd_t,
-                text_cond,
-                text_uncond,
-                w2c,
-                K_guider,
-                ref_pairs,
-                idx_to_ref,
-                sd_ref_latents,
-                cfg_sd,
-                sd_chunk_size,
+            c, uc, guider, input_mask, c2w_guider, K_guider, w2c = self._build_seva_conditioning(
+                cond_imgs,
+                all_c2ws,
+                all_Ks,
+                input_indices,
+                camera_scale=camera_scale,
+                cfg_min=cfg_min,
             )
 
-            grad = coupling_strength * (x0_seva - x0_sd)
-            x0_seva_c = x0_seva - grad
-            x0_sd_c = x0_sd + grad
-
-            sigma_hat = sigma + 1e-6
-            d = to_d(x_seva, append_dims(sigma_hat, x_seva.ndim).squeeze(), x0_seva_c)
-            x_seva = x_seva + append_dims(sigma_next - sigma_hat, x_seva.ndim) * d
-
-            sd_t_next = self._sigma_to_sd_t(sigma_next)
-            if sd_t_next > 0:
-                alpha_next = self.sd_alphas[sd_t_next]
-                x_sd = alpha_next.sqrt() * x0_sd_c + (1 - alpha_next).sqrt() * torch.randn_like(x_sd)
-            else:
-                x_sd = x0_sd_c
-
-        frames = []
-        self.ae.to(self.device)
-        if str(self.device).startswith("cuda"):
-            torch.cuda.empty_cache()
-        for j in range(N):
             with self._autocast_context():
-                decoded = self.ae.decode(x_seva[j : j + 1], 1)
-            frame = ((decoded.clamp(-1, 1) + 1) / 2 * 255).byte()[0].permute(1, 2, 0).cpu().numpy()
-            frames.append(frame)
-        return np.stack(frames, 0)
+                sd_ref_latents = self.pose_sd.encode_image(
+                    (
+                        input_imgs.permute(0, 3, 1, 2).to(self.device, dtype=self.sample_dtype)
+                        * 2.0
+                        - 1.0
+                    )
+                )
+            text_cond = self.pose_sd.get_text_embeddings([prompt])
+            text_uncond = self.pose_sd.null_text_emb
+            # Offload PoseSD components not used during iterative denoising.
+            self.pose_sd.vae.to("cpu")
+            self.pose_sd.text_encoder.to("cpu")
+            if str(self.device).startswith("cuda"):
+                torch.cuda.empty_cache()
+
+            # Offload SEVA helper modules not used in iterative denoising.
+            self.ae.to("cpu")
+            self.conditioner.to("cpu")
+            if str(self.device).startswith("cuda"):
+                torch.cuda.empty_cache()
+
+            ref_pairs = self._build_ref_pairs(all_c2ws, input_indices)
+            idx_to_ref = {idx: i for i, idx in enumerate(input_indices)}
+
+            sigmas = self.discretization(num_steps, device=self.device)
+            noise = torch.randn(N, 4, latent_h, latent_w, device=self.device, dtype=self.sample_dtype)
+            x_seva = noise * torch.sqrt(1.0 + sigmas[0] ** 2)
+            x_sd = noise.clone()
+
+            for i in range(len(sigmas) - 1):
+                sigma, sigma_next = sigmas[i], sigmas[i + 1]
+
+                if self.offload_seva_model:
+                    self.seva_model.to(self.device)
+                    torch.cuda.empty_cache()
+                sigma_batch = x_seva.new_ones([N]) * sigma
+                x_cat, s_cat, c_merged = guider.prepare_inputs(x_seva, sigma_batch, c, uc)
+                with self._autocast_context():
+                    denoised = self.denoiser(
+                        self.seva_model, x_cat, s_cat, c_merged, num_frames=N
+                    )
+                    x0_seva = guider(
+                        denoised,
+                        sigma_batch,
+                        cfg_seva,
+                        c2w=c2w_guider,
+                        K=K_guider,
+                        input_frame_mask=input_mask,
+                    )
+                if self.offload_seva_model:
+                    self.seva_model.to("cpu")
+                    torch.cuda.empty_cache()
+
+                sd_t = self._sigma_to_sd_t(sigma)
+                x0_sd = self._sd_x0(
+                    x_sd,
+                    sd_t,
+                    text_cond,
+                    text_uncond,
+                    w2c,
+                    K_guider,
+                    ref_pairs,
+                    idx_to_ref,
+                    sd_ref_latents,
+                    cfg_sd,
+                    sd_chunk_size,
+                )
+
+                grad = coupling_strength * (x0_seva - x0_sd)
+                x0_seva_c = x0_seva - grad
+                x0_sd_c = x0_sd + grad
+
+                sigma_hat = sigma + 1e-6
+                d = to_d(x_seva, append_dims(sigma_hat, x_seva.ndim).squeeze(), x0_seva_c)
+                x_seva = x_seva + append_dims(sigma_next - sigma_hat, x_seva.ndim) * d
+
+                sd_t_next = self._sigma_to_sd_t(sigma_next)
+                if sd_t_next > 0:
+                    alpha_next = self.sd_alphas[sd_t_next]
+                    x_sd = alpha_next.sqrt() * x0_sd_c + (1 - alpha_next).sqrt() * torch.randn_like(x_sd)
+                else:
+                    x_sd = x0_sd_c
+
+            frames = []
+            self.ae.to(self.device)
+            if str(self.device).startswith("cuda"):
+                torch.cuda.empty_cache()
+            for j in range(N):
+                with self._autocast_context():
+                    decoded = self.ae.decode(x_seva[j : j + 1], 1)
+                frame = ((decoded.clamp(-1, 1) + 1) / 2 * 255).byte()[0].permute(1, 2, 0).cpu().numpy()
+                frames.append(frame)
+            return np.stack(frames, 0)
+        finally:
+            torch.set_grad_enabled(prev_grad)
 
 
 def main():
