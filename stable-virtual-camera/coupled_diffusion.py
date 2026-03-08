@@ -79,6 +79,8 @@ class CoupledDiffusionRunner:
             self.pose_sd.unet.to("cpu")
         if self.offload_seva_model:
             self.seva_model.to("cpu")
+        if str(self.device).startswith("cuda"):
+            torch.cuda.empty_cache()
 
     def _autocast_context(self):
         return (
@@ -309,6 +311,7 @@ class CoupledDiffusionRunner:
             torch.cuda.empty_cache()
         return out
 
+    @torch.inference_mode()
     def sample_coupled(
         self,
         img_paths,
@@ -327,7 +330,20 @@ class CoupledDiffusionRunner:
         short_side,
     ):
         torch.manual_seed(seed)
+        if str(self.device).startswith("cuda"):
+            torch.cuda.empty_cache()
         input_imgs, input_Ks, input_c2ws, (W, H) = preprocess_advanced(img_paths, self.dust3r)
+        if max_total_frames is not None and max_total_frames > 0:
+            max_total_frames = max(2, int(max_total_frames))
+            if input_imgs.shape[0] > max_total_frames:
+                keep = (
+                    np.linspace(0, input_imgs.shape[0] - 1, max_total_frames)
+                    .round()
+                    .astype(int)
+                )
+                input_imgs = input_imgs[keep]
+                input_Ks = input_Ks[keep]
+                input_c2ws = input_c2ws[keep]
         input_imgs, input_Ks, (W, H) = self._resize_preprocessed(
             input_imgs, input_Ks, short_side
         )
@@ -379,11 +395,14 @@ class CoupledDiffusionRunner:
         # Offload PoseSD components not used during iterative denoising.
         self.pose_sd.vae.to("cpu")
         self.pose_sd.text_encoder.to("cpu")
+        if str(self.device).startswith("cuda"):
+            torch.cuda.empty_cache()
 
         # Offload SEVA helper modules not used in iterative denoising.
         self.ae.to("cpu")
         self.conditioner.to("cpu")
-        torch.cuda.empty_cache()
+        if str(self.device).startswith("cuda"):
+            torch.cuda.empty_cache()
 
         ref_pairs = self._build_ref_pairs(all_c2ws, input_indices)
         idx_to_ref = {idx: i for i, idx in enumerate(input_indices)}
@@ -449,7 +468,8 @@ class CoupledDiffusionRunner:
 
         frames = []
         self.ae.to(self.device)
-        torch.cuda.empty_cache()
+        if str(self.device).startswith("cuda"):
+            torch.cuda.empty_cache()
         for j in range(N):
             with self._autocast_context():
                 decoded = self.ae.decode(x_seva[j : j + 1], 1)
