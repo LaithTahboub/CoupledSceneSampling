@@ -48,10 +48,14 @@ class CoupledDiffusionRunner:
         pose_sd_checkpoint: str | None,
         device: str,
         use_half: bool = True,
+        offload_pose_unet: bool = True,
+        offload_seva_model: bool = True,
     ):
         self.device = device
         self.use_half = use_half and str(device).startswith("cuda")
         self.sample_dtype = torch.float16 if self.use_half else torch.float32
+        self.offload_pose_unet = offload_pose_unet
+        self.offload_seva_model = offload_seva_model
         self.seva_model = SGMWrapper(load_seva_model(device="cpu", verbose=True).eval()).to(device)
         self.ae = AutoEncoder(chunk_size=1).to(device)
         self.conditioner = CLIPConditioner().to(device)
@@ -71,6 +75,10 @@ class CoupledDiffusionRunner:
             self.pose_sd.unet.half()
             self.pose_sd.vae.half()
             self.pose_sd.text_encoder.half()
+        if self.offload_pose_unet:
+            self.pose_sd.unet.to("cpu")
+        if self.offload_seva_model:
+            self.seva_model.to("cpu")
 
     def _autocast_context(self):
         return (
@@ -110,6 +118,24 @@ class CoupledDiffusionRunner:
                 closest = torch.cat([closest, closest], dim=0)
             pairs.append((input_indices[int(closest[0])], input_indices[int(closest[1])]))
         return pairs
+
+    @staticmethod
+    def _resize_preprocessed(input_imgs, input_Ks, short_side):
+        W = int(input_imgs.shape[2])
+        H = int(input_imgs.shape[1])
+        if min(H, W) <= short_side:
+            return input_imgs, input_Ks, (W, H)
+        scale = short_side / float(min(H, W))
+        new_h = int(round((H * scale) / 64) * 64)
+        new_w = int(round((W * scale) / 64) * 64)
+        resized = F.interpolate(
+            input_imgs.permute(0, 3, 1, 2),
+            size=(new_h, new_w),
+            mode="area",
+            antialias=False,
+        ).permute(0, 2, 3, 1)
+        # input_Ks are normalized intrinsics, unchanged by resize.
+        return resized, input_Ks, (new_w, new_h)
 
     def _build_seva_conditioning(
         self,
@@ -211,6 +237,9 @@ class CoupledDiffusionRunner:
         cfg_sd,
         sd_chunk_size,
     ):
+        if self.offload_pose_unet:
+            self.pose_sd.unet.to(self.device)
+            torch.cuda.empty_cache()
         alpha_bar = self.sd_alphas[t]
         h, w = x.shape[-2], x.shape[-1]
         N = x.shape[0]
@@ -274,7 +303,11 @@ class CoupledDiffusionRunner:
                 eps_u = self.pose_sd._predict_target_eps(packed_u, t_b, t_uncond, C)
             eps = self._cfg(eps_c, eps_u, cfg_sd)
             x0_chunks.append(self._x0_from_eps(x_chunk, eps, alpha_bar))
-        return torch.cat(x0_chunks, 0)
+        out = torch.cat(x0_chunks, 0)
+        if self.offload_pose_unet:
+            self.pose_sd.unet.to("cpu")
+            torch.cuda.empty_cache()
+        return out
 
     def sample_coupled(
         self,
@@ -291,9 +324,13 @@ class CoupledDiffusionRunner:
         transition_sec,
         sd_chunk_size,
         max_total_frames,
+        short_side,
     ):
         torch.manual_seed(seed)
         input_imgs, input_Ks, input_c2ws, (W, H) = preprocess_advanced(img_paths, self.dust3r)
+        input_imgs, input_Ks, (W, H) = self._resize_preprocessed(
+            input_imgs, input_Ks, short_side
+        )
         target_c2ws, target_Ks = build_target_trajectory_from_input_keyframes(
             input_c2ws=input_c2ws,
             input_Ks=input_Ks,
@@ -359,6 +396,9 @@ class CoupledDiffusionRunner:
         for i in range(len(sigmas) - 1):
             sigma, sigma_next = sigmas[i], sigmas[i + 1]
 
+            if self.offload_seva_model:
+                self.seva_model.to(self.device)
+                torch.cuda.empty_cache()
             sigma_batch = x_seva.new_ones([N]) * sigma
             x_cat, s_cat, c_merged = guider.prepare_inputs(x_seva, sigma_batch, c, uc)
             with self._autocast_context():
@@ -373,6 +413,9 @@ class CoupledDiffusionRunner:
                     K=K_guider,
                     input_frame_mask=input_mask,
                 )
+            if self.offload_seva_model:
+                self.seva_model.to("cpu")
+                torch.cuda.empty_cache()
 
             sd_t = self._sigma_to_sd_t(sigma)
             x0_sd = self._sd_x0(
@@ -436,8 +479,11 @@ def main():
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--transition-sec", type=float, default=1.5)
     parser.add_argument("--sd-chunk-size", type=int, default=8)
-    parser.add_argument("--max-total-frames", type=int, default=96)
+    parser.add_argument("--max-total-frames", type=int, default=64)
+    parser.add_argument("--short-side", type=int, default=384)
     parser.add_argument("--fp32", action="store_true")
+    parser.add_argument("--no-offload-pose-unet", action="store_true")
+    parser.add_argument("--no-offload-seva-model", action="store_true")
     args = parser.parse_args()
 
     img_paths = [osp.abspath(p) for p in args.inputs]
@@ -460,6 +506,8 @@ def main():
         pose_sd_checkpoint=args.pose_sd_checkpoint,
         device=args.device,
         use_half=not args.fp32,
+        offload_pose_unet=not args.no_offload_pose_unet,
+        offload_seva_model=not args.no_offload_seva_model,
     )
     frames = runner.sample_coupled(
         img_paths=img_paths,
@@ -475,6 +523,7 @@ def main():
         transition_sec=args.transition_sec,
         sd_chunk_size=max(1, args.sd_chunk_size),
         max_total_frames=(None if args.max_total_frames <= 0 else args.max_total_frames),
+        short_side=max(64, args.short_side),
     )
     iio.imwrite(
         output_path,
