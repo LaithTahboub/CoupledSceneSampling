@@ -686,7 +686,7 @@ if __name__ == "__main__":
     p.add_argument("--prompt", default="")
     p.add_argument("--frames", type=int, default=21)
     p.add_argument("--output", default="output.mp4")
-    p.add_argument("--coupling", type=float, default=0.2)
+    p.add_argument("--coupling", type=float, default=0.5)
     p.add_argument("--cfg-seva", type=float, default=3.0)
     p.add_argument("--cfg-sd", type=float, default=7.5)
     p.add_argument("--cfg-min", type=float, default=1.2)
