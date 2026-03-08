@@ -13,7 +13,10 @@ GEN3C/
 Coupled-Diffusion
 work_dirs/
 #stable-virtual-camera
-*gradio_tmp
+*/.gradio_tmp
+*/.gradio
+*/.venv
+/vulcanscratch/ltahboub/CoupledSceneSampling/stable-virtual-camera/.gradio
 .claude
 24*
 old
