@@ -259,26 +259,26 @@ class CoupledDiffusionRunner:
                 anchor = w2c[r1_idx]
                 pl_ref1s.append(
                     get_plucker_coordinates(
-                        anchor,
-                        w2c[r1_idx : r1_idx + 1],
-                        all_Ks[r1_idx : r1_idx + 1].clone(),
-                        [h, w],
+                        extrinsics_src=anchor,
+                        extrinsics=w2c[r1_idx : r1_idx + 1],
+                        intrinsics=all_Ks[r1_idx : r1_idx + 1].clone(),
+                        target_size=[h, w],
                     )[0]
                 )
                 pl_ref2s.append(
                     get_plucker_coordinates(
-                        anchor,
-                        w2c[r2_idx : r2_idx + 1],
-                        all_Ks[r2_idx : r2_idx + 1].clone(),
-                        [h, w],
+                        extrinsics_src=anchor,
+                        extrinsics=w2c[r2_idx : r2_idx + 1],
+                        intrinsics=all_Ks[r2_idx : r2_idx + 1].clone(),
+                        target_size=[h, w],
                     )[0]
                 )
                 pl_tgts.append(
                     get_plucker_coordinates(
-                        anchor,
-                        w2c[j : j + 1],
-                        all_Ks[j : j + 1].clone(),
-                        [h, w],
+                        extrinsics_src=anchor,
+                        extrinsics=w2c[j : j + 1],
+                        intrinsics=all_Ks[j : j + 1].clone(),
+                        target_size=[h, w],
                     )[0]
                 )
 
