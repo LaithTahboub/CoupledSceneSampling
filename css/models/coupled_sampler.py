@@ -389,12 +389,10 @@ class CoupledDiffusionSampler:
         all_Ks,
         input_indices,
         sd_ref_latents,
-        latent_h,
-        latent_w,
     ):
         """Predict x0 from PoseSD using view-packing and cross-view attention."""
         alpha_bar = self.sd_alphas[t]
-        h, w = latent_h, latent_w
+        h, w = x.shape[-2], x.shape[-1]
         N = x.shape[0]
 
         ref1_lats, ref2_lats = [], []
@@ -648,7 +646,6 @@ class CoupledDiffusionSampler:
                 x0_sd = self._sd_x0(
                     x_sd, sd_t, text_cond, text_uncond,
                     w2c_device, sd_all_Ks, input_indices, sd_ref_latents,
-                    latent_h, latent_w,
                 )
 
                 # Coupling
