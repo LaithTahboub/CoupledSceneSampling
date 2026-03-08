@@ -5,6 +5,8 @@ import os.path as osp
 import sys
 from pathlib import Path
 
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import imageio.v3 as iio
 import numpy as np
 import torch
@@ -196,53 +198,72 @@ class CoupledDiffusionRunner:
         idx_to_ref,
         sd_ref_latents,
         cfg_sd,
+        sd_chunk_size,
     ):
         alpha_bar = self.sd_alphas[t]
         h, w = x.shape[-2], x.shape[-1]
         N = x.shape[0]
+        x0_chunks = []
+        for start in range(0, N, sd_chunk_size):
+            end = min(start + sd_chunk_size, N)
+            x_chunk = x[start:end]
+            C = x_chunk.shape[0]
 
-        ref1_lats, ref2_lats = [], []
-        pl_ref1s, pl_ref2s, pl_tgts = [], [], []
-        for j in range(N):
-            r1_idx, r2_idx = ref_pairs[j]
-            ref1_lats.append(sd_ref_latents[idx_to_ref[r1_idx]])
-            ref2_lats.append(sd_ref_latents[idx_to_ref[r2_idx]])
+            ref1_lats, ref2_lats = [], []
+            pl_ref1s, pl_ref2s, pl_tgts = [], [], []
+            for j in range(start, end):
+                r1_idx, r2_idx = ref_pairs[j]
+                ref1_lats.append(sd_ref_latents[idx_to_ref[r1_idx]])
+                ref2_lats.append(sd_ref_latents[idx_to_ref[r2_idx]])
 
-            anchor = w2c[r1_idx]
-            pl_ref1s.append(
-                get_plucker_coordinates(
-                    anchor, w2c[r1_idx : r1_idx + 1], all_Ks[r1_idx : r1_idx + 1].clone(), [h, w]
-                )[0]
-            )
-            pl_ref2s.append(
-                get_plucker_coordinates(
-                    anchor, w2c[r2_idx : r2_idx + 1], all_Ks[r2_idx : r2_idx + 1].clone(), [h, w]
-                )[0]
-            )
-            pl_tgts.append(
-                get_plucker_coordinates(
-                    anchor, w2c[j : j + 1], all_Ks[j : j + 1].clone(), [h, w]
-                )[0]
-            )
+                anchor = w2c[r1_idx]
+                pl_ref1s.append(
+                    get_plucker_coordinates(
+                        anchor,
+                        w2c[r1_idx : r1_idx + 1],
+                        all_Ks[r1_idx : r1_idx + 1].clone(),
+                        [h, w],
+                    )[0]
+                )
+                pl_ref2s.append(
+                    get_plucker_coordinates(
+                        anchor,
+                        w2c[r2_idx : r2_idx + 1],
+                        all_Ks[r2_idx : r2_idx + 1].clone(),
+                        [h, w],
+                    )[0]
+                )
+                pl_tgts.append(
+                    get_plucker_coordinates(
+                        anchor,
+                        w2c[j : j + 1],
+                        all_Ks[j : j + 1].clone(),
+                        [h, w],
+                    )[0]
+                )
 
-        ref1_lat = torch.stack(ref1_lats)
-        ref2_lat = torch.stack(ref2_lats)
-        pl_ref1 = torch.stack(pl_ref1s)
-        pl_ref2 = torch.stack(pl_ref2s)
-        pl_tgt = torch.stack(pl_tgts)
+            ref1_lat = torch.stack(ref1_lats)
+            ref2_lat = torch.stack(ref2_lats)
+            pl_ref1 = torch.stack(pl_ref1s)
+            pl_ref2 = torch.stack(pl_ref2s)
+            pl_tgt = torch.stack(pl_tgts)
 
-        t_b = torch.full((N,), int(t), device=self.device, dtype=torch.long)
-        t_cond = text_cond.expand(N, -1, -1)
-        t_uncond = text_uncond.expand(N, -1, -1)
-        packed_c = self.pose_sd._pack_views(ref1_lat, ref2_lat, x, pl_ref1, pl_ref2, pl_tgt)
-        eps_c = self.pose_sd._predict_target_eps(packed_c, t_b, t_cond, N)
-        keep_none = torch.zeros(N, device=self.device, dtype=torch.bool)
-        packed_u = self.pose_sd._pack_views(
-            ref1_lat, ref2_lat, x, pl_ref1, pl_ref2, pl_tgt, keep_none
-        )
-        eps_u = self.pose_sd._predict_target_eps(packed_u, t_b, t_uncond, N)
-        eps = self._cfg(eps_c, eps_u, cfg_sd)
-        return self._x0_from_eps(x, eps, alpha_bar)
+            t_b = torch.full((C,), int(t), device=self.device, dtype=torch.long)
+            t_cond = text_cond.expand(C, -1, -1)
+            t_uncond = text_uncond.expand(C, -1, -1)
+            with self._autocast_context():
+                packed_c = self.pose_sd._pack_views(
+                    ref1_lat, ref2_lat, x_chunk, pl_ref1, pl_ref2, pl_tgt
+                )
+                eps_c = self.pose_sd._predict_target_eps(packed_c, t_b, t_cond, C)
+                keep_none = torch.zeros(C, device=self.device, dtype=torch.bool)
+                packed_u = self.pose_sd._pack_views(
+                    ref1_lat, ref2_lat, x_chunk, pl_ref1, pl_ref2, pl_tgt, keep_none
+                )
+                eps_u = self.pose_sd._predict_target_eps(packed_u, t_b, t_uncond, C)
+            eps = self._cfg(eps_c, eps_u, cfg_sd)
+            x0_chunks.append(self._x0_from_eps(x_chunk, eps, alpha_bar))
+        return torch.cat(x0_chunks, 0)
 
     def sample_coupled(
         self,
@@ -257,6 +278,7 @@ class CoupledDiffusionRunner:
         camera_scale,
         fps,
         transition_sec,
+        sd_chunk_size,
     ):
         torch.manual_seed(seed)
         input_imgs, input_Ks, input_c2ws, (W, H) = preprocess_advanced(img_paths, self.dust3r)
@@ -290,10 +312,19 @@ class CoupledDiffusionRunner:
             sd_ref_latents = self.pose_sd.encode_image(
                 (input_imgs.permute(0, 3, 1, 2).to(self.device) * 2.0 - 1.0)
             )
-        ref_pairs = self._build_ref_pairs(all_c2ws, input_indices)
-        idx_to_ref = {idx: i for i, idx in enumerate(input_indices)}
         text_cond = self.pose_sd.get_text_embeddings([prompt])
         text_uncond = self.pose_sd.null_text_emb
+        # Offload PoseSD components not used during iterative denoising.
+        self.pose_sd.vae.to("cpu")
+        self.pose_sd.text_encoder.to("cpu")
+
+        # Offload SEVA helper modules not used in iterative denoising.
+        self.ae.to("cpu")
+        self.conditioner.to("cpu")
+        torch.cuda.empty_cache()
+
+        ref_pairs = self._build_ref_pairs(all_c2ws, input_indices)
+        idx_to_ref = {idx: i for i, idx in enumerate(input_indices)}
 
         sigmas = self.discretization(num_steps, device=self.device)
         noise = torch.randn(N, 4, latent_h, latent_w, device=self.device)
@@ -330,6 +361,7 @@ class CoupledDiffusionRunner:
                 idx_to_ref,
                 sd_ref_latents,
                 cfg_sd,
+                sd_chunk_size,
             )
 
             grad = coupling_strength * (x0_seva - x0_sd)
@@ -348,6 +380,8 @@ class CoupledDiffusionRunner:
                 x_sd = x0_sd_c
 
         frames = []
+        self.ae.to(self.device)
+        torch.cuda.empty_cache()
         for j in range(N):
             with self._autocast_context():
                 decoded = self.ae.decode(x_seva[j : j + 1], 1)
@@ -376,6 +410,7 @@ def main():
     parser.add_argument("--camera-scale", type=float, default=2.0)
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--transition-sec", type=float, default=1.5)
+    parser.add_argument("--sd-chunk-size", type=int, default=8)
     args = parser.parse_args()
 
     img_paths = [osp.abspath(p) for p in args.inputs]
@@ -410,6 +445,7 @@ def main():
         camera_scale=args.camera_scale,
         fps=args.fps,
         transition_sec=args.transition_sec,
+        sd_chunk_size=max(1, args.sd_chunk_size),
     )
     iio.imwrite(
         output_path,
