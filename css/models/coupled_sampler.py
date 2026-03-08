@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from PIL import Image
-from einops import repeat
+from einops import rearrange, repeat
 
 from css.models.pose_sd import PoseSD
 from css.models.EMA import load_pose_sd_checkpoint
@@ -33,6 +33,7 @@ from seva.sampling import (
 from seva.eval import (
     run_one_scene,
     infer_prior_stats,
+    transform_img_and_K,
 )
 from seva.geometry import (
     generate_interpolated_path,
@@ -142,52 +143,57 @@ class CoupledDiffusionSampler:
             paths.append(f.name)
         return paths
 
-    def _preprocess_image(self, img) -> torch.Tensor:
-        if isinstance(img, str):
-            img = Image.open(img)
-        arr = np.array(img.convert("RGB").resize((self.W, self.H))) / 255.0
-        return (torch.from_numpy(arr).permute(2, 0, 1).float() * 2 - 1).unsqueeze(0).to(self.device)
+    def _preprocess_inputs_for_seva(self, img_paths):
+        """Replicate demo_gr.py Advanced preprocess exactly."""
+        shorter = round(576 / 64) * 64
+        input_imgs, input_Ks, input_c2ws, points, _ = self.dust3r.infer_cameras_and_points(
+            img_paths
+        )
+        num_inputs = len(img_paths)
+        if num_inputs == 1:
+            input_imgs, input_Ks, input_c2ws, points = (
+                input_imgs[:1],
+                input_Ks[:1],
+                input_c2ws[:1],
+                points[:1],
+            )
 
-    def _encode_sd_refs(self, images) -> torch.Tensor:
-        """Encode input images with PoseSD's VAE for reference conditioning."""
-        latents = []
-        for img in images:
-            tensor = self._preprocess_image(img)
-            latents.append(self.pose_sd.encode_image(tensor))
-        return torch.cat(latents, dim=0)
+        input_imgs = [img[..., :3] for img in input_imgs]
 
-    def _estimate_poses(self, img_paths):
-        """Run DUSt3R to estimate camera poses and normalize the scene.
-
-        Returns (c2ws, Ks) as torch tensors — c2ws are normalized, Ks are
-        in pixel coords (unnormalized), matching demo_gr.py convention.
-        """
-        _, Ks, c2ws, points, _ = self.dust3r.infer_cameras_and_points(img_paths)
-
-        # Normalize scene (same as demo_gr.py preprocess)
         point_chunks = [p.shape[0] for p in points]
         point_indices = np.cumsum(point_chunks)[:-1]
-        c2ws, points, _ = normalize_scene(
-            c2ws,
+        input_c2ws, points, _ = normalize_scene(
+            input_c2ws,
             np.concatenate(points, 0),
             camera_center_method="poses",
         )
         points = np.split(points, point_indices, 0)
 
-        # Scale for viewport (same as demo_gr.py)
         scene_scale = np.median(
-            np.ptp(np.concatenate([c2ws[:, :3, 3], *points], 0), -1)
+            np.ptp(np.concatenate([input_c2ws[:, :3, 3], *points], 0), -1)
         )
-        c2ws[:, :3, 3] /= scene_scale
+        input_c2ws[:, :3, 3] /= scene_scale
 
-        c2ws = torch.as_tensor(c2ws, dtype=torch.float32)
-        Ks = torch.as_tensor(Ks, dtype=torch.float32)
-        # Normalize Ks to [0,1] (DUSt3R returns pixel coords for resized images)
-        Ks[:, 0] /= self.W
-        Ks[:, 1] /= self.H
-        return c2ws, Ks
+        input_imgs = [torch.as_tensor(img / 255.0, dtype=torch.float32) for img in input_imgs]
+        input_Ks = torch.as_tensor(input_Ks, dtype=torch.float32)
+        input_c2ws = torch.as_tensor(input_c2ws, dtype=torch.float32)
 
-    def _build_unified_trajectory(self, input_c2ws, input_Ks, num_frames):
+        resized_imgs, resized_Ks = [], []
+        for img, K in zip(input_imgs, input_Ks):
+            img = rearrange(img, "h w c -> 1 c h w")
+            img, K = transform_img_and_K(img, shorter, K=K[None], size_stride=64)
+            assert isinstance(K, torch.Tensor)
+            K = K / K.new_tensor([img.shape[-1], img.shape[-2], 1])[:, None]
+            resized_imgs.append(img)
+            resized_Ks.append(K)
+
+        input_imgs = torch.cat(resized_imgs, 0)
+        input_imgs = rearrange(input_imgs, "b c h w -> b h w c")[..., :3]
+        input_Ks = torch.cat(resized_Ks, 0)
+        input_wh = (input_imgs.shape[2], input_imgs.shape[1])  # (W, H)
+        return input_imgs, input_Ks, input_c2ws, input_wh
+
+    def _build_unified_trajectory(self, input_c2ws, input_Ks, num_frames, input_wh):
         """Build a single trajectory of num_frames with inputs at keyframe positions.
 
         For N inputs and F total frames, input images are placed at evenly-spaced
@@ -211,7 +217,7 @@ class CoupledDiffusionSampler:
             )
             all_c2ws = torch.as_tensor(target_c2ws, dtype=torch.float32)
             all_Ks = get_default_intrinsics(
-                torch.as_tensor(target_fovs), self.W / self.H,
+                torch.as_tensor(target_fovs), input_wh[0] / input_wh[1]
             )
             # Input at first frame
             all_c2ws[0] = to_hom_pose(input_c2ws[:1])[0]
@@ -245,17 +251,57 @@ class CoupledDiffusionSampler:
 
         return all_c2ws, all_Ks, input_indices
 
-    def _build_run_one_scene_args(self, input_images, img_paths):
-        """Build all arguments for run_one_scene matching demo.py's img2trajvid pipeline.
+    def _build_target_trajectory(self, input_c2ws, input_Ks, num_targets):
+        num_inputs = input_c2ws.shape[0]
+        if num_targets <= 0:
+            return input_c2ws.new_zeros((0, 4, 4)), input_Ks.new_zeros((0, 3, 3))
 
-        img2trajvid expects frames ordered as [inputs..., targets...] with
-        input_indices = [0, ..., num_inputs-1]. The trajectory (target poses)
-        is defined by interpolating between input camera poses.
+        if num_inputs >= 2:
+            keyframe_c2ws = input_c2ws.numpy()
+            n_interp = max(2, int(np.ceil(num_targets / (num_inputs - 1))))
+            target_c2ws_np = generate_interpolated_path(
+                keyframe_c2ws[:, :3],
+                n_interp=n_interp,
+                spline_degree=min(5, num_inputs - 1),
+                smoothness=0,
+                endpoint=True,
+            )
+            sample_idx = (
+                np.linspace(0, len(target_c2ws_np) - 1, num_targets).round().astype(int)
+            )
+            target_c2ws = to_hom_pose(
+                torch.as_tensor(target_c2ws_np[sample_idx], dtype=torch.float32)
+            )
+            target_Ks = input_Ks[:1].expand(num_targets, -1, -1).clone()
+            return target_c2ws, target_Ks
 
-        Returns (version_dict, image_cond, camera_cond, anchor_c2ws, anchor_Ks).
-        """
+        orbit_c2ws, _ = get_preset_pose_fov(
+            "orbit",
+            num_targets + 1,
+            torch.linalg.inv(input_c2ws[0]),
+            torch.tensor([0, 0, 10.0]),
+            -input_c2ws[0, :3, 1],
+            DEFAULT_FOV_RAD,
+            spiral_radii=[0.3, 0.3, 0.1],
+            zoom_factor=None,
+        )
+        target_c2ws = to_hom_pose(
+            torch.as_tensor(orbit_c2ws[1 : num_targets + 1], dtype=torch.float32)
+        )
+        target_Ks = input_Ks[:1].expand(num_targets, -1, -1).clone()
+        return target_c2ws, target_Ks
+
+    def _build_run_one_scene_args(self, img_paths, num_frames):
+        """Build run_one_scene args aligned with demo_gr.py's Advanced render path."""
+        input_imgs, input_Ks, input_c2ws, (W, H) = self._preprocess_inputs_for_seva(
+            img_paths
+        )
         num_inputs = len(img_paths)
-        input_c2ws, input_Ks = self._estimate_poses(img_paths)
+        num_total_frames = max(int(num_frames), num_inputs + 1)
+        num_targets = num_total_frames - num_inputs
+        target_c2ws, target_Ks = self._build_target_trajectory(
+            input_c2ws, input_Ks, num_targets
+        )
 
         # Set up options early (infer_prior_stats reads chunk_strategy from it)
         options = {
@@ -264,82 +310,22 @@ class CoupledDiffusionSampler:
             "beta_linear_start": 5e-6,
             "log_snr_shift": 2.4,
             "guider_types": [1, 2],
-            "cfg": [self.cfg_seva, 2.0],
+            "cfg": [self.cfg_seva, 3.0 if num_inputs >= 9 else 2.0],
             "camera_scale": self.camera_scale,
             "num_steps": self.num_steps,
             "cfg_min": self.cfg_min,
             "encoding_t": 1,
             "decoding_t": 1,
-            "save_input": False,
-            "save_first_pass": False,
-            "save_second_pass": False,
         }
 
         T_base = VERSION_DICT["T"]
         version_dict = copy.deepcopy(VERSION_DICT)
-        version_dict["H"] = self.H
-        version_dict["W"] = self.W
+        version_dict["H"] = H
+        version_dict["W"] = W
         version_dict["options"] = options
-
-        # Build interpolated trajectory for target frames
-        num_frames_total = max(T_base, 21)
-        num_targets = num_frames_total - num_inputs
-
-        # Generate interpolated target poses between input cameras
-        keyframe_c2ws = input_c2ws.numpy()
-        if num_inputs >= 2:
-            n_interp = max(2, -(-num_targets // (num_inputs - 1)))
-            target_c2ws_np = generate_interpolated_path(
-                keyframe_c2ws[:, :3],
-                n_interp=n_interp,
-                spline_degree=min(5, num_inputs - 1),
-                smoothness=0,
-                endpoint=True,
-            )
-            # Skip poses that coincide with input keyframes (first and evenly spaced)
-            # Sample num_targets evenly from the interpolated path
-            indices = np.linspace(0, len(target_c2ws_np) - 1, num_targets).round().astype(int)
-            target_c2ws_np = target_c2ws_np[indices]
-        else:
-            # Single input: orbit
-            orbit_c2ws, orbit_fovs = get_preset_pose_fov(
-                "orbit", num_targets + 1,
-                torch.linalg.inv(input_c2ws[0]),
-                torch.tensor([0, 0, 10.0]),
-                -input_c2ws[0, :3, 1],
-                DEFAULT_FOV_RAD,
-                spiral_radii=[0.3, 0.3, 0.1],
-                zoom_factor=None,
-            )
-            target_c2ws_np = orbit_c2ws[1:, :3].numpy()  # skip first (same as input)
-
-        target_c2ws = torch.as_tensor(target_c2ws_np, dtype=torch.float32)
-        # Use first input's K for all targets
-        target_Ks = input_Ks[:1].expand(num_targets, -1, -1).clone()
-
-        # Assemble arrays: [inputs, targets] — img2trajvid convention
-        # input_c2ws is (N, 4, 4), target_c2ws is (M, 3, 4) — need consistent shape
-        input_c2ws_hom = to_hom_pose(input_c2ws)  # (N, 4, 4)
-        target_c2ws_hom = to_hom_pose(target_c2ws)  # (M, 4, 4)
-        all_c2ws = torch.cat([input_c2ws_hom, target_c2ws_hom], 0)
+        all_c2ws = torch.cat([input_c2ws, target_c2ws], 0)
         all_Ks = torch.cat([input_Ks, target_Ks], 0)
-
-        # Unnormalize Ks to pixel coords (run_one_scene will re-normalize)
-        all_Ks_pixel = all_Ks.clone()
-        all_Ks_pixel[:, 0] *= self.W
-        all_Ks_pixel[:, 1] *= self.H
-
-        # Prepare images: inputs as numpy, targets as None
-        # run_one_scene with gradio=True expects numpy arrays or None
-        all_imgs = []
-        for i in range(num_inputs):
-            img = input_images[i]
-            if isinstance(img, str):
-                img = Image.open(img)
-            arr = np.array(img.convert("RGB").resize((self.W, self.H)))
-            all_imgs.append(arr)
-        for _ in range(num_targets):
-            all_imgs.append(None)
+        all_Ks_pixel = all_Ks * all_Ks.new_tensor([W, H, 1.0])[:, None]
 
         # input_indices: [0, 1, ..., num_inputs-1] — required by img2trajvid
         input_indices = list(range(num_inputs))
@@ -356,16 +342,21 @@ class CoupledDiffusionSampler:
         anchor_indices = np.linspace(
             num_inputs, num_inputs + num_targets - 1, num_anchors
         ).tolist()
-        anchor_c2ws = all_c2ws[[round(i) for i in anchor_indices], :3]
+        anchor_c2ws = all_c2ws[[round(i) for i in anchor_indices]]
         anchor_Ks = all_Ks_pixel[[round(i) for i in anchor_indices]]
 
+        all_imgs_np = (
+            F.pad(input_imgs, (0, 0, 0, 0, 0, 0, 0, num_targets), value=0.0).numpy()
+            * 255.0
+        ).astype(np.uint8)
+
         image_cond = {
-            "img": all_imgs,
+            "img": all_imgs_np,
             "input_indices": input_indices,
             "prior_indices": anchor_indices,
         }
         camera_cond = {
-            "c2w": all_c2ws[:, :3].float(),
+            "c2w": all_c2ws.float(),
             "K": all_Ks_pixel.float(),
             "input_indices": list(range(num_inputs + num_targets)),
         }
@@ -388,11 +379,22 @@ class CoupledDiffusionSampler:
         )
         return denoised
 
-    def _sd_x0(self, x, t, text_cond, text_uncond, w2c, all_Ks,
-               input_indices, sd_ref_latents):
+    def _sd_x0(
+        self,
+        x,
+        t,
+        text_cond,
+        text_uncond,
+        w2c,
+        all_Ks,
+        input_indices,
+        sd_ref_latents,
+        latent_h,
+        latent_w,
+    ):
         """Predict x0 from PoseSD using view-packing and cross-view attention."""
         alpha_bar = self.sd_alphas[t]
-        h, w = self.latent_h, self.latent_w
+        h, w = latent_h, latent_w
         N = x.shape[0]
 
         ref1_lats, ref2_lats = [], []
@@ -445,6 +447,15 @@ class CoupledDiffusionSampler:
         eps = self._cfg_combine(eps_c, eps_u, self.cfg_sd)
         return self._x0_from_eps(x, eps, alpha_bar)
 
+    def _encode_sd_refs_from_preprocessed(self, input_imgs_01: torch.Tensor) -> torch.Tensor:
+        latents = []
+        for i in range(input_imgs_01.shape[0]):
+            tensor = (
+                input_imgs_01[i : i + 1].permute(0, 3, 1, 2).to(self.device) * 2.0 - 1.0
+            )
+            latents.append(self.pose_sd.encode_image(tensor))
+        return torch.cat(latents, dim=0)
+
     def _sigma_to_sd_t(self, sigma):
         if sigma <= 0:
             return 0
@@ -468,8 +479,9 @@ class CoupledDiffusionSampler:
         img_paths = self._images_to_paths(input_images)
 
         # DUSt3R needs gradients — run before inference_mode
-        version_dict, image_cond, camera_cond, anchor_c2ws, anchor_Ks = \
-            self._build_run_one_scene_args(input_images, img_paths)
+        version_dict, image_cond, camera_cond, anchor_c2ws, anchor_Ks = (
+            self._build_run_one_scene_args(img_paths, num_frames)
+        )
 
         if save_path is None:
             save_path = tempfile.mkdtemp(prefix="seva_")
@@ -509,23 +521,28 @@ class CoupledDiffusionSampler:
         torch.manual_seed(seed)
         input_images, _ = self._parse_images(images)
         img_paths = self._images_to_paths(input_images)
-        num_inputs = len(input_images)
+        num_inputs = len(img_paths)
 
-        # Estimate real poses with DUSt3R (needs gradients for optimization)
-        input_c2ws, input_Ks = self._estimate_poses(img_paths)
+        # Match demo_gr.py preprocessing to get reliable cameras/intrinsics.
+        input_imgs_01, input_Ks, input_c2ws, (W, H) = self._preprocess_inputs_for_seva(
+            img_paths
+        )
+
+        latent_h, latent_w = H // 8, W // 8
 
         # Build unified trajectory: num_frames total, inputs at keyframe positions
         all_c2ws, all_Ks, input_indices = self._build_unified_trajectory(
-            input_c2ws, input_Ks, num_frames,
+            input_c2ws, input_Ks, num_frames, (W, H)
         )
 
         with torch.inference_mode():
             N = num_frames
 
             # Encode input images for SEVA conditioning
-            imgs = torch.zeros(N, 3, self.H, self.W)
+            imgs = torch.zeros(N, 3, H, W)
+            input_imgs_nchw = input_imgs_01.permute(0, 3, 1, 2) * 2.0 - 1.0
             for i, idx in enumerate(input_indices):
-                imgs[idx] = self._preprocess_image(input_images[i]).squeeze(0).cpu()
+                imgs[idx] = input_imgs_nchw[i]
 
             # Camera centering + normalization (replicates get_value_dict logic)
             c2w = to_hom_pose(all_c2ws.float())
@@ -552,7 +569,7 @@ class CoupledDiffusionSampler:
                 extrinsics_src=w2c[0],
                 extrinsics=w2c,
                 intrinsics=all_Ks.float().clone(),
-                target_size=(self.latent_h, self.latent_w),
+                target_size=(latent_h, latent_w),
             ).to(self.device)
 
             input_masks = torch.zeros(N, dtype=torch.bool, device=self.device)
@@ -602,7 +619,7 @@ class CoupledDiffusionSampler:
             sd_all_Ks = all_Ks.to(self.device)
 
             # SD reference encoding and text embeddings
-            sd_ref_latents = self._encode_sd_refs(input_images)
+            sd_ref_latents = self._encode_sd_refs_from_preprocessed(input_imgs_01)
             text_cond = self.pose_sd.get_text_embeddings([prompt])
             text_uncond = self.pose_sd.null_text_emb
 
@@ -611,7 +628,7 @@ class CoupledDiffusionSampler:
 
             # Sigma schedule
             sigmas = self.discretization(self.num_steps, device=self.device)
-            noise = torch.randn(T, 4, self.latent_h, self.latent_w, device=self.device)
+            noise = torch.randn(T, 4, latent_h, latent_w, device=self.device)
             x_seva = noise * torch.sqrt(1.0 + sigmas[0] ** 2)
             x_sd = noise.clone()
 
@@ -631,6 +648,7 @@ class CoupledDiffusionSampler:
                 x0_sd = self._sd_x0(
                     x_sd, sd_t, text_cond, text_uncond,
                     w2c_device, sd_all_Ks, input_indices, sd_ref_latents,
+                    latent_h, latent_w,
                 )
 
                 # Coupling
