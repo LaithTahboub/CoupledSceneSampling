@@ -19,7 +19,6 @@ gradio_tmp
 old
 pose_sd*/
 logs
-stable-virtual-camera
 images_index.parquet
 **/__pycache__/
 *.py[cod]
