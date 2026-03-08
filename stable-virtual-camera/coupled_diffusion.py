@@ -47,8 +47,11 @@ class CoupledDiffusionRunner:
         pose_sd_pretrained: str,
         pose_sd_checkpoint: str | None,
         device: str,
+        use_half: bool = True,
     ):
         self.device = device
+        self.use_half = use_half and str(device).startswith("cuda")
+        self.sample_dtype = torch.float16 if self.use_half else torch.float32
         self.seva_model = SGMWrapper(load_seva_model(device="cpu", verbose=True).eval()).to(device)
         self.ae = AutoEncoder(chunk_size=1).to(device)
         self.conditioner = CLIPConditioner().to(device)
@@ -61,6 +64,13 @@ class CoupledDiffusionRunner:
             load_pose_sd_checkpoint(self.pose_sd, pose_sd_checkpoint, device)
         self.pose_sd.eval()
         self.sd_alphas = self.pose_sd.scheduler.alphas_cumprod.to(device)
+        if self.use_half:
+            self.seva_model.half()
+            self.ae.half()
+            self.conditioner.half()
+            self.pose_sd.unet.half()
+            self.pose_sd.vae.half()
+            self.pose_sd.text_encoder.half()
 
     def _autocast_context(self):
         return (
@@ -71,6 +81,7 @@ class CoupledDiffusionRunner:
 
     @staticmethod
     def _x0_from_eps(latent, eps, alpha_bar):
+        alpha_bar = alpha_bar.to(device=latent.device, dtype=latent.dtype)
         sqrt_alpha = alpha_bar.sqrt()
         sqrt_one_minus = (1.0 - alpha_bar).clamp_min(0.0).sqrt()
         return (latent - sqrt_one_minus * eps) / sqrt_alpha
@@ -137,7 +148,7 @@ class CoupledDiffusionRunner:
             extrinsics=w2c,
             intrinsics=all_Ks.float().clone(),
             target_size=(latent_h, latent_w),
-        ).to(self.device)
+        ).to(self.device, dtype=cond_imgs.dtype)
 
         input_mask = torch.zeros(N, dtype=torch.bool, device=self.device)
         input_mask[input_indices] = True
@@ -244,9 +255,9 @@ class CoupledDiffusionRunner:
 
             ref1_lat = torch.stack(ref1_lats)
             ref2_lat = torch.stack(ref2_lats)
-            pl_ref1 = torch.stack(pl_ref1s)
-            pl_ref2 = torch.stack(pl_ref2s)
-            pl_tgt = torch.stack(pl_tgts)
+            pl_ref1 = torch.stack(pl_ref1s).to(x_chunk.dtype)
+            pl_ref2 = torch.stack(pl_ref2s).to(x_chunk.dtype)
+            pl_tgt = torch.stack(pl_tgts).to(x_chunk.dtype)
 
             t_b = torch.full((C,), int(t), device=self.device, dtype=torch.long)
             t_cond = text_cond.expand(C, -1, -1)
@@ -279,6 +290,7 @@ class CoupledDiffusionRunner:
         fps,
         transition_sec,
         sd_chunk_size,
+        max_total_frames,
     ):
         torch.manual_seed(seed)
         input_imgs, input_Ks, input_c2ws, (W, H) = preprocess_advanced(img_paths, self.dust3r)
@@ -291,14 +303,23 @@ class CoupledDiffusionRunner:
         )
 
         num_inputs = input_imgs.shape[0]
+        if max_total_frames is not None and max_total_frames > num_inputs:
+            max_targets = max_total_frames - num_inputs
+            if target_c2ws.shape[0] > max_targets:
+                keep = np.linspace(0, target_c2ws.shape[0] - 1, max_targets).round().astype(int)
+                target_c2ws = target_c2ws[keep]
+                target_Ks = target_Ks[keep]
+
         input_indices = list(range(num_inputs))
         all_c2ws = torch.cat([input_c2ws, target_c2ws], 0)
         all_Ks = torch.cat([input_Ks, target_Ks], 0)
         N = all_c2ws.shape[0]
         latent_h, latent_w = H // 8, W // 8
 
-        cond_imgs = torch.zeros(N, 3, H, W)
-        cond_imgs[:num_inputs] = input_imgs.permute(0, 3, 1, 2) * 2.0 - 1.0
+        cond_imgs = torch.zeros(N, 3, H, W, dtype=self.sample_dtype)
+        cond_imgs[:num_inputs] = (
+            input_imgs.permute(0, 3, 1, 2).to(dtype=self.sample_dtype) * 2.0 - 1.0
+        )
         c, uc, guider, input_mask, c2w_guider, K_guider, w2c = self._build_seva_conditioning(
             cond_imgs,
             all_c2ws,
@@ -310,7 +331,11 @@ class CoupledDiffusionRunner:
 
         with self._autocast_context():
             sd_ref_latents = self.pose_sd.encode_image(
-                (input_imgs.permute(0, 3, 1, 2).to(self.device) * 2.0 - 1.0)
+                (
+                    input_imgs.permute(0, 3, 1, 2).to(self.device, dtype=self.sample_dtype)
+                    * 2.0
+                    - 1.0
+                )
             )
         text_cond = self.pose_sd.get_text_embeddings([prompt])
         text_uncond = self.pose_sd.null_text_emb
@@ -327,7 +352,7 @@ class CoupledDiffusionRunner:
         idx_to_ref = {idx: i for i, idx in enumerate(input_indices)}
 
         sigmas = self.discretization(num_steps, device=self.device)
-        noise = torch.randn(N, 4, latent_h, latent_w, device=self.device)
+        noise = torch.randn(N, 4, latent_h, latent_w, device=self.device, dtype=self.sample_dtype)
         x_seva = noise * torch.sqrt(1.0 + sigmas[0] ** 2)
         x_sd = noise.clone()
 
@@ -411,6 +436,8 @@ def main():
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--transition-sec", type=float, default=1.5)
     parser.add_argument("--sd-chunk-size", type=int, default=8)
+    parser.add_argument("--max-total-frames", type=int, default=96)
+    parser.add_argument("--fp32", action="store_true")
     args = parser.parse_args()
 
     img_paths = [osp.abspath(p) for p in args.inputs]
@@ -432,6 +459,7 @@ def main():
         pose_sd_pretrained=args.pose_sd_pretrained,
         pose_sd_checkpoint=args.pose_sd_checkpoint,
         device=args.device,
+        use_half=not args.fp32,
     )
     frames = runner.sample_coupled(
         img_paths=img_paths,
@@ -446,6 +474,7 @@ def main():
         fps=args.fps,
         transition_sec=args.transition_sec,
         sd_chunk_size=max(1, args.sd_chunk_size),
+        max_total_frames=(None if args.max_total_frames <= 0 else args.max_total_frames),
     )
     iio.imwrite(
         output_path,
