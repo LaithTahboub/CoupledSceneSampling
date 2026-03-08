@@ -327,6 +327,7 @@ class CoupledDiffusionRunner:
         sd_chunk_size,
         max_total_frames,
         short_side,
+        include_input_frames,
     ):
         torch.manual_seed(seed)
         if str(self.device).startswith("cuda"):
@@ -374,6 +375,8 @@ class CoupledDiffusionRunner:
             all_c2ws = torch.cat([input_c2ws, target_c2ws], 0)
             all_Ks = torch.cat([input_Ks, target_Ks], 0)
             N = all_c2ws.shape[0]
+            target_mask = torch.ones(N, 1, 1, 1, device=self.device, dtype=self.sample_dtype)
+            target_mask[input_indices] = 0.0
             latent_h, latent_w = H // 8, W // 8
 
             cond_imgs = torch.zeros(N, 3, H, W, dtype=self.sample_dtype)
@@ -459,6 +462,7 @@ class CoupledDiffusionRunner:
                 )
 
                 grad = coupling_strength * (x0_seva - x0_sd)
+                grad = grad * target_mask
                 x0_seva_c = x0_seva - grad
                 x0_sd_c = x0_sd + grad
 
@@ -477,7 +481,8 @@ class CoupledDiffusionRunner:
             self.ae.to(self.device)
             if str(self.device).startswith("cuda"):
                 torch.cuda.empty_cache()
-            for j in range(N):
+            decode_start = 0 if include_input_frames else num_inputs
+            for j in range(decode_start, N):
                 with self._autocast_context():
                     decoded = self.ae.decode(x_seva[j : j + 1], 1)
                 frame = ((decoded.clamp(-1, 1) + 1) / 2 * 255).byte()[0].permute(1, 2, 0).cpu().numpy()
@@ -513,6 +518,7 @@ def main():
     parser.add_argument("--fp32", action="store_true")
     parser.add_argument("--no-offload-pose-unet", action="store_true")
     parser.add_argument("--no-offload-seva-model", action="store_true")
+    parser.add_argument("--include-input-frames", action="store_true")
     args = parser.parse_args()
 
     img_paths = [osp.abspath(p) for p in args.inputs]
@@ -553,6 +559,7 @@ def main():
         sd_chunk_size=max(1, args.sd_chunk_size),
         max_total_frames=(None if args.max_total_frames <= 0 else args.max_total_frames),
         short_side=max(64, args.short_side),
+        include_input_frames=args.include_input_frames,
     )
     iio.imwrite(
         output_path,
