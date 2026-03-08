@@ -372,6 +372,18 @@ def _save_checkpoint(model: SingleRefSD, optimizer: torch.optim.Optimizer,
     print(f"Saved checkpoint: {path}")
 
 
+def _load_checkpoint(model: SingleRefSD, optimizer: torch.optim.Optimizer,
+                     path: Path) -> tuple[int, int]:
+    """Load checkpoint and return (start_epoch, global_step)."""
+    ckpt = torch.load(path, map_location=model.device)
+    model.unet.load_state_dict(ckpt["unet"])
+    optimizer.load_state_dict(ckpt["optimizer"])
+    epoch = ckpt.get("epoch", 0)
+    global_step = ckpt.get("global_step", 0)
+    print(f"Resumed from {path} (epoch={epoch}, global_step={global_step})")
+    return epoch, global_step
+
+
 def _cleanup_checkpoints(output_dir: Path, keep: int = 3) -> None:
     ckpts = sorted(output_dir.glob("unet_epoch_*.pt"), key=lambda p: p.stat().st_mtime)
     for p in ckpts[:-keep]:
@@ -571,9 +583,13 @@ def main() -> None:
                               num_workers=0, pin_memory=True)
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.01)
 
-    global_step = 0
+    start_epoch, global_step = 0, 0
+    latest_ckpt = output_dir / "unet_latest.pt"
+    if latest_ckpt.exists():
+        start_epoch, global_step = _load_checkpoint(model, optimizer, latest_ckpt)
+
     try:
-        for epoch in range(args.epochs):
+        for epoch in range(start_epoch, args.epochs):
             model.train()
             epoch_loss = 0.0
             pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.epochs}")

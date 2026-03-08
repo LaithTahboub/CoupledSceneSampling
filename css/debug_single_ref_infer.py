@@ -61,7 +61,7 @@ def save_grid(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--checkpoint", default="/fs/nexus-scratch/ltahboub/CoupledSceneSampling/checkpoints/single_ref_debug/unet_final.pt", type=str)
+    p.add_argument("--checkpoint", default="/vulcanscratch/ltahboub/CoupledSceneSampling/checkpoints/single_ref_debug/unet_final.pt", type=str)
     p.add_argument("--output", type=str, default="debug_single_ref_infer.png")
 
     p.add_argument("--scenes", nargs="*", default=None)

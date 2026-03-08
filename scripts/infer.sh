@@ -2,11 +2,11 @@
 # Infer a sample from a checkpoint by train/test split index.
 
 set -euo pipefail
-#/fs/nexus-scratch/ltahboub/CoupledSceneSampling/splits/multiscene_scenes_test0p10_seed9
-ROOT=${ROOT:-/fs/nexus-scratch/ltahboub/CoupledSceneSampling}
+#/vulcanscratch/ltahboub/CoupledSceneSampling/splits/multiscene_scenes_test0p10_seed9
+ROOT=${ROOT:-/vulcanscratch/ltahboub/CoupledSceneSampling}
 SCENES_ROOT=${SCENES_ROOT:-$ROOT}
-CHECKPOINT=${CHECKPOINT:-/fs/nexus-scratch/ltahboub/CoupledSceneSampling/checkpoints/pose_sd_multiscene_test0p10_seed315/unet_latest.pt}
-SPLIT_DIR=${SPLIT_DIR:-/fs/nexus-scratch/ltahboub/CoupledSceneSampling/splits/multiscene_scenes_test0p10_seed315}
+CHECKPOINT=${CHECKPOINT:-/vulcanscratch/ltahboub/CoupledSceneSampling/checkpoints/pose_sd_multiscene_test0p10_seed315/unet_latest.pt}
+SPLIT_DIR=${SPLIT_DIR:-/vulcanscratch/ltahboub/CoupledSceneSampling/splits/multiscene_scenes_test0p10_seed315}
 SPLIT_SET=${SPLIT_SET:-train}          # train | test
 SPLIT_INDEX=${SPLIT_INDEX:-1}         # 0-based index into split file
 TARGET_IDX=${TARGET_IDX:-0}           # target index inside selected scene (scene-split mode)

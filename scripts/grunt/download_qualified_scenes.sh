@@ -18,10 +18,10 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32gb
 #SBATCH --time=3-0:00:00
-#SBATCH --output=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/download_megascenes.out
-#SBATCH --error=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/download_megascenes.err
+#SBATCH --output=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/download_megascenes.out
+#SBATCH --error=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/download_megascenes.err
 
-ROOT="/fs/nexus-scratch/ltahboub/CoupledSceneSampling"
+ROOT="/vulcanscratch/ltahboub/CoupledSceneSampling"
 SCRIPT_DIR="${ROOT}/scripts"
 DOWNLOAD_SCRIPT="${ROOT}/scripts/grunt/download_scene_data.sh"
 

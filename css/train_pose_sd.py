@@ -79,11 +79,13 @@ def _build_split(
     withheld_lookup = {sn: set(tgts) for sn, tgts in test_targets_by_scene.items()}
     train_indices: list[int] = []
     test_indices: list[int] = []
+    withheld_target_indices: list[int] = []
     for i, t in enumerate(triplets):
         if t.scene_name in test_scene_set:
             test_indices.append(i)
         elif t.target_name in withheld_lookup.get(t.scene_name, set()):
             test_indices.append(i)
+            withheld_target_indices.append(i)
         else:
             train_indices.append(i)
 
@@ -98,8 +100,9 @@ def _build_split(
         },
         "num_train_triplets": len(train_indices),
         "num_test_triplets": len(test_indices),
+        "num_withheld_target_triplets": len(withheld_target_indices),
     }
-    return train_indices, test_indices, split_info
+    return train_indices, test_indices, withheld_target_indices, split_info
 
 
 # ---------------------------------------------------------------------------
@@ -228,10 +231,11 @@ def main() -> None:
     if len(dataset) < 2:
         raise ValueError(f"Need >= 2 triplets, got {len(dataset)}")
 
-    train_indices, test_indices, split_info = _build_split(
+    train_indices, test_indices, withheld_target_indices, split_info = _build_split(
         dataset.triplets, args.seed, args.test_scenes_pct, args.test_targets_per_scene,
     )
-    print(f"Train: {len(train_indices)} triplets | Test: {len(test_indices)} triplets")
+    print(f"Train: {len(train_indices)} triplets | Test: {len(test_indices)} triplets "
+          f"({len(withheld_target_indices)} withheld-target)")
     if split_info["test_scenes"]:
         print(f"  Withheld scenes ({len(split_info['test_scenes'])}): {split_info['test_scenes']}")
 
@@ -243,6 +247,7 @@ def main() -> None:
 
     train_dataset = torch.utils.data.Subset(dataset, train_indices)
     test_dataset = torch.utils.data.Subset(dataset, test_indices)
+    withheld_target_dataset = torch.utils.data.Subset(dataset, withheld_target_indices)
 
     if len(train_dataset) == 0:
         raise ValueError("No training triplets after split. Relax constraints.")
@@ -283,17 +288,18 @@ def main() -> None:
 
             avg_loss = epoch_loss / max(1, len(train_loader))
             print(f"Epoch {epoch + 1}: avg_loss={avg_loss:.5f}")
+            wandb.log({"train/epoch_avg_loss": avg_loss, "epoch": epoch + 1}, step=global_step)
 
             # Sample one train + one test triplet each epoch
             model.eval()
             train_idx = epoch % len(train_dataset)
-            test_idx = epoch % max(1, len(test_dataset))
             sample_seed = args.seed + epoch
 
             _log_sample(model, train_dataset, train_idx, "train",
                         args.sample_steps, args.sample_cfg_scale, sample_seed, global_step)
-            if len(test_dataset) > 0:
-                _log_sample(model, test_dataset, test_idx, "test",
+            if len(withheld_target_dataset) > 0:
+                wt_idx = epoch % len(withheld_target_dataset)
+                _log_sample(model, withheld_target_dataset, wt_idx, "test",
                             args.sample_steps, args.sample_cfg_scale, sample_seed, global_step)
 
             # Always save latest
@@ -306,9 +312,6 @@ def main() -> None:
                                  output_dir / f"unet_epoch_{epoch + 1}.pt")
                 _cleanup_checkpoints(output_dir, keep=args.keep_checkpoints)
 
-        # Save final checkpoint
-        _save_checkpoint(model, optimizer, args.epochs, global_step,
-                         output_dir / "unet_final.pt")
     finally:
         wandb.finish()
 

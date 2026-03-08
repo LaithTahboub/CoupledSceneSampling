@@ -10,12 +10,12 @@
 #SBATCH --account=vulcan-jbhuang
 #SBATCH --qos=vulcan-medium
 #SBATCH --time=3-0:00:00
-#SBATCH --output=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/debug_single_ref.out
-#SBATCH --error=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/debug_single_ref.err
+#SBATCH --output=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/debug_single_ref.out
+#SBATCH --error=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/debug_single_ref.err
 
 set -euo pipefail
 
-ROOT="/fs/nexus-scratch/ltahboub/CoupledSceneSampling"
+ROOT="/vulcanscratch/ltahboub/CoupledSceneSampling"
 MEGASCENES_ROOT=${MEGASCENES_ROOT:-$ROOT/MegaScenes}
 SCENES_FILE=${SCENES_FILE:-"$ROOT/MegaScenes/scenes_colmap_ready.txt"}
 SCENES=${SCENES:-}

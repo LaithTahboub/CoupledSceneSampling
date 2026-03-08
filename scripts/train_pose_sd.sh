@@ -5,17 +5,17 @@
 #SBATCH --partition=vulcan-ampere
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=64gb
+#SBATCH --mem=48gb
 #SBATCH --gres=gpu:rtxa6000:1
 #SBATCH --account=vulcan-jbhuang
 #SBATCH --qos=vulcan-medium
 #SBATCH --time=3-0:00:00
-#SBATCH --output=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/train_pose_sd.out
-#SBATCH --error=/fs/nexus-scratch/ltahboub/CoupledSceneSampling/logs/train_pose_sd.err
+#SBATCH --output=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/train_pose_sd.out
+#SBATCH --error=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/train_pose_sd.err
 
 set -euo pipefail
 
-ROOT="/fs/nexus-scratch/ltahboub/CoupledSceneSampling"
+ROOT="/vulcanscratch/ltahboub/CoupledSceneSampling"
 SCENES_FILE=${SCENES_FILE:-"$ROOT/MegaScenes/scenes_colmap_ready.txt"}
 SCENES=${SCENES:-}
 
@@ -23,16 +23,16 @@ OUTPUT=${OUTPUT:-$ROOT/checkpoints/pose_sd_v1}
 SEED=${SEED:-42}
 
 EPOCHS=${EPOCHS:-100}
-BATCH_SIZE=${BATCH_SIZE:-2}
+BATCH_SIZE=${BATCH_SIZE:-4}
 LR=${LR:-1e-5}
 TRAIN_MODE=${TRAIN_MODE:-cond}
 
 MIN_COVISIBILITY=${MIN_COVISIBILITY:-0.15}
-MAX_COVISIBILITY=${MAX_COVISIBILITY:-0.55}
-MIN_REF_COVISIBILITY=${MIN_REF_COVISIBILITY:-0.10}
-MAX_REF_COVISIBILITY=${MAX_REF_COVISIBILITY:-0.70}
+MAX_COVISIBILITY=${MAX_COVISIBILITY:-0.48}
+MIN_REF_COVISIBILITY=${MIN_REF_COVISIBILITY:-0.20}
+MAX_REF_COVISIBILITY=${MAX_REF_COVISIBILITY:-0.65}
 MIN_DISTANCE=${MIN_DISTANCE:-0.10}
-MAX_TRIPLETS_PER_SCENE=${MAX_TRIPLETS_PER_SCENE:-64}
+MAX_TRIPLETS_PER_SCENE=${MAX_TRIPLETS_PER_SCENE:-80}
 
 # Split config
 TEST_SCENES_PCT=${TEST_SCENES_PCT:-5.0}
@@ -41,10 +41,10 @@ SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/pose_sd_seed${SEED}}
 
 # Checkpoint config
 SAVE_EVERY=${SAVE_EVERY:-7}
-KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-3}
+KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-5}
 
 SAMPLE_STEPS=${SAMPLE_STEPS:-50}
-SAMPLE_CFG_SCALE=${SAMPLE_CFG_SCALE:-4.0}
+SAMPLE_CFG_SCALE=${SAMPLE_CFG_SCALE:-3}
 COND_DROP_PROB=${COND_DROP_PROB:-0.15}
 
 H=${H:-512}
