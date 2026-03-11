@@ -503,7 +503,7 @@ def main():
 
     parser.add_argument("--prompt", default="")
     parser.add_argument("--pose-sd-pretrained", default="manojb/stable-diffusion-2-1-base")
-    parser.add_argument("--pose-sd-checkpoint", default=None)
+    parser.add_argument("--pose-sd-checkpoint", default="/vulcanscratch/ltahboub/CoupledSceneSampling/checkpoints/pose_sd_v1/unet_latest.pt")
     parser.add_argument("--coupling-strength", type=float, default=0.2)
     parser.add_argument("--cfg-seva", type=float, default=3.0)
     parser.add_argument("--cfg-sd", type=float, default=7.5)

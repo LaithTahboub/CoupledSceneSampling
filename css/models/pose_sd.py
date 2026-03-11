@@ -1,9 +1,16 @@
-"""PoseSD: 3-view CAT3D-style model with Plucker ray conditioning.
+"""PoseSD: variable-view model with Plucker ray conditioning.
 
-Views are packed as (B*3, 11, h, w) in order [target, ref1, ref2] with
-per-view channels: latent(4) + plucker(6) + mask(1).
+Views are packed as (B*V, 11, h, w) with per-view channels:
+latent(4) + plucker(6) + mask(1).
 
-Extends the working SingleRefSD pattern to 3 views with pose conditioning.
+mask=1 for reference views (clean), mask=0 for target views (noised).
+
+Supports:
+- Default 3-view mode: [target, ref1, ref2]  (backward compatible)
+- Multi-target mode: [tgt1, ..., tgtN, ref1, ref2] with variable N
+- Randomized slot order during training
+- Variable conditioning count (1 or 2 refs)
+- Structured conditioning dropout (independent ref1/ref2/text dropping)
 """
 
 from __future__ import annotations
@@ -36,10 +43,10 @@ def _expand_conv_in(unet: UNet2DConditionModel, new_in_channels: int) -> None:
 
 
 class PoseSD(nn.Module):
-    """3-view CAT3D-style model: [target, ref1, ref2] with Plucker conditioning."""
+    """Variable-view model: refs + targets with Plucker conditioning."""
 
-    NUM_VIEWS = 3
-    PER_VIEW_CH = 11  # latent(4) + plucker(6) + mask(1)
+    NUM_VIEWS = 3          # default for single-target (backward compat)
+    PER_VIEW_CH = 11       # latent(4) + plucker(6) + mask(1)
 
     def __init__(self, pretrained_model: str = "manojb/stable-diffusion-2-1-base", device: str = "cuda"):
         super().__init__()
@@ -102,53 +109,181 @@ class PoseSD(nn.Module):
     def decode_latent(self, latent: torch.Tensor) -> torch.Tensor:
         return self.vae.decode(latent / self.vae.config.scaling_factor).sample
 
+    # ------------------------------------------------------------------
+    # View packing (single-target, backward compatible)
+    # ------------------------------------------------------------------
+
     def _pack_views(
         self,
         ref1_lat: torch.Tensor, ref2_lat: torch.Tensor, tgt_lat: torch.Tensor,
         pl_ref1: torch.Tensor, pl_ref2: torch.Tensor, pl_tgt: torch.Tensor,
-        ref_keep_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        ref1_keep: torch.Tensor | None = None,
+        ref2_keep: torch.Tensor | None = None,
+        slot_order: list[int] | None = None,
+    ) -> tuple[torch.Tensor, int]:
+        """Pack 3 views into (B*3, 11, h, w). Unchanged from original."""
         b, _, h, w = tgt_lat.shape
         dtype, device = tgt_lat.dtype, tgt_lat.device
 
-        m_ref = torch.ones((b, 1, h, w), device=device, dtype=dtype)
+        m_ref1 = torch.ones((b, 1, h, w), device=device, dtype=dtype)
+        m_ref2 = torch.ones((b, 1, h, w), device=device, dtype=dtype)
         m_tgt = torch.zeros((b, 1, h, w), device=device, dtype=dtype)
 
-        if ref_keep_mask is not None:
-            keep = ref_keep_mask.to(device=device, dtype=dtype).view(b, 1, 1, 1)
-            ref1_lat = ref1_lat * keep
-            ref2_lat = ref2_lat * keep
-            pl_ref1 = pl_ref1 * keep
-            pl_ref2 = pl_ref2 * keep
-            m_ref = m_ref * keep
+        if ref1_keep is not None:
+            keep1 = ref1_keep.to(device=device, dtype=dtype).view(b, 1, 1, 1)
+            ref1_lat = ref1_lat * keep1
+            pl_ref1 = pl_ref1 * keep1
+            m_ref1 = m_ref1 * keep1
+
+        if ref2_keep is not None:
+            keep2 = ref2_keep.to(device=device, dtype=dtype).view(b, 1, 1, 1)
+            ref2_lat = ref2_lat * keep2
+            pl_ref2 = pl_ref2 * keep2
+            m_ref2 = m_ref2 * keep2
 
         v_tgt = torch.cat([tgt_lat, pl_tgt, m_tgt], dim=1)
-        v_r1 = torch.cat([ref1_lat, pl_ref1, m_ref], dim=1)
-        v_r2 = torch.cat([ref2_lat, pl_ref2, m_ref], dim=1)
+        v_r1 = torch.cat([ref1_lat, pl_ref1, m_ref1], dim=1)
+        v_r2 = torch.cat([ref2_lat, pl_ref2, m_ref2], dim=1)
 
-        # Interleave views so cross-view attention groups them correctly:
-        # [tgt0, r1_0, r2_0, tgt1, r1_1, r2_1, ...]
-        return torch.stack([v_tgt, v_r1, v_r2], dim=1).reshape(
+        views = [v_tgt, v_r1, v_r2]
+
+        if slot_order is not None:
+            ordered = [views[i] for i in slot_order]
+            target_slot = slot_order.index(0)
+        else:
+            ordered = views
+            target_slot = 0
+
+        return torch.stack(ordered, dim=1).reshape(
             b * self.NUM_VIEWS, self.PER_VIEW_CH, h, w,
-        )
+        ), target_slot
 
     def _predict_target_eps(
         self, packed: torch.Tensor, timesteps: torch.Tensor,
-        text_emb: torch.Tensor, batch_size: int,
+        text_emb: torch.Tensor, batch_size: int, target_slot: int = 0,
     ) -> torch.Tensor:
         t = timesteps.repeat_interleave(self.NUM_VIEWS)
         te = text_emb.repeat_interleave(self.NUM_VIEWS, dim=0)
         pred = self.unet(packed, t, encoder_hidden_states=te).sample
-        return pred.view(batch_size, self.NUM_VIEWS, *pred.shape[1:])[:, 0]
+        return pred.view(batch_size, self.NUM_VIEWS, *pred.shape[1:])[:, target_slot]
 
-    def training_step(self, batch: dict, *, cond_drop_prob: float = 0.15) -> torch.Tensor:
+    # ------------------------------------------------------------------
+    # View packing (multi-target)
+    # ------------------------------------------------------------------
+
+    def _pack_views_multi(
+        self,
+        ref_latents: list[torch.Tensor],     # n_refs x (B, 4, h, w)
+        ref_pluckers: list[torch.Tensor],    # n_refs x (B, 6, h, w)
+        ref_keeps: list[torch.Tensor],       # n_refs x (B,) bool
+        tgt_latents: list[torch.Tensor],     # n_tgts x (B, 4, h, w) — noised
+        tgt_pluckers: list[torch.Tensor],    # n_tgts x (B, 6, h, w)
+        slot_perm: list[int] | None = None,
+    ) -> tuple[torch.Tensor, list[int], int]:
+        """Pack variable views into (B*V, 11, h, w).
+
+        Layout before permutation: [tgt0, tgt1, ..., ref0, ref1, ...]
+
+        Returns:
+            packed: (B*V, 11, h, w)
+            tgt_slots: list of slot indices containing targets (after perm)
+            n_views: total view count
+        """
+        n_tgts = len(tgt_latents)
+        n_refs = len(ref_latents)
+        n_views = n_tgts + n_refs
+
+        b, _, h, w = tgt_latents[0].shape
+        dtype = tgt_latents[0].dtype
+        device = tgt_latents[0].device
+
+        views: list[torch.Tensor] = []
+
+        # Target views: mask=0
+        for lat, pl in zip(tgt_latents, tgt_pluckers):
+            m = torch.zeros((b, 1, h, w), device=device, dtype=dtype)
+            views.append(torch.cat([lat, pl, m], dim=1))
+
+        # Reference views: mask=1 (modulated by keep)
+        for lat, pl, keep in zip(ref_latents, ref_pluckers, ref_keeps):
+            k = keep.to(device=device, dtype=dtype).view(b, 1, 1, 1)
+            m = torch.ones((b, 1, h, w), device=device, dtype=dtype) * k
+            views.append(torch.cat([lat * k, pl * k, m], dim=1))
+
+        # Before permutation, targets are at indices [0, ..., n_tgts-1]
+        if slot_perm is not None:
+            ordered = [views[slot_perm[i]] for i in range(n_views)]
+            # Find where each original target index ended up
+            inv = [0] * n_views
+            for new_pos, old_idx in enumerate(slot_perm):
+                inv[old_idx] = new_pos
+            tgt_slots = [inv[i] for i in range(n_tgts)]
+        else:
+            ordered = views
+            tgt_slots = list(range(n_tgts))
+
+        packed = torch.stack(ordered, dim=1).reshape(
+            b * n_views, self.PER_VIEW_CH, h, w,
+        )
+        return packed, tgt_slots, n_views
+
+    # ------------------------------------------------------------------
+    # Conditioning dropout
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def sample_cond_dropout(
+        batch_size: int,
+        device: torch.device,
+        both_kept: float = 0.85,
+        one_dropped: float = 0.10,
+        both_dropped: float = 0.05,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        r = torch.rand(batch_size, device=device)
+        ref1_keep = torch.ones(batch_size, dtype=torch.bool, device=device)
+        ref2_keep = torch.ones(batch_size, dtype=torch.bool, device=device)
+
+        both_mask = r < both_dropped
+        ref1_keep[both_mask] = False
+        ref2_keep[both_mask] = False
+
+        one_mask = (r >= both_dropped) & (r < both_dropped + one_dropped)
+        if one_mask.any():
+            which = torch.rand(batch_size, device=device) < 0.5
+            ref1_keep[one_mask & which] = False
+            ref2_keep[one_mask & ~which] = False
+
+        return ref1_keep, ref2_keep
+
+    @staticmethod
+    def sample_slot_order(randomize: bool = True) -> list[int]:
+        if not randomize:
+            return [0, 1, 2]
+        return torch.randperm(3).tolist()
+
+    # ------------------------------------------------------------------
+    # Training steps
+    # ------------------------------------------------------------------
+
+    def training_step(
+        self,
+        batch: dict,
+        *,
+        both_kept: float = 0.85,
+        one_dropped: float = 0.10,
+        both_dropped: float = 0.05,
+        randomize_slots: bool = True,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Single-target training step (backward compatible)."""
+        # Ensure cross-view attention is set for 3 views
+        self.cross_view_attention.set_num_views(self.NUM_VIEWS, self.unet)
+
         ref1_img = batch["ref1_img"].to(self.device)
         ref2_img = batch["ref2_img"].to(self.device)
         target_img = batch["target_img"].to(self.device)
         pl_ref1 = batch["plucker_ref1"].to(self.device)
         pl_ref2 = batch["plucker_ref2"].to(self.device)
         pl_tgt = batch["plucker_tgt"].to(self.device)
-        prompts = list(batch["prompt"])
         b = target_img.shape[0]
 
         ref1_lat = self.encode_image(ref1_img)
@@ -160,29 +295,131 @@ class PoseSD(nn.Module):
                                   device=self.device, dtype=torch.long)
         tgt_lat_noisy = self.scheduler.add_noise(tgt_lat_clean, noise, timesteps)
 
-        text_emb = self.get_text_embeddings(prompts)
+        text_emb = self.null_text_emb.expand(b, -1, -1)
 
-        ref_keep_mask = None
-        if self.training and cond_drop_prob > 0:
-            drop = torch.rand(b, device=self.device) < cond_drop_prob
-            if drop.any():
-                text_emb = text_emb.clone()
-                text_emb[drop] = self.null_text_emb.expand(int(drop.sum()), -1, -1)
-                ref_keep_mask = ~drop
+        ref1_keep, ref2_keep = self.sample_cond_dropout(
+            b, self.device, both_kept, one_dropped, both_dropped,
+        )
 
-        packed = self._pack_views(ref1_lat, ref2_lat, tgt_lat_noisy,
-                                  pl_ref1, pl_ref2, pl_tgt, ref_keep_mask)
-        pred = self._predict_target_eps(packed, timesteps, text_emb, batch_size=b)
+        slot_order = self.sample_slot_order(randomize=randomize_slots) if self.training else None
 
-        return F.mse_loss(pred.float(), noise.float())
+        packed, target_slot = self._pack_views(
+            ref1_lat, ref2_lat, tgt_lat_noisy,
+            pl_ref1, pl_ref2, pl_tgt,
+            ref1_keep=ref1_keep, ref2_keep=ref2_keep,
+            slot_order=slot_order,
+        )
+        pred = self._predict_target_eps(packed, timesteps, text_emb, batch_size=b, target_slot=target_slot)
+
+        loss = F.mse_loss(pred.float(), noise.float())
+
+        meta = {
+            "n_both_kept": int((ref1_keep & ref2_keep).sum()),
+            "n_one_dropped": int((ref1_keep ^ ref2_keep).sum()),
+            "n_both_dropped": int((~ref1_keep & ~ref2_keep).sum()),
+            "n_targets": 1,
+        }
+
+        return loss, meta
+
+    def training_step_multi(
+        self,
+        ref_imgs: list[torch.Tensor],       # n_refs x (B, 3, H, W)
+        ref_pluckers: list[torch.Tensor],    # n_refs x (B, 6, h, w)
+        tgt_imgs: list[torch.Tensor],        # n_tgts x (B, 3, H, W)
+        tgt_pluckers: list[torch.Tensor],    # n_tgts x (B, 6, h, w)
+        *,
+        both_kept: float = 0.85,
+        one_dropped: float = 0.10,
+        both_dropped: float = 0.05,
+        randomize_slots: bool = True,
+    ) -> tuple[torch.Tensor, dict]:
+        """Multi-target training step. All targets share the same timestep
+        and the same reference views. Loss is averaged over all target views."""
+        n_refs = len(ref_imgs)
+        n_tgts = len(tgt_imgs)
+        n_views = n_refs + n_tgts
+        b = tgt_imgs[0].shape[0]
+
+        # Set cross-view attention for this view count
+        self.cross_view_attention.set_num_views(n_views, self.unet)
+
+        # Encode
+        ref_lats = [self.encode_image(r.to(self.device)) for r in ref_imgs]
+        tgt_lats_clean = [self.encode_image(t.to(self.device)) for t in tgt_imgs]
+        ref_pls = [p.to(self.device) for p in ref_pluckers]
+        tgt_pls = [p.to(self.device) for p in tgt_pluckers]
+
+        # Shared timestep across all targets in the same example
+        timesteps = torch.randint(
+            0, self.scheduler.config.num_train_timesteps, (b,),
+            device=self.device, dtype=torch.long,
+        )
+
+        # Noise each target independently
+        noises = [torch.randn_like(l) for l in tgt_lats_clean]
+        tgt_lats_noisy = [
+            self.scheduler.add_noise(c, n, timesteps)
+            for c, n in zip(tgt_lats_clean, noises)
+        ]
+
+        text_emb = self.null_text_emb.expand(b, -1, -1)
+
+        # Cond dropout (same masks for all targets within an example)
+        ref1_keep, ref2_keep = self.sample_cond_dropout(
+            b, self.device, both_kept, one_dropped, both_dropped,
+        )
+        ref_keeps = [ref1_keep, ref2_keep][:n_refs]
+
+        # Slot permutation
+        if randomize_slots and self.training:
+            slot_perm = torch.randperm(n_views).tolist()
+        else:
+            slot_perm = None
+
+        packed, tgt_slots, _ = self._pack_views_multi(
+            ref_lats, ref_pls, ref_keeps,
+            tgt_lats_noisy, tgt_pls,
+            slot_perm=slot_perm,
+        )
+
+        # Forward
+        t_expanded = timesteps.repeat_interleave(n_views)
+        te_expanded = text_emb.repeat_interleave(n_views, dim=0)
+        pred_all = self.unet(packed, t_expanded, encoder_hidden_states=te_expanded).sample
+        pred_all = pred_all.view(b, n_views, *pred_all.shape[1:])
+
+        # Loss on target slots only
+        tgt_preds = torch.stack([pred_all[:, s] for s in tgt_slots], dim=1)
+        tgt_noise = torch.stack(noises, dim=1)
+        loss = F.mse_loss(tgt_preds.float(), tgt_noise.float())
+
+        # Reset cross-view attention to default
+        self.cross_view_attention.set_num_views(self.NUM_VIEWS, self.unet)
+
+        meta = {
+            "n_both_kept": int((ref1_keep & (ref2_keep if n_refs > 1 else ref1_keep)).sum()),
+            "n_one_dropped": int((ref1_keep ^ (ref2_keep if n_refs > 1 else ref1_keep)).sum()),
+            "n_both_dropped": int((~ref1_keep & (~ref2_keep if n_refs > 1 else ~ref1_keep)).sum()),
+            "n_targets": n_tgts,
+        }
+
+        return loss, meta
+
+    # ------------------------------------------------------------------
+    # Inference
+    # ------------------------------------------------------------------
 
     @torch.inference_mode()
     def sample(
         self, *,
         ref1_img: torch.Tensor, ref2_img: torch.Tensor,
         pl_ref1: torch.Tensor, pl_ref2: torch.Tensor, pl_tgt: torch.Tensor,
-        prompt: str, num_steps: int = 50, cfg_scale: float = 4.0, seed: int = 42,
+        prompt: str = "", num_steps: int = 50, cfg_scale: float = 4.0, seed: int = 42,
     ) -> torch.Tensor:
+        """Single-target inference (unchanged)."""
+        self.cross_view_attention.set_num_views(self.NUM_VIEWS, self.unet)
+
         ref1_lat = self.encode_image(ref1_img.to(self.device))
         ref2_lat = self.encode_image(ref2_img.to(self.device))
         pl_ref1 = pl_ref1.to(self.device)
@@ -201,14 +438,18 @@ class PoseSD(nn.Module):
             t_b = torch.full((b,), int(t), device=self.device, dtype=torch.long)
             latent_in = self.scheduler.scale_model_input(latent, t)
 
-            packed_cond = self._pack_views(ref1_lat, ref2_lat, latent_in,
-                                           pl_ref1, pl_ref2, pl_tgt)
-            eps_cond = self._predict_target_eps(packed_cond, t_b, text_cond, b)
+            packed_cond, tgt_slot = self._pack_views(
+                ref1_lat, ref2_lat, latent_in, pl_ref1, pl_ref2, pl_tgt,
+            )
+            eps_cond = self._predict_target_eps(packed_cond, t_b, text_cond, b, tgt_slot)
 
-            keep_none = torch.zeros(b, device=self.device, dtype=torch.bool)
-            packed_uncond = self._pack_views(ref1_lat, ref2_lat, latent_in,
-                                             pl_ref1, pl_ref2, pl_tgt, keep_none)
-            eps_uncond = self._predict_target_eps(packed_uncond, t_b, text_uncond, b)
+            ref1_drop = torch.zeros(b, dtype=torch.bool, device=self.device)
+            ref2_drop = torch.zeros(b, dtype=torch.bool, device=self.device)
+            packed_uncond, tgt_slot_uc = self._pack_views(
+                ref1_lat, ref2_lat, latent_in, pl_ref1, pl_ref2, pl_tgt,
+                ref1_keep=ref1_drop, ref2_keep=ref2_drop,
+            )
+            eps_uncond = self._predict_target_eps(packed_uncond, t_b, text_uncond, b, tgt_slot_uc)
 
             eps = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
             latent = self.scheduler.step(eps, t, latent).prev_sample

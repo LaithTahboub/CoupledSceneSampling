@@ -1,4 +1,4 @@
-"""Sample from a pose-conditioned SD checkpoint."""
+"""Sample from a PoseSD checkpoint."""
 
 import argparse
 from pathlib import Path
@@ -9,11 +9,10 @@ from PIL import Image
 
 from css.data.dataset import (
     clean_scene_prompt_name,
-    load_image_name_set,
     read_scene_prompt_name,
 )
 from css.models.EMA import load_pose_sd_checkpoint
-from css.models.pose_conditioned_sd import PoseConditionedSD
+from css.models.pose_sd import PoseSD
 from css.scene_sampling import (
     build_comparison_grid,
     build_single_sample,
@@ -26,28 +25,17 @@ from css.scene_sampling import (
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True, help="Path to UNet checkpoint (.pt file)")
-    parser.add_argument("--scene", default="MegaScenes/Mysore_Palace", help="Scene directory")
-    parser.add_argument("--target-idx", type=int, default=None, help="Target image index (or random if not set)")
-    parser.add_argument("--prompt", default="a photo of the Mysore palace", help="Text prompt")
-    parser.add_argument("--prompt-template", type=str, default=None, help='Optional template, e.g. "a photo of {scene}"')
-    parser.add_argument("--num-steps", type=int, default=50, help="Sampling steps")
-    parser.add_argument("--cfg-scale", type=float, default=7.5, help="CFG guidance scale")
-    parser.add_argument("--apg", action="store_true", help="Use APG guidance instead of vanilla CFG")
-    parser.add_argument("--apg-eta", type=float, default=0.0, help="APG eta (ignored unless --apg)")
-    parser.add_argument("--apg-momentum", type=float, default=-0.5, help="APG momentum (ignored unless --apg)")
-    parser.add_argument("--apg-norm-threshold", type=float, default=0.0, help="APG norm threshold (ignored unless --apg)")
-    parser.add_argument("--apg-eps", type=float, default=1e-12, help="APG epsilon (ignored unless --apg)")
-    parser.add_argument("--min-covisibility", type=float, default=0.15, help="Minimum target-reference co-visibility")
-    parser.add_argument("--max-covisibility", type=float, default=0.80, help="Maximum target-reference co-visibility")
-    parser.add_argument("--min-distance", type=float, default=0.20, help="Minimum camera distance")
-    parser.add_argument("--exclude-image-list", type=str, default=None)
-    parser.add_argument("--target-include-image-list", type=str, default=None)
-    parser.add_argument("--reference-include-image-list", type=str, default=None)
-    parser.add_argument("--output", default="sample.png", help="Output path")
-    parser.add_argument("--noisy-target-start", action="store_true")
-    parser.add_argument("--show-refs", action="store_true", help="Also save reference images")
-    parser.add_argument("--show-pluckers", action="store_true", help="Include Plucker ray direction maps in grid")
-    parser.add_argument("--start-t", type=int, default=500, help="t value for noisy-target start")
+    parser.add_argument("--scene", required=True, help="Scene directory")
+    parser.add_argument("--target", type=str, default=None, help="Target image name (or random if not set)")
+    parser.add_argument("--prompt", default=None, help="Text prompt (auto-generated from scene name if not set)")
+    parser.add_argument("--num-steps", type=int, default=50)
+    parser.add_argument("--cfg-scale", type=float, default=4.0)
+    parser.add_argument("--min-covisibility", type=float, default=0.15)
+    parser.add_argument("--max-covisibility", type=float, default=0.80)
+    parser.add_argument("--min-distance", type=float, default=0.20)
+    parser.add_argument("--exclude-images", nargs="*", default=None, help="Image names to exclude from ref pool")
+    parser.add_argument("--output", default="sample.png")
+    parser.add_argument("--show-pluckers", action="store_true")
     parser.add_argument("--H", type=int, default=512)
     parser.add_argument("--W", type=int, default=512)
     parser.add_argument("--seed", type=int, default=42)
@@ -57,105 +45,80 @@ def main():
     torch.manual_seed(args.seed)
 
     scene_dir = Path(args.scene)
-    prompt = args.prompt
-    if args.prompt_template is not None and args.prompt == parser.get_default("prompt"):
+    if args.prompt is None:
         scene_text = clean_scene_prompt_name(read_scene_prompt_name(scene_dir))
-        prompt = args.prompt_template.format(scene=scene_text) if "{scene}" in args.prompt_template else args.prompt_template
+        prompt = f"a photo of {scene_text}"
+    else:
+        prompt = args.prompt
 
     print("Loading model...")
-    model = PoseConditionedSD()
+    model = PoseSD()
     load_pose_sd_checkpoint(model, args.checkpoint, model.device)
     model.eval()
     print(f"Loaded checkpoint: {args.checkpoint}")
 
-    exclude_image_names = load_image_name_set(args.exclude_image_list)
-    target_include_image_names = load_image_name_set(args.target_include_image_list)
-    reference_include_image_names = load_image_name_set(args.reference_include_image_list)
+    exclude_set = set(args.exclude_images) if args.exclude_images else None
 
     print(f"Loading scene: {scene_dir}")
     cameras, images_dir, target_images, reference_images = load_scene_pools(
-        scene_dir,
-        exclude_image_names=exclude_image_names,
-        target_include_image_names=target_include_image_names,
-        reference_include_image_names=reference_include_image_names,
+        scene_dir, exclude_image_names=exclude_set,
     )
     print(f"Target pool: {len(target_images)} | Reference pool: {len(reference_images)}")
 
     if len(target_images) == 0:
-        raise ValueError("No target images available after filtering")
+        raise ValueError("No target images available")
     if len(reference_images) < 2:
-        raise ValueError("Need at least 2 reference images after filtering")
+        raise ValueError("Need at least 2 reference images")
 
-    if args.target_idx is not None:
-        if args.target_idx < 0 or args.target_idx >= len(target_images):
-            raise ValueError(f"target_idx {args.target_idx} out of range [0, {len(target_images)-1}]")
-        target_img = target_images[args.target_idx]
+    # Select target
+    if args.target is not None:
+        matches = [img for img in target_images if img.name == args.target or Path(img.name).name == args.target]
+        if not matches:
+            raise ValueError(f"Target '{args.target}' not found in scene")
+        target_img = matches[0]
     else:
-        idx = np.random.randint(0, len(target_images))
-        target_img = target_images[idx]
+        target_img = target_images[np.random.randint(0, len(target_images))]
 
-    print(f"\nTarget: {target_img.name} (image {target_img.id})")
+    print(f"Target: {target_img.name}")
 
     ref1_img, ref2_img = find_best_references(
-        target_img,
-        reference_images,
+        target_img, reference_images,
         min_covisibility=args.min_covisibility,
         max_covisibility=args.max_covisibility,
         min_distance=args.min_distance,
     )
-    print(f"Selected refs: {ref1_img.name}, {ref2_img.name}")
+    print(f"Refs: {ref1_img.name}, {ref2_img.name}")
 
     sample = build_single_sample(cameras, images_dir, ref1_img, ref2_img, target_img, args.H, args.W)
 
-    guidance_mode = "apg" if args.apg else "cfg"
-    print(
-        f'\nGenerating with {args.num_steps} steps, guidance={guidance_mode}, '
-        f'cfg_scale={args.cfg_scale}, prompt="{prompt}", seed={args.seed}'
-    )
+    print(f'Generating ({args.num_steps} steps, cfg={args.cfg_scale}, prompt="{prompt}")')
     with torch.inference_mode():
         generated = model.sample(
-            sample["ref1_img"], sample["ref2_img"],
-            sample["plucker_ref1"], sample["plucker_ref2"], sample["plucker_tgt"],
+            ref1_img=sample["ref1_img"],
+            ref2_img=sample["ref2_img"],
+            pl_ref1=sample["plucker_ref1"],
+            pl_ref2=sample["plucker_ref2"],
+            pl_tgt=sample["plucker_tgt"],
             prompt=prompt,
             num_steps=args.num_steps,
             cfg_scale=args.cfg_scale,
-            target=(sample["target_img"] if args.noisy_target_start else None),
-            start_t=args.start_t,
-            use_apg=args.apg,
-            apg_eta=args.apg_eta,
-            apg_momentum=args.apg_momentum,
-            apg_norm_threshold=args.apg_norm_threshold,
-            apg_eps=args.apg_eps,
+            seed=args.seed,
         )
 
     pluckers = None
     if args.show_pluckers:
-        pluckers = (
-            sample["plucker_ref1"][0],
-            sample["plucker_ref2"][0],
-            sample["plucker_tgt"][0],
-        )
+        pluckers = (sample["plucker_ref1"][0], sample["plucker_ref2"][0], sample["plucker_tgt"][0])
+
     grid = build_comparison_grid(
-        sample["ref1_img"][0],
-        sample["ref2_img"][0],
-        sample["target_img"][0],
-        generated[0],
-        prompt=prompt,
-        pluckers=pluckers,
+        sample["ref1_img"][0], sample["ref2_img"][0],
+        sample["target_img"][0], generated[0],
+        prompt=prompt, pluckers=pluckers,
     )
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(grid).save(output_path)
-    print(f"Saved comparison: {output_path}")
-    print("  [Ref1 | Ref2 | Ground Truth | Generated]")
-
-    if args.show_refs:
-        Image.fromarray(to_uint8(sample["ref1_img"][0])).save(output_path.with_stem(output_path.stem + "_ref1"))
-        Image.fromarray(to_uint8(sample["ref2_img"][0])).save(output_path.with_stem(output_path.stem + "_ref2"))
-        Image.fromarray(to_uint8(sample["target_img"][0])).save(output_path.with_stem(output_path.stem + "_gt"))
-        Image.fromarray(to_uint8(generated[0])).save(output_path.with_stem(output_path.stem + "_gen"))
-        print("Saved individual images")
+    print(f"Saved: {output_path}  [Ref1 | Ref2 | GT | Generated]")
 
 
 if __name__ == "__main__":

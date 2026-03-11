@@ -1,17 +1,18 @@
 #!/bin/bash
 # PoseSD training: 3-view (ref1, ref2, target) with Plucker ray conditioning.
+# Multi-GPU via torchrun (8x A6000).
 
 #SBATCH --job-name=css-pose-sd
-#SBATCH --partition=vulcan-ampere
+#SBATCH --partition=vulcan-scavenger
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=48gb
-#SBATCH --gres=gpu:rtxa6000:1
+#SBATCH --mem=256gb
+#SBATCH --gres=gpu:rtxa6000:8
 #SBATCH --account=vulcan-jbhuang
-#SBATCH --qos=vulcan-medium
+#SBATCH --qos=vulcan-scavenger
 #SBATCH --time=3-0:00:00
-#SBATCH --output=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/train_pose_sd.out
-#SBATCH --error=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/train_pose_sd.err
+#SBATCH --output=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/train_pose_sd_%j.out
+#SBATCH --error=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/train_pose_sd_%j.err
 
 set -euo pipefail
 
@@ -19,66 +20,113 @@ ROOT="/vulcanscratch/ltahboub/CoupledSceneSampling"
 SCENES_FILE=${SCENES_FILE:-"$ROOT/MegaScenes/scenes_colmap_ready.txt"}
 SCENES=${SCENES:-}
 
-OUTPUT=${OUTPUT:-$ROOT/checkpoints/pose_sd_v1}
+OUTPUT=${OUTPUT:-$ROOT/checkpoints/pose_sd_v3}
 SEED=${SEED:-42}
 
-EPOCHS=${EPOCHS:-100}
-BATCH_SIZE=${BATCH_SIZE:-4}
-LR=${LR:-1e-5}
+# --- Training ---
+TOTAL_STEPS=${TOTAL_STEPS:-200000}
+PER_GPU_BATCH_SIZE=${PER_GPU_BATCH_SIZE:-4}
+GRAD_ACCUM=${GRAD_ACCUM:-4}
+# Effective batch size: 2 * 8 GPUs * 8 accum = 128
+LR=${LR:-1e-4}
 TRAIN_MODE=${TRAIN_MODE:-cond}
+WARMUP_STEPS=${WARMUP_STEPS:-1000}
+LR_SCHEDULER=${LR_SCHEDULER:-cosine}
 
-MIN_COVISIBILITY=${MIN_COVISIBILITY:-0.15}
-MAX_COVISIBILITY=${MAX_COVISIBILITY:-0.48}
-MIN_REF_COVISIBILITY=${MIN_REF_COVISIBILITY:-0.20}
-MAX_REF_COVISIBILITY=${MAX_REF_COVISIBILITY:-0.65}
-MIN_DISTANCE=${MIN_DISTANCE:-0.10}
-MAX_TRIPLETS_PER_SCENE=${MAX_TRIPLETS_PER_SCENE:-80}
+# --- Data ---
+H=${H:-256}
+W=${W:-256}
+MAX_TRIPLETS_PER_SCENE=${MAX_TRIPLETS_PER_SCENE:-111}
+MIN_POINTS_PER_IMAGE=${MIN_POINTS_PER_IMAGE:-400}
+MIN_ORIENTATION_DOT=${MIN_ORIENTATION_DOT:-0.5}
+MAX_FOCAL_LENGTH_RATIO=${MAX_FOCAL_LENGTH_RATIO:-2.0}
+MIN_REF_COVISIBILITY=${MIN_REF_COVISIBILITY:-0.10}
+MAX_REF_COVISIBILITY=${MAX_REF_COVISIBILITY:-0.70}
+NEAR_DUPLICATE_THRESHOLD=${NEAR_DUPLICATE_THRESHOLD:-0.82}
 
-# Split config
+# --- Conditioning dropout ---
+COND_BOTH_KEPT=${COND_BOTH_KEPT:-0.85}
+COND_ONE_DROPPED=${COND_ONE_DROPPED:-0.10}
+COND_BOTH_DROPPED=${COND_BOTH_DROPPED:-0.05}
+
+# --- Bucket ratios ---
+EASY_RATIO=${EASY_RATIO:-0.50}
+MEDIUM_RATIO=${MEDIUM_RATIO:-0.35}
+HARD_RATIO=${HARD_RATIO:-0.15}
+
+# --- Split ---
 TEST_SCENES_PCT=${TEST_SCENES_PCT:-5.0}
 TEST_TARGETS_PER_SCENE=${TEST_TARGETS_PER_SCENE:-1}
 SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/pose_sd_seed${SEED}}
 
-# Checkpoint config
-SAVE_EVERY=${SAVE_EVERY:-7}
+# --- Checkpoints & validation ---
+SAVE_EVERY=${SAVE_EVERY:-10000}
+VAL_EVERY=${VAL_EVERY:-5000}
 KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-5}
+VAL_SAMPLE_STEPS=${VAL_SAMPLE_STEPS:-50}
+VAL_CFG_SCALE=${VAL_CFG_SCALE:-3.0}
 
-SAMPLE_STEPS=${SAMPLE_STEPS:-50}
-SAMPLE_CFG_SCALE=${SAMPLE_CFG_SCALE:-3}
-COND_DROP_PROB=${COND_DROP_PROB:-0.15}
+# --- Multi-target training ---
+MULTI_TARGET_PROB=${MULTI_TARGET_PROB:-0.0}
+MAX_TARGETS=${MAX_TARGETS:-3}
 
-H=${H:-512}
-W=${W:-512}
+# --- EMA ---
+EMA_DECAY=${EMA_DECAY:-0.9999}
+
+# --- Multi-GPU ---
+NUM_GPUS=${NUM_GPUS:-8}
+NUM_WORKERS=${NUM_WORKERS:-4}
+
+# Resume
+RESUME=${RESUME:-}
 
 if [[ -f "$ROOT/.venv/bin/activate" ]]; then
     source "$ROOT/.venv/bin/activate"
 fi
 cd "$ROOT"
+mkdir -p logs
 
 ARGS=(
     --output "$OUTPUT"
     --split-dir "$SPLIT_DIR"
     --seed "$SEED"
-    --epochs "$EPOCHS"
-    --batch-size "$BATCH_SIZE"
+    --total-steps "$TOTAL_STEPS"
+    --per-gpu-batch-size "$PER_GPU_BATCH_SIZE"
+    --gradient-accumulation-steps "$GRAD_ACCUM"
     --lr "$LR"
+    --weight-decay 0.01
+    --grad-clip 1.0
+    --warmup-steps "$WARMUP_STEPS"
+    --lr-scheduler "$LR_SCHEDULER"
     --train-mode "$TRAIN_MODE"
-    --cond-drop-prob "$COND_DROP_PROB"
-    --min-covisibility "$MIN_COVISIBILITY"
-    --max-covisibility "$MAX_COVISIBILITY"
+    --gradient-checkpointing
+    --cond-both-kept "$COND_BOTH_KEPT"
+    --cond-one-dropped "$COND_ONE_DROPPED"
+    --cond-both-dropped "$COND_BOTH_DROPPED"
+    --easy-ratio "$EASY_RATIO"
+    --medium-ratio "$MEDIUM_RATIO"
+    --hard-ratio "$HARD_RATIO"
+    --max-triplets-per-scene "$MAX_TRIPLETS_PER_SCENE"
+    --min-points-per-image "$MIN_POINTS_PER_IMAGE"
+    --min-orientation-dot "$MIN_ORIENTATION_DOT"
+    --max-focal-length-ratio "$MAX_FOCAL_LENGTH_RATIO"
     --min-ref-covisibility "$MIN_REF_COVISIBILITY"
     --max-ref-covisibility "$MAX_REF_COVISIBILITY"
-    --min-distance "$MIN_DISTANCE"
-    --max-triplets-per-scene "$MAX_TRIPLETS_PER_SCENE"
+    --near-duplicate-threshold "$NEAR_DUPLICATE_THRESHOLD"
     --test-scenes-pct "$TEST_SCENES_PCT"
     --test-targets-per-scene "$TEST_TARGETS_PER_SCENE"
-    --save-every "$SAVE_EVERY"
+    --save-every-steps "$SAVE_EVERY"
+    --val-every-steps "$VAL_EVERY"
     --keep-checkpoints "$KEEP_CHECKPOINTS"
-    --sample-steps "$SAMPLE_STEPS"
-    --sample-cfg-scale "$SAMPLE_CFG_SCALE"
+    --val-sample-steps "$VAL_SAMPLE_STEPS"
+    --val-cfg-scale "$VAL_CFG_SCALE"
+    --ema-decay "$EMA_DECAY"
+    --multi-target-prob "$MULTI_TARGET_PROB"
+    --max-targets "$MAX_TARGETS"
     --H "$H"
     --W "$W"
-    --gradient-checkpointing
+    --num-workers "$NUM_WORKERS"
+    --mixed-precision bf16
 )
 
 if [[ -n "$SCENES" ]]; then
@@ -93,4 +141,11 @@ else
     exit 1
 fi
 
-uv run -m css.train_pose_sd "${ARGS[@]}"
+if [[ -n "$RESUME" ]]; then
+    ARGS+=(--resume-from "$RESUME")
+fi
+
+torchrun \
+    --nproc_per_node="$NUM_GPUS" \
+    --master_port="${MASTER_PORT:-29500}" \
+    -m css.train_pose_sd "${ARGS[@]}"
