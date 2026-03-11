@@ -468,12 +468,6 @@ def parse_args() -> argparse.Namespace:
     # Slot randomization
     p.add_argument("--no-randomize-slots", action="store_true")
 
-    # Multi-target training
-    p.add_argument("--multi-target-prob", type=float, default=0.0,
-                    help="Probability of a multi-target step (0 = disabled)")
-    p.add_argument("--max-targets", type=int, default=3,
-                    help="Max target views per multi-target step (including base)")
-
     # Bucket ratios
     p.add_argument("--easy-ratio", type=float, default=0.50)
     p.add_argument("--medium-ratio", type=float, default=0.35)
@@ -527,120 +521,7 @@ def _args_to_train_config(args: argparse.Namespace) -> TrainConfig:
         split_dir=args.split_dir,
         resume_from=args.resume_from,
         randomize_slot_order=not args.no_randomize_slots,
-        multi_target_prob=args.multi_target_prob,
-        max_targets=args.max_targets,
     )
-
-
-# ---------------------------------------------------------------------------
-# Multi-target step helper
-# ---------------------------------------------------------------------------
-
-def _run_multi_target_step(
-    model: PoseSD,
-    batch: dict,
-    dataset: MegaScenesDataset,
-    train_indices: list[int],
-    subset_indices: list[int],
-    *,
-    max_targets: int = 3,
-    both_kept: float = 0.85,
-    one_dropped: float = 0.10,
-    both_dropped: float = 0.05,
-    randomize_slots: bool = True,
-) -> tuple[torch.Tensor, dict]:
-    """Try a multi-target training step; falls back to standard if no compatible targets."""
-    B = batch["ref1_img"].shape[0]
-    device = batch["ref1_img"].device
-
-    # For each sample in the batch, find compatible targets
-    # subset_indices maps Subset-local → raw dataset index
-    extra_target_imgs: list[list[torch.Tensor]] = [[] for _ in range(B)]
-    extra_target_pluckers: list[list[torch.Tensor]] = [[] for _ in range(B)]
-
-    max_extra = max_targets - 1  # base target is already in batch
-    has_multi = False
-
-    for b in range(B):
-        # Get the raw dataset index for this sample
-        # batch doesn't carry index, so we use the dataset's ref-pair grouping
-        # We need to find compatible targets for the base target
-        # Since DataLoader doesn't give us indices, we look up by scene+ref pair
-        scene = batch.get("scene_name")
-        if scene is None:
-            continue
-
-        scene_name = scene[b] if isinstance(scene, (list, tuple)) else scene
-        ref1_name = batch["ref1_name"][b] if "ref1_name" in batch else None
-        ref2_name = batch["ref2_name"][b] if "ref2_name" in batch else None
-
-        if ref1_name is None or ref2_name is None:
-            continue
-
-        key = (scene_name, ref1_name, ref2_name)
-        group = dataset._ref_pair_groups.get(key, [])
-        target_name = batch["target_name"][b] if "target_name" in batch else None
-        others = [i for i in group if dataset.records[i].target_name != target_name]
-        random.shuffle(others)
-        others = others[:max_extra]
-
-        for idx in others:
-            extra = dataset.load_target_only(idx)
-            extra_target_imgs[b].append(extra["target_img"])
-            extra_target_pluckers[b].append(extra["plucker_tgt"])
-
-        if others:
-            has_multi = True
-
-    if not has_multi:
-        # Fall back to standard 3-view step
-        return model.training_step(
-            batch,
-            both_kept=both_kept,
-            one_dropped=one_dropped,
-            both_dropped=both_dropped,
-            randomize_slots=randomize_slots,
-        )
-
-    # Determine the number of targets (min across batch for uniform packing)
-    n_extras = [len(imgs) for imgs in extra_target_imgs]
-    n_extra = min(n_extras) if min(n_extras) > 0 else 0
-
-    if n_extra == 0:
-        return model.training_step(
-            batch,
-            both_kept=both_kept,
-            one_dropped=one_dropped,
-            both_dropped=both_dropped,
-            randomize_slots=randomize_slots,
-        )
-
-    # Build target lists: base target + extra targets
-    tgt_imgs = [batch["target_img"]]
-    tgt_pluckers = [batch["plucker_tgt"]]
-
-    for t in range(n_extra):
-        stacked_img = torch.stack([extra_target_imgs[b][t] for b in range(B)]).to(device)
-        stacked_pl = torch.stack([extra_target_pluckers[b][t] for b in range(B)]).to(device)
-        tgt_imgs.append(stacked_img)
-        tgt_pluckers.append(stacked_pl)
-
-    ref_imgs = [batch["ref1_img"], batch["ref2_img"]]
-    ref_pluckers = [batch["plucker_ref1"], batch["plucker_ref2"]]
-
-    loss, meta = model.training_step_multi(
-        ref_imgs=ref_imgs,
-        ref_pluckers=ref_pluckers,
-        tgt_imgs=tgt_imgs,
-        tgt_pluckers=tgt_pluckers,
-        both_kept=both_kept,
-        one_dropped=one_dropped,
-        both_dropped=both_dropped,
-        randomize_slots=randomize_slots,
-    )
-    meta["multi_target"] = True
-    meta["n_targets"] = 1 + n_extra
-    return loss, meta
 
 
 # ---------------------------------------------------------------------------
@@ -702,8 +583,6 @@ def main() -> None:
         max_pairs_per_target=args.max_pairs_per_target,
         pair_similarity_thresh=args.pair_similarity_thresh,
     )
-    if len(dataset) < 2:
-        raise ValueError(f"Need >= 2 triplets, got {len(dataset)}")
 
     # Split
     train_indices, test_indices, withheld_target_indices, split_info = _build_split(
@@ -801,11 +680,6 @@ def main() -> None:
     amp_dtype = dtype_map[cfg.mixed_precision]
     use_amp = cfg.mixed_precision != "no"
 
-    # Multi-target config
-    use_multi_target = cfg.multi_target_prob > 0
-    if is_main and use_multi_target:
-        print(f"Multi-target training: prob={cfg.multi_target_prob}, max_targets={cfg.max_targets}")
-
     # Training loop
     if is_main:
         print(f"\nStarting training for {cfg.total_steps} steps...")
@@ -829,29 +703,15 @@ def main() -> None:
             bucket_losses: dict[str, list[float]] = {}
 
             for batch_idx, batch in enumerate(pbar):
-                # Decide whether to do multi-target step
-                do_multi = use_multi_target and random.random() < cfg.multi_target_prob
-
                 # Forward pass
                 with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
-                    if do_multi:
-                        loss, meta = _run_multi_target_step(
-                            model, batch, dataset, train_indices,
-                            subset_indices=train_indices,
-                            max_targets=cfg.max_targets,
-                            both_kept=args.cond_both_kept,
-                            one_dropped=args.cond_one_dropped,
-                            both_dropped=args.cond_both_dropped,
-                            randomize_slots=cfg.randomize_slot_order,
-                        )
-                    else:
-                        loss, meta = model.training_step(
-                            batch,
-                            both_kept=args.cond_both_kept,
-                            one_dropped=args.cond_one_dropped,
-                            both_dropped=args.cond_both_dropped,
-                            randomize_slots=cfg.randomize_slot_order,
-                        )
+                    loss, meta = model.training_step(
+                        batch,
+                        both_kept=args.cond_both_kept,
+                        one_dropped=args.cond_one_dropped,
+                        both_dropped=args.cond_both_dropped,
+                        randomize_slots=cfg.randomize_slot_order,
+                    )
                     loss = loss / cfg.gradient_accumulation_steps
 
                 loss.backward()
@@ -891,8 +751,6 @@ def main() -> None:
                                 "train/n_both_kept": meta.get("n_both_kept", 0),
                                 "train/n_one_dropped": meta.get("n_one_dropped", 0),
                                 "train/n_both_dropped": meta.get("n_both_dropped", 0),
-                                "train/multi_target": int(meta.get("multi_target", False)),
-                                "train/n_targets": meta.get("n_targets", 1),
                             }
                             # Log per-bucket losses
                             for diff_key, losses in bucket_losses.items():

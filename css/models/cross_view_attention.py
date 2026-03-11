@@ -199,18 +199,6 @@ class CrossViewAttention:
 
         unet.set_attn_processor(processors)
 
-    def set_num_views(self, n: int, unet: Any) -> None:
-        """Dynamically update the view count on all wrapped processors.
-
-        Needed for multi-target training where the number of views per
-        example varies between steps.  Handles DDP-wrapped unets.
-        """
-        self.num_views = n
-        module = unet.module if hasattr(unet, "module") else unet
-        for name, proc in module.attn_processors.items():
-            if isinstance(proc, CrossViewAttentionProcessor):
-                proc.num_views = n
-
     @property
     def num_wrapped(self) -> int:
         return len(self.enabled_processor_names)

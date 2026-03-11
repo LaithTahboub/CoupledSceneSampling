@@ -138,9 +138,5 @@ class TrainConfig:
     # Fraction of batches using auxiliary regime (1ref+2tgt or 2ref+2tgt)
     auxiliary_regime_prob: float = 0.0  # disabled by default for phase 1
 
-    # Multi-target training (CAT3D-style)
-    multi_target_prob: float = 0.0  # probability of multi-target step (0 = disabled)
-    max_targets: int = 3  # max number of target views per step (including the base target)
-
     # Slot randomization
     randomize_slot_order: bool = True

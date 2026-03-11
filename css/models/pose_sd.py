@@ -1,4 +1,4 @@
-"""PoseSD: variable-view model with Plucker ray conditioning.
+"""PoseSD: 3-view model with Plucker ray conditioning.
 
 Views are packed as (B*V, 11, h, w) with per-view channels:
 latent(4) + plucker(6) + mask(1).
@@ -6,8 +6,7 @@ latent(4) + plucker(6) + mask(1).
 mask=1 for reference views (clean), mask=0 for target views (noised).
 
 Supports:
-- Default 3-view mode: [target, ref1, ref2]  (backward compatible)
-- Multi-target mode: [tgt1, ..., tgtN, ref1, ref2] with variable N
+- 3-view mode: [target, ref1, ref2]
 - Randomized slot order during training
 - Variable conditioning count (1 or 2 refs)
 - Structured conditioning dropout (independent ref1/ref2/text dropping)
@@ -43,7 +42,7 @@ def _expand_conv_in(unet: UNet2DConditionModel, new_in_channels: int) -> None:
 
 
 class PoseSD(nn.Module):
-    """Variable-view model: refs + targets with Plucker conditioning."""
+    """3-view model: 2 refs + 1 target with Plucker conditioning."""
 
     NUM_VIEWS = 3          # default for single-target (backward compat)
     PER_VIEW_CH = 11       # latent(4) + plucker(6) + mask(1)
@@ -168,66 +167,6 @@ class PoseSD(nn.Module):
         return pred.view(batch_size, self.NUM_VIEWS, *pred.shape[1:])[:, target_slot]
 
     # ------------------------------------------------------------------
-    # View packing (multi-target)
-    # ------------------------------------------------------------------
-
-    def _pack_views_multi(
-        self,
-        ref_latents: list[torch.Tensor],     # n_refs x (B, 4, h, w)
-        ref_pluckers: list[torch.Tensor],    # n_refs x (B, 6, h, w)
-        ref_keeps: list[torch.Tensor],       # n_refs x (B,) bool
-        tgt_latents: list[torch.Tensor],     # n_tgts x (B, 4, h, w) — noised
-        tgt_pluckers: list[torch.Tensor],    # n_tgts x (B, 6, h, w)
-        slot_perm: list[int] | None = None,
-    ) -> tuple[torch.Tensor, list[int], int]:
-        """Pack variable views into (B*V, 11, h, w).
-
-        Layout before permutation: [tgt0, tgt1, ..., ref0, ref1, ...]
-
-        Returns:
-            packed: (B*V, 11, h, w)
-            tgt_slots: list of slot indices containing targets (after perm)
-            n_views: total view count
-        """
-        n_tgts = len(tgt_latents)
-        n_refs = len(ref_latents)
-        n_views = n_tgts + n_refs
-
-        b, _, h, w = tgt_latents[0].shape
-        dtype = tgt_latents[0].dtype
-        device = tgt_latents[0].device
-
-        views: list[torch.Tensor] = []
-
-        # Target views: mask=0
-        for lat, pl in zip(tgt_latents, tgt_pluckers):
-            m = torch.zeros((b, 1, h, w), device=device, dtype=dtype)
-            views.append(torch.cat([lat, pl, m], dim=1))
-
-        # Reference views: mask=1 (modulated by keep)
-        for lat, pl, keep in zip(ref_latents, ref_pluckers, ref_keeps):
-            k = keep.to(device=device, dtype=dtype).view(b, 1, 1, 1)
-            m = torch.ones((b, 1, h, w), device=device, dtype=dtype) * k
-            views.append(torch.cat([lat * k, pl * k, m], dim=1))
-
-        # Before permutation, targets are at indices [0, ..., n_tgts-1]
-        if slot_perm is not None:
-            ordered = [views[slot_perm[i]] for i in range(n_views)]
-            # Find where each original target index ended up
-            inv = [0] * n_views
-            for new_pos, old_idx in enumerate(slot_perm):
-                inv[old_idx] = new_pos
-            tgt_slots = [inv[i] for i in range(n_tgts)]
-        else:
-            ordered = views
-            tgt_slots = list(range(n_tgts))
-
-        packed = torch.stack(ordered, dim=1).reshape(
-            b * n_views, self.PER_VIEW_CH, h, w,
-        )
-        return packed, tgt_slots, n_views
-
-    # ------------------------------------------------------------------
     # Conditioning dropout
     # ------------------------------------------------------------------
 
@@ -274,10 +213,7 @@ class PoseSD(nn.Module):
         both_dropped: float = 0.05,
         randomize_slots: bool = True,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Single-target training step (backward compatible)."""
-        # Ensure cross-view attention is set for 3 views
-        self.cross_view_attention.set_num_views(self.NUM_VIEWS, self.unet)
-
+        """Single-target training step."""
         ref1_img = batch["ref1_img"].to(self.device)
         ref2_img = batch["ref2_img"].to(self.device)
         target_img = batch["target_img"].to(self.device)
@@ -317,91 +253,6 @@ class PoseSD(nn.Module):
             "n_both_kept": int((ref1_keep & ref2_keep).sum()),
             "n_one_dropped": int((ref1_keep ^ ref2_keep).sum()),
             "n_both_dropped": int((~ref1_keep & ~ref2_keep).sum()),
-            "n_targets": 1,
-        }
-
-        return loss, meta
-
-    def training_step_multi(
-        self,
-        ref_imgs: list[torch.Tensor],       # n_refs x (B, 3, H, W)
-        ref_pluckers: list[torch.Tensor],    # n_refs x (B, 6, h, w)
-        tgt_imgs: list[torch.Tensor],        # n_tgts x (B, 3, H, W)
-        tgt_pluckers: list[torch.Tensor],    # n_tgts x (B, 6, h, w)
-        *,
-        both_kept: float = 0.85,
-        one_dropped: float = 0.10,
-        both_dropped: float = 0.05,
-        randomize_slots: bool = True,
-    ) -> tuple[torch.Tensor, dict]:
-        """Multi-target training step. All targets share the same timestep
-        and the same reference views. Loss is averaged over all target views."""
-        n_refs = len(ref_imgs)
-        n_tgts = len(tgt_imgs)
-        n_views = n_refs + n_tgts
-        b = tgt_imgs[0].shape[0]
-
-        # Set cross-view attention for this view count
-        self.cross_view_attention.set_num_views(n_views, self.unet)
-
-        # Encode
-        ref_lats = [self.encode_image(r.to(self.device)) for r in ref_imgs]
-        tgt_lats_clean = [self.encode_image(t.to(self.device)) for t in tgt_imgs]
-        ref_pls = [p.to(self.device) for p in ref_pluckers]
-        tgt_pls = [p.to(self.device) for p in tgt_pluckers]
-
-        # Shared timestep across all targets in the same example
-        timesteps = torch.randint(
-            0, self.scheduler.config.num_train_timesteps, (b,),
-            device=self.device, dtype=torch.long,
-        )
-
-        # Noise each target independently
-        noises = [torch.randn_like(l) for l in tgt_lats_clean]
-        tgt_lats_noisy = [
-            self.scheduler.add_noise(c, n, timesteps)
-            for c, n in zip(tgt_lats_clean, noises)
-        ]
-
-        text_emb = self.null_text_emb.expand(b, -1, -1)
-
-        # Cond dropout (same masks for all targets within an example)
-        ref1_keep, ref2_keep = self.sample_cond_dropout(
-            b, self.device, both_kept, one_dropped, both_dropped,
-        )
-        ref_keeps = [ref1_keep, ref2_keep][:n_refs]
-
-        # Slot permutation
-        if randomize_slots and self.training:
-            slot_perm = torch.randperm(n_views).tolist()
-        else:
-            slot_perm = None
-
-        packed, tgt_slots, _ = self._pack_views_multi(
-            ref_lats, ref_pls, ref_keeps,
-            tgt_lats_noisy, tgt_pls,
-            slot_perm=slot_perm,
-        )
-
-        # Forward
-        t_expanded = timesteps.repeat_interleave(n_views)
-        te_expanded = text_emb.repeat_interleave(n_views, dim=0)
-        pred_all = self.unet(packed, t_expanded, encoder_hidden_states=te_expanded).sample
-        pred_all = pred_all.view(b, n_views, *pred_all.shape[1:])
-
-        # Loss on target slots only
-        tgt_preds = torch.stack([pred_all[:, s] for s in tgt_slots], dim=1)
-        tgt_noise = torch.stack(noises, dim=1)
-        loss = F.mse_loss(tgt_preds.float(), tgt_noise.float())
-
-        # Reset cross-view attention to default
-        self.cross_view_attention.set_num_views(self.NUM_VIEWS, self.unet)
-
-        meta = {
-            "n_both_kept": int((ref1_keep & (ref2_keep if n_refs > 1 else ref1_keep)).sum()),
-            "n_one_dropped": int((ref1_keep ^ (ref2_keep if n_refs > 1 else ref1_keep)).sum()),
-            "n_both_dropped": int((~ref1_keep & (~ref2_keep if n_refs > 1 else ~ref1_keep)).sum()),
-            "n_targets": n_tgts,
         }
 
         return loss, meta
@@ -417,9 +268,7 @@ class PoseSD(nn.Module):
         pl_ref1: torch.Tensor, pl_ref2: torch.Tensor, pl_tgt: torch.Tensor,
         prompt: str = "", num_steps: int = 50, cfg_scale: float = 4.0, seed: int = 42,
     ) -> torch.Tensor:
-        """Single-target inference (unchanged)."""
-        self.cross_view_attention.set_num_views(self.NUM_VIEWS, self.unet)
-
+        """Single-target inference."""
         ref1_lat = self.encode_image(ref1_img.to(self.device))
         ref2_lat = self.encode_image(ref2_img.to(self.device))
         pl_ref1 = pl_ref1.to(self.device)

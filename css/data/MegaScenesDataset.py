@@ -219,19 +219,9 @@ class MegaScenesDataset(Dataset):
         for t in self.records:
             self.bucket_counts[t.difficulty.value] += 1
 
-        # Build ref-pair groups for multi-target training
-        # Key: (scene_name, ref1_name, ref2_name) → list of record indices
-        self._ref_pair_groups: dict[tuple[str, str, str], list[int]] = {}
-        for i, rec in enumerate(self.records):
-            key = (rec.scene_name, rec.ref1_name, rec.ref2_name)
-            self._ref_pair_groups.setdefault(key, []).append(i)
-
         if self.records:
-            n_groups = len(self._ref_pair_groups)
-            avg_per_group = len(self.records) / max(1, n_groups)
             print(f"MegaScenesDataset: {len(self.records)} records "
-                  f"from {len(scene_dirs)} scenes "
-                  f"({n_groups} ref-pair groups, avg {avg_per_group:.1f}/group)")
+                  f"from {len(scene_dirs)} scenes")
             for d in Difficulty:
                 c = self.bucket_counts[d.value]
                 pct = c / len(self.records) * 100
@@ -246,30 +236,6 @@ class MegaScenesDataset(Dataset):
         for i, t in enumerate(self.records):
             indices[t.difficulty].append(i)
         return indices
-
-    def get_compatible_targets(self, idx: int, max_extra: int = 3) -> list[int]:
-        """Get indices of other records sharing the same ref pair (different target).
-
-        Returns up to max_extra indices, excluding idx itself and records
-        with the same target image. Shuffled for variety.
-        """
-        rec = self.records[idx]
-        key = (rec.scene_name, rec.ref1_name, rec.ref2_name)
-        group = self._ref_pair_groups.get(key, [])
-        others = [i for i in group if i != idx
-                  and self.records[i].target_name != rec.target_name]
-        random.shuffle(others)
-        return others[:max_extra]
-
-    def load_target_only(self, idx: int) -> dict:
-        """Load only target image and plucker for a record (skip refs)."""
-        rec = self.records[idx]
-        target_img, _, _ = load_image_tensor(
-            rec.images_dir, rec.target_name, self.H, self.W)
-        plucker_tgt = compute_plucker_tensor(
-            rec.ref1_c2w, rec.tgt_c2w, rec.K_tgt,
-            self.H, self.W, self.latent_h, self.latent_w)
-        return {"target_img": target_img, "plucker_tgt": plucker_tgt}
 
     # ---- target-centric mining ----------------------------------------
 

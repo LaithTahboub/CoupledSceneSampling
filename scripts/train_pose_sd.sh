@@ -5,9 +5,9 @@
 #SBATCH --job-name=css-pose-sd
 #SBATCH --partition=vulcan-scavenger
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=256gb
-#SBATCH --gres=gpu:rtxa6000:8
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=128gb
+#SBATCH --gres=gpu:rtxa6000:4
 #SBATCH --account=vulcan-jbhuang
 #SBATCH --qos=vulcan-scavenger
 #SBATCH --time=3-0:00:00
@@ -20,7 +20,7 @@ ROOT="/vulcanscratch/ltahboub/CoupledSceneSampling"
 SCENES_FILE=${SCENES_FILE:-"$ROOT/MegaScenes/scenes_colmap_ready.txt"}
 SCENES=${SCENES:-}
 
-OUTPUT=${OUTPUT:-$ROOT/checkpoints/pose_sd_v3}
+OUTPUT=${OUTPUT:-$ROOT/checkpoints/pose_sd_v2}
 SEED=${SEED:-42}
 
 # --- Training ---
@@ -66,19 +66,15 @@ KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-5}
 VAL_SAMPLE_STEPS=${VAL_SAMPLE_STEPS:-50}
 VAL_CFG_SCALE=${VAL_CFG_SCALE:-3.0}
 
-# --- Multi-target training ---
-MULTI_TARGET_PROB=${MULTI_TARGET_PROB:-0.0}
-MAX_TARGETS=${MAX_TARGETS:-3}
-
 # --- EMA ---
 EMA_DECAY=${EMA_DECAY:-0.9999}
 
 # --- Multi-GPU ---
-NUM_GPUS=${NUM_GPUS:-8}
+NUM_GPUS=${NUM_GPUS:-4}
 NUM_WORKERS=${NUM_WORKERS:-4}
 
 # Resume
-RESUME=${RESUME:-}
+RESUME=${RESUME:-/vulcanscratch/ltahboub/CoupledSceneSampling/checkpoints/pose_sd_v2/unet_latest.pt}
 
 if [[ -f "$ROOT/.venv/bin/activate" ]]; then
     source "$ROOT/.venv/bin/activate"
@@ -121,8 +117,6 @@ ARGS=(
     --val-sample-steps "$VAL_SAMPLE_STEPS"
     --val-cfg-scale "$VAL_CFG_SCALE"
     --ema-decay "$EMA_DECAY"
-    --multi-target-prob "$MULTI_TARGET_PROB"
-    --max-targets "$MAX_TARGETS"
     --H "$H"
     --W "$W"
     --num-workers "$NUM_WORKERS"

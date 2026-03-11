@@ -87,6 +87,12 @@ def _infer_epoch_step_from_name(path: Path) -> tuple[int, int]:
     return epoch, step
 
 
+def _unwrap_unet(model):
+    """Get the raw UNet module, stripping DDP / FSDP wrappers."""
+    unet = model.unet
+    return unet.module if hasattr(unet, "module") else unet
+
+
 def load_pose_sd_checkpoint(
     model,
     ckpt_path: str | Path,
@@ -99,7 +105,8 @@ def load_pose_sd_checkpoint(
     ckpt_path = Path(ckpt_path)
     raw = torch.load(ckpt_path, map_location=device)
     unet_state = _strip_module_prefix(_extract_unet_state(raw))
-    model.unet.load_state_dict(unet_state, strict=strict)
+    # Always load into the unwrapped module (DDP adds module. prefix)
+    _unwrap_unet(model).load_state_dict(unet_state, strict=strict)
 
     epoch, global_step = _infer_epoch_step_from_name(ckpt_path)
     if isinstance(raw, dict):
@@ -131,7 +138,7 @@ def save_pose_sd_checkpoint(
         "format_version": 1,
         "epoch": int(epoch),
         "global_step": int(global_step),
-        "unet": model.unet.state_dict(),
+        "unet": _unwrap_unet(model).state_dict(),
         "optimizer": optimizer.state_dict() if optimizer is not None else None,
         "lr_scheduler": lr_scheduler.state_dict() if lr_scheduler is not None else None,
         "ema": ema.state_dict() if ema is not None else None,
