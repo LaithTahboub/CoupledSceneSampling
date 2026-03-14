@@ -92,7 +92,7 @@ MEDIUM_MAX_DIST = 0.40
 # Load model once
 from css.models.pose_sd import PoseSD
 from css.models.EMA import load_pose_sd_checkpoint
-from css.scene_sampling import load_scene_pools, build_single_sample, build_comparison_grid, to_uint8
+from css.inference.scene_sampling import load_scene_pools, build_single_sample, build_comparison_grid, to_uint8
 from css.data.iou import compute_covisibility
 
 print('Loading model...')

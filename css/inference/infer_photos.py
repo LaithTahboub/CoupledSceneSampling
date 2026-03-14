@@ -25,7 +25,7 @@ from PIL import Image
 from css.data.dataset import compute_plucker_tensor
 from css.models.EMA import load_pose_sd_checkpoint
 from css.models.pose_sd import PoseSD
-from css.scene_sampling import plucker_to_rgb, to_uint8
+from css.inference.scene_sampling import plucker_to_rgb, to_uint8
 
 DIRECTIONS = {
     "left": np.array([-1, 0, 0], dtype=np.float64),

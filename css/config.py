@@ -1,6 +1,5 @@
-"""Training configuration for PoseSD.
-
-Centralized config dataclasses for model, data, training, and validation.
+"""
+Training configuration for PoseSD.
 """
 
 from __future__ import annotations
@@ -109,9 +108,9 @@ class TrainConfig:
     keep_checkpoints: int = 5
 
     # Validation
-    val_every_steps: int = 5_000
+    val_every_steps: int = 3_000
     val_sample_steps: int = 50
-    val_cfg_scale: float = 4.0
+    val_cfg_scale: float = 3.0
 
     # Misc
     seed: int = 42
@@ -128,7 +127,7 @@ class TrainConfig:
     wandb_mode: str = "online"
 
     # Paths
-    output_dir: str = "checkpoints/pose_sd_v2"
+    output_dir: str = "checkpoints/pose_sd_vn"
     scenes_file: str | None = None
     scenes: list[str] = field(default_factory=list)
     split_dir: str | None = None

@@ -1,10 +1,3 @@
-"""
-Coupled Scene Sampling (CSS)
-
-Couples SEVA (multi-view diffusion) with a pose-conditioned SD model
-for geometrically consistent, prompt-following scene generation.
-"""
-
 import sys
 from pathlib import Path
 

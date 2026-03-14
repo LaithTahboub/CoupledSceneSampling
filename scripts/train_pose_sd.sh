@@ -142,4 +142,4 @@ fi
 torchrun \
     --nproc_per_node="$NUM_GPUS" \
     --master_port="${MASTER_PORT:-29500}" \
-    -m css.train_pose_sd "${ARGS[@]}"
+    -m css.train.train_pose_sd "${ARGS[@]}"

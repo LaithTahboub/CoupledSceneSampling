@@ -32,7 +32,7 @@ from css.config import DataConfig, TrainConfig
 from css.data.MegaScenesDataset import Difficulty, MegaScenesDataset, SceneRecord
 from css.models.EMA import EMAModel, load_pose_sd_checkpoint, save_pose_sd_checkpoint
 from css.models.pose_sd import PoseSD
-from css.validation import ValMetrics, run_validation, to_uint8
+from css.train.validation import ValMetrics, run_validation, to_uint8
 
 try:
     import wandb

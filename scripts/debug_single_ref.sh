@@ -84,4 +84,4 @@ else
     exit 1
 fi
 
-uv run -m css.debug_single_ref_experiment "${ARGS[@]}"
+uv run -m css.train.debug_single_ref_experiment "${ARGS[@]}"

@@ -9,7 +9,7 @@ from PIL import Image
 
 from css.models.EMA import load_pose_sd_checkpoint
 from css.models.pose_sd import PoseSD
-from css.scene_sampling import (
+from css.inference.scene_sampling import (
     build_comparison_grid,
     build_single_sample,
     find_best_references,

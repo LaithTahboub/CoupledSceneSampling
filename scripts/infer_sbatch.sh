@@ -96,7 +96,7 @@ run_one() {
         args+=(--target "$target")
     fi
     echo "=> $out_name"
-    python -m css.sample "${args[@]}"
+    python -m css.inference.sample "${args[@]}"
 }
 
 case "$MODE" in
