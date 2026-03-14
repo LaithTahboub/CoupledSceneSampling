@@ -6,6 +6,12 @@ Usage:
         --checkpoint checkpoints/unet_final.pt \
         --direction right --distance 0.3 \
         --prompt "a photo of a building"
+
+Usage (real target image — DUSt3R estimates all 3 poses):
+    python -m css.infer_photos \
+        --ref1 photo1.jpg --ref2 photo2.jpg --target photo3.jpg \
+        --checkpoint checkpoints/unet_final.pt \
+        --prompt "a photo of a building"
 """
 
 import argparse
@@ -72,7 +78,8 @@ def load_and_preprocess(path: str, H: int, W: int) -> tuple[torch.Tensor, int, i
     return tensor, orig_w, orig_h
 
 
-def run_dust3r(ref1_path: str, ref2_path: str) -> tuple[np.ndarray, np.ndarray]:
+def run_dust3r(image_paths: list[str]) -> tuple[np.ndarray, np.ndarray]:
+    """Run DUSt3R on a list of image paths and return intrinsics and c2ws."""
     dust3r_root = str(Path(__file__).resolve().parent.parent / "stable-virtual-camera" / "third_party" / "dust3r")
     if dust3r_root not in sys.path:
         sys.path.insert(0, dust3r_root)
@@ -81,9 +88,9 @@ def run_dust3r(ref1_path: str, ref2_path: str) -> tuple[np.ndarray, np.ndarray]:
 
     print("Loading DUSt3R model...")
     pipeline = Dust3rPipeline(device="cuda")
-    print("Running pose estimation...")
+    print(f"Running pose estimation on {len(image_paths)} images...")
     _imgs, Ks, c2ws, _pts, _colors = pipeline.infer_cameras_and_points(
-        [ref1_path, ref2_path], niter=300,
+        image_paths, niter=300,
     )
     return Ks, c2ws
 
@@ -92,6 +99,7 @@ def main():
     p = argparse.ArgumentParser(description="Novel view from two photos via DUSt3R + PoseSD")
     p.add_argument("--ref1", required=True)
     p.add_argument("--ref2", required=True)
+    p.add_argument("--target", default=None, help="Target image path (DUSt3R estimates pose for all 3)")
     p.add_argument("--checkpoint", required=True, help="UNet checkpoint (.pt)")
     p.add_argument("--direction", default="right", choices=list(DIRECTIONS.keys()))
     p.add_argument("--distance", type=float, default=0.3, help="Offset as fraction of DUSt3R baseline")
@@ -113,7 +121,13 @@ def main():
     H, W = args.H, args.W
     latent_h, latent_w = H // 8, W // 8
 
-    Ks, c2ws = run_dust3r(args.ref1, args.ref2)
+    has_target = args.target is not None
+
+    if has_target:
+        Ks, c2ws = run_dust3r([args.ref1, args.ref2, args.target])
+    else:
+        Ks, c2ws = run_dust3r([args.ref1, args.ref2])
+
     c2w_ref1 = c2ws[0].astype(np.float64)
     c2w_ref2 = c2ws[1].astype(np.float64)
 
@@ -126,20 +140,26 @@ def main():
     K_ref1 = adjust_K(Ks[0].astype(np.float64), w1, h1, W, H).astype(np.float32)
     K_ref2 = adjust_K(Ks[1].astype(np.float64), w2, h2, W, H).astype(np.float32)
 
-    anchor_idx = 0 if args.anchor == "ref1" else 1
-    anchor_c2w = c2ws[anchor_idx].astype(np.float64)
-    delta = args.distance * baseline if baseline > 1e-9 else args.distance
+    if has_target:
+        target_tensor, wt, ht = load_and_preprocess(args.target, H, W)
+        target_c2w = c2ws[2].astype(np.float64)
+        K_tgt = adjust_K(Ks[2].astype(np.float64), wt, ht, W, H).astype(np.float32)
+    else:
+        target_tensor = None
+        anchor_idx = 0 if args.anchor == "ref1" else 1
+        anchor_c2w = c2ws[anchor_idx].astype(np.float64)
+        delta = args.distance * baseline if baseline > 1e-9 else args.distance
 
-    local_dir = DIRECTIONS[args.direction].copy()
-    if args.flip_y:
-        local_dir[1] *= -1.0
-    if args.flip_z:
-        local_dir[2] *= -1.0
-    offset_world = anchor_c2w[:3, :3] @ (local_dir * delta)
+        local_dir = DIRECTIONS[args.direction].copy()
+        if args.flip_y:
+            local_dir[1] *= -1.0
+        if args.flip_z:
+            local_dir[2] *= -1.0
+        offset_world = anchor_c2w[:3, :3] @ (local_dir * delta)
 
-    target_c2w = anchor_c2w.copy()
-    target_c2w[:3, 3] += offset_world
-    K_tgt = (K_ref1 if anchor_idx == 0 else K_ref2).copy()
+        target_c2w = anchor_c2w.copy()
+        target_c2w[:3, 3] += offset_world
+        K_tgt = (K_ref1 if anchor_idx == 0 else K_ref2).copy()
 
     plucker_ref1 = compute_plucker_tensor(c2w_ref1, c2w_ref1, K_ref1, H, W, latent_h, latent_w)
     plucker_ref2 = compute_plucker_tensor(c2w_ref1, c2w_ref2, K_ref2, H, W, latent_h, latent_w)
@@ -167,19 +187,40 @@ def main():
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    img_row = np.concatenate([to_uint8(ref1_tensor), to_uint8(ref2_tensor), to_uint8(generated[0])], axis=1)
-    if args.show_pluckers:
-        pl_row = np.concatenate([
-            plucker_to_rgb(plucker_ref1, H, W),
-            plucker_to_rgb(plucker_ref2, H, W),
-            plucker_to_rgb(plucker_tgt, H, W),
+    if has_target:
+        img_row = np.concatenate([
+            to_uint8(ref1_tensor), to_uint8(ref2_tensor),
+            to_uint8(target_tensor), to_uint8(generated[0]),
         ], axis=1)
-        grid = np.concatenate([img_row, pl_row], axis=0)
+        if args.show_pluckers:
+            blank = np.zeros((H, W, 3), dtype=np.uint8)
+            pl_row = np.concatenate([
+                plucker_to_rgb(plucker_ref1, H, W),
+                plucker_to_rgb(plucker_ref2, H, W),
+                plucker_to_rgb(plucker_tgt, H, W),
+                blank,
+            ], axis=1)
+            grid = np.concatenate([img_row, pl_row], axis=0)
+        else:
+            grid = img_row
+        label = "[Ref1 | Ref2 | GT | Generated]"
     else:
-        grid = img_row
+        img_row = np.concatenate([
+            to_uint8(ref1_tensor), to_uint8(ref2_tensor), to_uint8(generated[0]),
+        ], axis=1)
+        if args.show_pluckers:
+            pl_row = np.concatenate([
+                plucker_to_rgb(plucker_ref1, H, W),
+                plucker_to_rgb(plucker_ref2, H, W),
+                plucker_to_rgb(plucker_tgt, H, W),
+            ], axis=1)
+            grid = np.concatenate([img_row, pl_row], axis=0)
+        else:
+            grid = img_row
+        label = "[Ref1 | Ref2 | Generated]"
 
     Image.fromarray(grid).save(out_path)
-    print(f"Saved: {out_path}  [Ref1 | Ref2 | Generated]")
+    print(f"Saved: {out_path}  {label}")
 
 
 if __name__ == "__main__":

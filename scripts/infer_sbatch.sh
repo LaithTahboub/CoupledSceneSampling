@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-# Inference from a PoseSD checkpoint.
+#!/bin/bash
+# Inference from a PoseSD checkpoint (sbatch version).
 #
 # Modes (set MODE=):
 #   triplet  - Single scene + target (default), auto-select refs
@@ -9,12 +9,24 @@
 #   targets  - All withheld targets from split_info.json
 #
 # Examples:
-#   MODE=triplet SCENE=/path/to/scene TARGET=image.jpg ./scripts/infer.sh
-#   MODE=images SCENE=/path/to/scene REF1=img1.jpg REF2=img2.jpg TARGET=img3.jpg ./scripts/infer.sh
-#   MODE=photos REF1=photo1.jpg REF2=photo2.jpg TARGET=photo3.jpg ./scripts/infer.sh
-#   MODE=photos REF1=photo1.jpg REF2=photo2.jpg DIRECTION=right DISTANCE=0.3 ./scripts/infer.sh
-#   MODE=scenes SPLIT_DIR=splits/pose_sd_seed42 NUM=5 ./scripts/infer.sh
-#   MODE=targets SPLIT_DIR=splits/pose_sd_seed42 NUM=10 ./scripts/infer.sh
+#   MODE=triplet SCENE=/path/to/scene TARGET=image.jpg sbatch scripts/infer_sbatch.sh
+#   MODE=images SCENE=/path/to/scene REF1=img1.jpg REF2=img2.jpg TARGET=img3.jpg sbatch scripts/infer_sbatch.sh
+#   MODE=photos REF1=photo1.jpg REF2=photo2.jpg TARGET=photo3.jpg sbatch scripts/infer_sbatch.sh
+#   MODE=photos REF1=photo1.jpg REF2=photo2.jpg DIRECTION=right DISTANCE=0.3 sbatch scripts/infer_sbatch.sh
+#   MODE=scenes SPLIT_DIR=splits/pose_sd_seed42 NUM=5 sbatch scripts/infer_sbatch.sh
+#   MODE=targets SPLIT_DIR=splits/pose_sd_seed42 NUM=10 sbatch scripts/infer_sbatch.sh
+
+#SBATCH --job-name=css-infer
+#SBATCH --partition=vulcan-ampere
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=48gb
+#SBATCH --gres=gpu:rtxa6000:1
+#SBATCH --account=vulcan-jbhuang
+#SBATCH --qos=vulcan-medium
+#SBATCH --time=1-0:00:00
+#SBATCH --output=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/infer_%j.out
+#SBATCH --error=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/infer_%j.err
 
 set -euo pipefail
 
@@ -46,8 +58,8 @@ CFG_SCALE=${CFG_SCALE:-3.0}
 MIN_COVISIBILITY=${MIN_COVISIBILITY:-0.15}
 MAX_COVISIBILITY=${MAX_COVISIBILITY:-0.80}
 MIN_DISTANCE=${MIN_DISTANCE:-0.2}
-H=${H:-512}
-W=${W:-512}
+H=${H:-256}
+W=${W:-256}
 SEED=${SEED:-42}
 SHOW_PLUCKERS=${SHOW_PLUCKERS:-0}
 
@@ -57,6 +69,7 @@ if [[ -f "$ROOT/.venv/bin/activate" ]]; then
     source "$ROOT/.venv/bin/activate"
 fi
 cd "$ROOT"
+mkdir -p logs
 
 [[ -f "$CHECKPOINT" ]] || { echo "Checkpoint not found: $CHECKPOINT"; exit 1; }
 mkdir -p "$OUT_DIR"

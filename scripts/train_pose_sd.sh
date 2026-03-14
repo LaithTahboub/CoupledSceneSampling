@@ -6,8 +6,8 @@
 #SBATCH --partition=vulcan-scavenger
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=128gb
-#SBATCH --gres=gpu:rtxa6000:4
+#SBATCH --mem=100gb
+#SBATCH --gres=gpu:rtxa6000:2
 #SBATCH --account=vulcan-jbhuang
 #SBATCH --qos=vulcan-scavenger
 #SBATCH --time=3-0:00:00
@@ -20,12 +20,12 @@ ROOT="/vulcanscratch/ltahboub/CoupledSceneSampling"
 SCENES_FILE=${SCENES_FILE:-"$ROOT/MegaScenes/scenes_colmap_ready.txt"}
 SCENES=${SCENES:-}
 
-OUTPUT=${OUTPUT:-$ROOT/checkpoints/pose_sd_v2}
+OUTPUT=${OUTPUT:-$ROOT/checkpoints/pose_sd_v4}
 SEED=${SEED:-42}
 
 # --- Training ---
 TOTAL_STEPS=${TOTAL_STEPS:-200000}
-PER_GPU_BATCH_SIZE=${PER_GPU_BATCH_SIZE:-4}
+PER_GPU_BATCH_SIZE=${PER_GPU_BATCH_SIZE:-2}
 GRAD_ACCUM=${GRAD_ACCUM:-4}
 # Effective batch size: 2 * 8 GPUs * 8 accum = 128
 LR=${LR:-1e-4}
@@ -60,8 +60,8 @@ TEST_TARGETS_PER_SCENE=${TEST_TARGETS_PER_SCENE:-1}
 SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/pose_sd_seed${SEED}}
 
 # --- Checkpoints & validation ---
-SAVE_EVERY=${SAVE_EVERY:-10000}
-VAL_EVERY=${VAL_EVERY:-5000}
+SAVE_EVERY=${SAVE_EVERY:-8000}
+VAL_EVERY=${VAL_EVERY:-3000}
 KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-5}
 VAL_SAMPLE_STEPS=${VAL_SAMPLE_STEPS:-50}
 VAL_CFG_SCALE=${VAL_CFG_SCALE:-3.0}
@@ -70,11 +70,11 @@ VAL_CFG_SCALE=${VAL_CFG_SCALE:-3.0}
 EMA_DECAY=${EMA_DECAY:-0.9999}
 
 # --- Multi-GPU ---
-NUM_GPUS=${NUM_GPUS:-4}
+NUM_GPUS=${NUM_GPUS:-2}
 NUM_WORKERS=${NUM_WORKERS:-4}
 
 # Resume
-RESUME=${RESUME:-/vulcanscratch/ltahboub/CoupledSceneSampling/checkpoints/pose_sd_v2/unet_latest.pt}
+RESUME=${RESUME:-/vulcanscratch/ltahboub/CoupledSceneSampling/checkpoints/pose_sd_v2/unet_step_70000.pt}
 
 if [[ -f "$ROOT/.venv/bin/activate" ]]; then
     source "$ROOT/.venv/bin/activate"

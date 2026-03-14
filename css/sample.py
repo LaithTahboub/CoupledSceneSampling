@@ -7,10 +7,6 @@ import numpy as np
 import torch
 from PIL import Image
 
-from css.data.dataset import (
-    clean_scene_prompt_name,
-    read_scene_prompt_name,
-)
 from css.models.EMA import load_pose_sd_checkpoint
 from css.models.pose_sd import PoseSD
 from css.scene_sampling import (
@@ -27,9 +23,11 @@ def main():
     parser.add_argument("--checkpoint", required=True, help="Path to UNet checkpoint (.pt file)")
     parser.add_argument("--scene", required=True, help="Scene directory")
     parser.add_argument("--target", type=str, default=None, help="Target image name (or random if not set)")
+    parser.add_argument("--ref1", type=str, default=None, help="Ref1 image name (skip auto-selection)")
+    parser.add_argument("--ref2", type=str, default=None, help="Ref2 image name (skip auto-selection)")
     parser.add_argument("--prompt", default=None, help="Text prompt (auto-generated from scene name if not set)")
     parser.add_argument("--num-steps", type=int, default=50)
-    parser.add_argument("--cfg-scale", type=float, default=4.0)
+    parser.add_argument("--cfg-scale", type=float, default=3.0)
     parser.add_argument("--min-covisibility", type=float, default=0.15)
     parser.add_argument("--max-covisibility", type=float, default=0.80)
     parser.add_argument("--min-distance", type=float, default=0.20)
@@ -45,11 +43,10 @@ def main():
     torch.manual_seed(args.seed)
 
     scene_dir = Path(args.scene)
-    if args.prompt is None:
-        scene_text = clean_scene_prompt_name(read_scene_prompt_name(scene_dir))
-        prompt = f"a photo of {scene_text}"
-    else:
-        prompt = args.prompt
+    # Model was trained with empty-string text conditioning, so default to ""
+    # to match training distribution. A non-empty prompt will act as novel
+    # conditioning that the model never saw, which can degrade quality.
+    prompt = args.prompt if args.prompt is not None else ""
 
     print("Loading model...")
     model = PoseSD()
@@ -70,23 +67,40 @@ def main():
     if len(reference_images) < 2:
         raise ValueError("Need at least 2 reference images")
 
+    seen = set()
+    all_images = []
+    for img in target_images + reference_images:
+        if img.name not in seen:
+            seen.add(img.name)
+            all_images.append(img)
+
+    def _find_image(name: str, pool: list) -> "ImageData":
+        matches = [img for img in pool if img.name == name or Path(img.name).name == name]
+        if not matches:
+            raise ValueError(f"Image '{name}' not found in scene")
+        return matches[0]
+
     # Select target
     if args.target is not None:
-        matches = [img for img in target_images if img.name == args.target or Path(img.name).name == args.target]
-        if not matches:
-            raise ValueError(f"Target '{args.target}' not found in scene")
-        target_img = matches[0]
+        target_img = _find_image(args.target, target_images)
     else:
         target_img = target_images[np.random.randint(0, len(target_images))]
 
     print(f"Target: {target_img.name}")
 
-    ref1_img, ref2_img = find_best_references(
-        target_img, reference_images,
-        min_covisibility=args.min_covisibility,
-        max_covisibility=args.max_covisibility,
-        min_distance=args.min_distance,
-    )
+    # Select references
+    if args.ref1 is not None and args.ref2 is not None:
+        ref1_img = _find_image(args.ref1, all_images)
+        ref2_img = _find_image(args.ref2, all_images)
+    elif args.ref1 is not None or args.ref2 is not None:
+        raise ValueError("Provide both --ref1 and --ref2, or neither")
+    else:
+        ref1_img, ref2_img = find_best_references(
+            target_img, reference_images,
+            min_covisibility=args.min_covisibility,
+            max_covisibility=args.max_covisibility,
+            min_distance=args.min_distance,
+        )
     print(f"Refs: {ref1_img.name}, {ref2_img.name}")
 
     sample = build_single_sample(cameras, images_dir, ref1_img, ref2_img, target_img, args.H, args.W)
