@@ -104,12 +104,13 @@ def main():
     p.add_argument("--direction", default="right", choices=list(DIRECTIONS.keys()))
     p.add_argument("--distance", type=float, default=0.3, help="Offset as fraction of DUSt3R baseline")
     p.add_argument("--anchor", default="ref1", choices=["ref1", "ref2"])
-    p.add_argument("--prompt", default="a photo of a scene")
+    p.add_argument("--prompt", default="")
     p.add_argument("--output", default="output.png")
-    p.add_argument("--cfg-scale", type=float, default=4.0)
+    p.add_argument("--cfg-scale", type=float, default=3.0)    
+    p.add_argument("--num-samples", type=int, default=3)
     p.add_argument("--num-steps", type=int, default=50)
-    p.add_argument("--H", type=int, default=512)
-    p.add_argument("--W", type=int, default=512)
+    p.add_argument("--H", type=int, default=256)
+    p.add_argument("--W", type=int, default=256)
     p.add_argument("--show-pluckers", action="store_true")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--flip-y", action="store_true")
@@ -169,58 +170,61 @@ def main():
     model = PoseSD()
     load_pose_sd_checkpoint(model, args.checkpoint, model.device)
     model.eval()
+    
+    for sample_idx in range(args.num_samples):
+        print(f"Generating ({args.num_steps} steps, cfg={args.cfg_scale})...")
+        with torch.inference_mode():
+            generated = model.sample(
+                ref1_img=ref1_tensor.unsqueeze(0),
+                ref2_img=ref2_tensor.unsqueeze(0),
+                pl_ref1=plucker_ref1.unsqueeze(0),
+                pl_ref2=plucker_ref2.unsqueeze(0),
+                pl_tgt=plucker_tgt.unsqueeze(0),
+                prompt=args.prompt,
+                num_steps=args.num_steps,
+                cfg_scale=args.cfg_scale,
+                seed=args.seed + sample_idx,
+            )
 
-    print(f"Generating ({args.num_steps} steps, cfg={args.cfg_scale})...")
-    with torch.inference_mode():
-        generated = model.sample(
-            ref1_img=ref1_tensor.unsqueeze(0),
-            ref2_img=ref2_tensor.unsqueeze(0),
-            pl_ref1=plucker_ref1.unsqueeze(0),
-            pl_ref2=plucker_ref2.unsqueeze(0),
-            pl_tgt=plucker_tgt.unsqueeze(0),
-            prompt=args.prompt,
-            num_steps=args.num_steps,
-            cfg_scale=args.cfg_scale,
-            seed=args.seed,
-        )
+        out_base = Path(args.output)
+        out_path = out_base.with_name(f"{out_base.stem}{sample_idx}{out_base.suffix}")
+        
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    out_path = Path(args.output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if has_target:
-        img_row = np.concatenate([
-            to_uint8(ref1_tensor), to_uint8(ref2_tensor),
-            to_uint8(target_tensor), to_uint8(generated[0]),
-        ], axis=1)
-        if args.show_pluckers:
-            blank = np.zeros((H, W, 3), dtype=np.uint8)
-            pl_row = np.concatenate([
-                plucker_to_rgb(plucker_ref1, H, W),
-                plucker_to_rgb(plucker_ref2, H, W),
-                plucker_to_rgb(plucker_tgt, H, W),
-                blank,
+        if has_target:
+            img_row = np.concatenate([
+                to_uint8(ref1_tensor), to_uint8(ref2_tensor),
+                to_uint8(target_tensor), to_uint8(generated[0]),
             ], axis=1)
-            grid = np.concatenate([img_row, pl_row], axis=0)
+            if args.show_pluckers:
+                blank = np.zeros((H, W, 3), dtype=np.uint8)
+                pl_row = np.concatenate([
+                    plucker_to_rgb(plucker_ref1, H, W),
+                    plucker_to_rgb(plucker_ref2, H, W),
+                    plucker_to_rgb(plucker_tgt, H, W),
+                    blank,
+                ], axis=1)
+                grid = np.concatenate([img_row, pl_row], axis=0)
+            else:
+                grid = img_row
+            label = "[Ref1 | Ref2 | GT | Generated]"
         else:
-            grid = img_row
-        label = "[Ref1 | Ref2 | GT | Generated]"
-    else:
-        img_row = np.concatenate([
-            to_uint8(ref1_tensor), to_uint8(ref2_tensor), to_uint8(generated[0]),
-        ], axis=1)
-        if args.show_pluckers:
-            pl_row = np.concatenate([
-                plucker_to_rgb(plucker_ref1, H, W),
-                plucker_to_rgb(plucker_ref2, H, W),
-                plucker_to_rgb(plucker_tgt, H, W),
+            img_row = np.concatenate([
+                to_uint8(ref1_tensor), to_uint8(ref2_tensor), to_uint8(generated[0]),
             ], axis=1)
-            grid = np.concatenate([img_row, pl_row], axis=0)
-        else:
-            grid = img_row
-        label = "[Ref1 | Ref2 | Generated]"
+            if args.show_pluckers:
+                pl_row = np.concatenate([
+                    plucker_to_rgb(plucker_ref1, H, W),
+                    plucker_to_rgb(plucker_ref2, H, W),
+                    plucker_to_rgb(plucker_tgt, H, W),
+                ], axis=1)
+                grid = np.concatenate([img_row, pl_row], axis=0)
+            else:
+                grid = img_row
+            label = "[Ref1 | Ref2 | Generated]"
 
-    Image.fromarray(grid).save(out_path)
-    print(f"Saved: {out_path}  {label}")
+        Image.fromarray(grid).save(out_path)
+        print(f"Saved: {out_path}  {label}")
 
 
 if __name__ == "__main__":

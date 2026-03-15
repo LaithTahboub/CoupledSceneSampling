@@ -530,27 +530,27 @@ def _args_to_train_config(args: argparse.Namespace) -> TrainConfig:
 
 def main() -> None:
     args = parse_args()
-    cfg = _args_to_train_config(args)
+    cnfg = _args_to_train_config(args)
 
     _setup_distributed()
-    _set_seed(cfg.seed)
+    _set_seed(cnfg.seed)
 
     device = torch.device(f"cuda:{_local_rank()}")
     is_main = _is_main_process()
 
-    output_dir = Path(cfg.output_dir)
+    output_dir = Path(cnfg.output_dir)
     if is_main:
         output_dir.mkdir(parents=True, exist_ok=True)
 
     # W&B init (main process only)
-    if is_main and _WANDB_AVAILABLE and cfg.wandb_mode != "disabled":
+    if is_main and _WANDB_AVAILABLE and cnfg.wandb_mode != "disabled":
         wandb.init(
-            project=cfg.wandb_project, name=cfg.wandb_name, mode=cfg.wandb_mode,
+            project=cnfg.wandb_project, name=cnfg.wandb_name, mode=cnfg.wandb_mode,
             config=vars(args),
         )
 
     # Scenes
-    scenes = list(dict.fromkeys((cfg.scenes or []) + _read_lines(cfg.scenes_file)))
+    scenes = list(dict.fromkeys((cnfg.scenes or []) + _read_lines(cnfg.scenes_file)))
     if not scenes:
         raise ValueError("Provide --scenes or --scenes-file")
 
@@ -586,13 +586,13 @@ def main() -> None:
 
     # Split
     train_indices, test_indices, withheld_target_indices, split_info = _build_split(
-        dataset.triplets, cfg.seed, args.test_scenes_pct, args.test_targets_per_scene,
+        dataset.triplets, cnfg.seed, args.test_scenes_pct, args.test_targets_per_scene,
     )
     if is_main:
         print(f"Train: {len(train_indices)} | Test: {len(test_indices)} "
               f"({len(withheld_target_indices)} withheld-target)")
 
-        split_dir = Path(cfg.split_dir) if cfg.split_dir else output_dir / "splits"
+        split_dir = Path(cnfg.split_dir) if cnfg.split_dir else output_dir / "splits"
         split_dir.mkdir(parents=True, exist_ok=True)
         (split_dir / "split_info.json").write_text(json.dumps(split_info, indent=2))
 
@@ -608,16 +608,16 @@ def main() -> None:
 
     if dist.is_initialized():
         train_sampler = DistributedWeightedSampler(
-            dataset, train_indices, bucket_ratios, seed=cfg.seed,
+            dataset, train_indices, bucket_ratios, seed=cnfg.seed,
         )
     else:
         train_sampler = _build_weighted_sampler(dataset, train_indices, bucket_ratios)
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=cfg.per_gpu_batch_size,
+        batch_size=cnfg.per_gpu_batch_size,
         sampler=train_sampler,
-        num_workers=cfg.num_workers,
+        num_workers=cnfg.num_workers,
         pin_memory=True,
         drop_last=True,
     )
@@ -633,9 +633,9 @@ def main() -> None:
     trainable_params = model.get_trainable_parameters()
     if is_main:
         print(f"Trainable params: {sum(p.numel() for p in trainable_params):,}")
-        eff_batch = cfg.per_gpu_batch_size * _world_size() * cfg.gradient_accumulation_steps
+        eff_batch = cnfg.per_gpu_batch_size * _world_size() * cnfg.gradient_accumulation_steps
         print(f"Effective batch size: {eff_batch} "
-              f"({cfg.per_gpu_batch_size} x {_world_size()} GPUs x {cfg.gradient_accumulation_steps} accum)")
+              f"({cnfg.per_gpu_batch_size} x {_world_size()} GPUs x {cnfg.gradient_accumulation_steps} accum)")
 
     # DDP wrapping
     if dist.is_initialized():
@@ -644,30 +644,30 @@ def main() -> None:
     # Optimizer
     optimizer = torch.optim.AdamW(
         trainable_params,
-        lr=cfg.lr,
-        betas=cfg.betas,
-        weight_decay=cfg.weight_decay,
-        eps=cfg.eps,
+        lr=cnfg.lr,
+        betas=cnfg.betas,
+        weight_decay=cnfg.weight_decay,
+        eps=cnfg.eps,
     )
 
     # LR scheduler
     lr_scheduler = _build_lr_scheduler(
-        optimizer, cfg.warmup_steps, cfg.total_steps, cfg.lr_scheduler,
+        optimizer, cnfg.warmup_steps, cnfg.total_steps, cnfg.lr_scheduler,
     )
 
     # EMA
     ema = None
-    if cfg.ema_enabled:
-        ema = EMAModel(trainable_params, decay=cfg.ema_decay)
+    if cnfg.ema_enabled:
+        ema = EMAModel(trainable_params, decay=cnfg.ema_decay)
 
     # Resume
     global_step = 0
     start_epoch = 0
-    if cfg.resume_from:
+    if cnfg.resume_from:
         if is_main:
-            print(f"Resuming from {cfg.resume_from}")
+            print(f"Resuming from {cnfg.resume_from}")
         resumed = load_pose_sd_checkpoint(
-            model, cfg.resume_from, device,
+            model, cnfg.resume_from, device,
             optimizer=optimizer,
             lr_scheduler=lr_scheduler,
             ema=ema,
@@ -677,12 +677,12 @@ def main() -> None:
 
     # AMP scaler
     dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "no": torch.float32}
-    amp_dtype = dtype_map[cfg.mixed_precision]
-    use_amp = cfg.mixed_precision != "no"
+    amp_dtype = dtype_map[cnfg.mixed_precision]
+    use_amp = cnfg.mixed_precision != "no"
 
     # Training loop
     if is_main:
-        print(f"\nStarting training for {cfg.total_steps} steps...")
+        print(f"\nStarting training for {cnfg.total_steps} steps...")
 
     epoch = start_epoch
     done = False
@@ -710,23 +710,23 @@ def main() -> None:
                         both_kept=args.cond_both_kept,
                         one_dropped=args.cond_one_dropped,
                         both_dropped=args.cond_both_dropped,
-                        randomize_slots=cfg.randomize_slot_order,
+                        randomize_slots=cnfg.randomize_slot_order,
                     )
-                    loss = loss / cfg.gradient_accumulation_steps
+                    loss = loss / cnfg.gradient_accumulation_steps
 
                 loss.backward()
-                accum_loss += loss.item() * cfg.gradient_accumulation_steps
+                accum_loss += loss.item() * cnfg.gradient_accumulation_steps
                 accum_steps += 1
 
                 # Track per-bucket losses
                 if "difficulty" in batch:
                     for diff_val in batch["difficulty"]:
-                        bucket_losses.setdefault(diff_val, []).append(loss.item() * cfg.gradient_accumulation_steps)
+                        bucket_losses.setdefault(diff_val, []).append(loss.item() * cnfg.gradient_accumulation_steps)
 
                 # Optimizer step at accumulation boundary
-                if accum_steps % cfg.gradient_accumulation_steps == 0:
-                    if cfg.grad_clip > 0:
-                        torch.nn.utils.clip_grad_norm_(trainable_params, cfg.grad_clip)
+                if accum_steps % cnfg.gradient_accumulation_steps == 0:
+                    if cnfg.grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(trainable_params, cnfg.grad_clip)
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
@@ -735,14 +735,14 @@ def main() -> None:
                         ema.update(trainable_params)
 
                     global_step += 1
-                    avg_loss = accum_loss / cfg.gradient_accumulation_steps
+                    avg_loss = accum_loss / cnfg.gradient_accumulation_steps
                     accum_loss = 0.0
 
                     if is_main:
                         if isinstance(pbar, tqdm):
                             pbar.set_postfix(loss=f"{avg_loss:.4f}", step=global_step, lr=f"{lr_scheduler.get_last_lr()[0]:.2e}")
 
-                        if _WANDB_AVAILABLE and cfg.wandb_mode != "disabled":
+                        if _WANDB_AVAILABLE and cnfg.wandb_mode != "disabled":
                             log_dict = {
                                 "train/loss": avg_loss,
                                 "train/lr": lr_scheduler.get_last_lr()[0],
@@ -760,20 +760,20 @@ def main() -> None:
                             bucket_losses.clear()
 
                     # Validation
-                    if global_step % cfg.val_every_steps == 0 and is_main:
+                    if global_step % cnfg.val_every_steps == 0 and is_main:
                         if ema is not None:
                             ema.apply_shadow(trainable_params)
                         _log_validation(
                             model, val_dataset,
                             list(range(len(val_dataset))),
-                            global_step, cfg,
+                            global_step, cnfg,
                         )
                         if ema is not None:
                             ema.restore(trainable_params)
                         model.train()
 
                     # Save checkpoint
-                    if global_step % cfg.save_every_steps == 0 and is_main:
+                    if global_step % cnfg.save_every_steps == 0 and is_main:
                         if ema is not None:
                             ema.apply_shadow(trainable_params)
                         save_pose_sd_checkpoint(
@@ -790,10 +790,10 @@ def main() -> None:
                             optimizer=optimizer, lr_scheduler=lr_scheduler,
                             ema=ema, epoch=epoch + 1, global_step=global_step,
                         )
-                        _cleanup_checkpoints(output_dir, cfg.keep_checkpoints)
+                        _cleanup_checkpoints(output_dir, cnfg.keep_checkpoints)
                         print(f"Saved checkpoint at step {global_step}")
 
-                    if global_step >= cfg.total_steps:
+                    if global_step >= cnfg.total_steps:
                         done = True
                         break
 

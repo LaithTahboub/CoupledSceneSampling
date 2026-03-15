@@ -20,8 +20,8 @@ ROOT="/vulcanscratch/ltahboub/CoupledSceneSampling"
 SCENES_FILE=${SCENES_FILE:-"$ROOT/MegaScenes/scenes_colmap_ready.txt"}
 SCENES=${SCENES:-}
 
-OUTPUT=${OUTPUT:-$ROOT/checkpoints/pose_sd_v4}
-SEED=${SEED:-42}
+OUTPUT=${OUTPUT:-$ROOT/checkpoints/pose_sd_v6}
+SEED=${SEED:-31}
 
 # --- Training ---
 TOTAL_STEPS=${TOTAL_STEPS:-200000}
@@ -34,8 +34,8 @@ WARMUP_STEPS=${WARMUP_STEPS:-1000}
 LR_SCHEDULER=${LR_SCHEDULER:-cosine}
 
 # --- Data ---
-H=${H:-256}
-W=${W:-256}
+H=${H:-512}
+W=${W:-512}
 MAX_TRIPLETS_PER_SCENE=${MAX_TRIPLETS_PER_SCENE:-111}
 MIN_POINTS_PER_IMAGE=${MIN_POINTS_PER_IMAGE:-400}
 MIN_ORIENTATION_DOT=${MIN_ORIENTATION_DOT:-0.5}
@@ -74,7 +74,7 @@ NUM_GPUS=${NUM_GPUS:-2}
 NUM_WORKERS=${NUM_WORKERS:-4}
 
 # Resume
-RESUME=${RESUME:-/vulcanscratch/ltahboub/CoupledSceneSampling/checkpoints/pose_sd_v2/unet_step_70000.pt}
+RESUME=${RESUME:-}
 
 if [[ -f "$ROOT/.venv/bin/activate" ]]; then
     source "$ROOT/.venv/bin/activate"
@@ -141,5 +141,5 @@ fi
 
 torchrun \
     --nproc_per_node="$NUM_GPUS" \
-    --master_port="${MASTER_PORT:-29500}" \
+    --master_port="${MASTER_PORT:-29501}" \
     -m css.train.train_pose_sd "${ARGS[@]}"
