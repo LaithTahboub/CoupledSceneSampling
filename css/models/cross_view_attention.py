@@ -1,204 +1,173 @@
-from __future__ import annotations
+"""Block-level multi-view self-attention inflation (CAT3D-style).
 
-from typing import Any
+Instead of hooking into Diffusers' attention processor dispatch, we directly
+replace the ``attn1`` (self-attention) module on each BasicTransformerBlock
+with a ``MultiViewSelfAttention`` wrapper.  This is the "inflate 2D
+self-attention into 3D" approach from CAT3D: tokens from all views are
+concatenated along the sequence dimension before the QKV projection, so every
+view attends to every other view.  Text cross-attention (attn2) is unchanged.
+
+Usage::
+
+    from css.models.cross_view_attention import inflate_unet_attention
+
+    inflated = inflate_unet_attention(unet, num_views=3)
+    print(f"Inflated {len(inflated)} self-attention layers")
+"""
+
+from __future__ import annotations
 
 import torch
 import torch.nn as nn
 from einops import rearrange
 
 
-class CrossViewAttentionProcessor(nn.Module):
-    """
-    self-attn processor that mixes tokens across views.
+# ---------------------------------------------------------------------------
+# Multi-view self-attention module (replaces attn1 on selected blocks)
+# ---------------------------------------------------------------------------
+
+class MultiViewSelfAttention(nn.Module):
+    """Wraps a Diffusers ``Attention`` module to do joint self-attention
+    across all views.
+
+    The UNet sees ``(B*V, S, C)`` tokens per block.  This module reshapes to
+    ``(B, V*S, C)``, runs the original ``Attention`` (which holds the QKV
+    weights and processor), then reshapes back.  Every spatial token therefore
+    attends to tokens from every view — the core of the CAT3D 3D
+    self-attention inflation.
+
+    For batches whose size is not divisible by ``num_views`` (e.g. single-view
+    inference), the module falls through to standard per-view attention.
     """
 
-    def __init__(self, num_views: int, base_processor: Any):
+    def __init__(self, base_attn: nn.Module, num_views: int):
         super().__init__()
-        if num_views < 1:
-            raise ValueError(f"num_views must be >= 1, got {num_views}")
+        if num_views < 2:
+            raise ValueError(f"num_views must be >= 2, got {num_views}")
+        self.base_attn = base_attn
         self.num_views = int(num_views)
-        self.base_processor = base_processor
 
-    def _call_base(
-        self,
-        attn,
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor | None,
-        attention_mask: torch.Tensor | None,
-        temb: torch.Tensor | None,
-        *args,
-        **kwargs,
-    ) -> torch.Tensor:
-        return self.base_processor(
-            attn,
-            hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
-            attention_mask=attention_mask,
-            temb=temb,
-            *args,
-            **kwargs,
-        )
-
-    def _pack_attention_mask(
-        self,
-        attention_mask: torch.Tensor,
-        *,
-        bs: int,
-        v: int,
-        seq: int,
-    ) -> torch.Tensor | None:
-        if attention_mask.ndim == 2:
-            b, s = attention_mask.shape
-            if s != seq:
-                return None
-            # (bs*v, seq) -> (bs, v*seq)
-            return rearrange(attention_mask, "(bs v) s -> bs (v s)", bs=bs, v=v, s=seq)
-
-        if attention_mask.ndim == 3:
-            b, one, s = attention_mask.shape
-            if one != 1 or s != seq:
-                return None
-            # (bs*v, 1, seq) -> (bs, 1, v*seq)
-            return rearrange(attention_mask, "(bs v) 1 s -> bs 1 (v s)", bs=bs, v=v, s=seq)
-
-        return None
+    # Proxy attribute access so diffusers internals that inspect attn1
+    # (e.g. ``block.attn1.to_q``, ``block.attn1.heads``) still work.
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.base_attn, name)
 
     def forward(
         self,
-        attn,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
-        temb: torch.Tensor | None = None,
-        *args,
         **kwargs,
     ) -> torch.Tensor:
-        # dont change text conditioning
+        # Cross-attention path (attn2 calls): pass through unchanged.
         if encoder_hidden_states is not None:
-            return self._call_base(
-                attn,
+            return self.base_attn(
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=attention_mask,
-                temb=temb,
-                *args,
                 **kwargs,
             )
-
-        # we support token inputs (b, s, c) and spatial inputs (b, c, h, w)
-        if hidden_states.ndim not in (3, 4):
-            return self._call_base(
-                attn,
-                hidden_states,
-                encoder_hidden_states=None,
-                attention_mask=attention_mask,
-                temb=temb,
-                *args,
-                **kwargs,
-            )
-
-        is_4d = hidden_states.ndim == 4
-
-        if is_4d:
-            b, c, h, w = hidden_states.shape
-            seq = h * w
-            tokens = rearrange(hidden_states, "b c h w -> b (h w) c")
-        else:
-            b, seq, c = hidden_states.shape
-            tokens = hidden_states
-            h = w = None
 
         v = self.num_views
+        b, seq, c = hidden_states.shape
+
+        # Fallback: batch not divisible by num_views → normal per-view attn.
         if b % v != 0:
-            return self._call_base(
-                attn,
+            return self.base_attn(
                 hidden_states,
-                encoder_hidden_states=None,
                 attention_mask=attention_mask,
-                temb=temb,
-                *args,
                 **kwargs,
             )
 
         bs = b // v
 
-        # (bs*v, seq, c) -> (bs, v*seq, c)
-        packed_tokens = rearrange(tokens, "(bs v) s c -> bs (v s) c", bs=bs, v=v, s=seq)
+        # Pack: (B*V, S, C) → (B, V*S, C)
+        packed = rearrange(
+            hidden_states, "(bs v) s c -> bs (v s) c", bs=bs, v=v,
+        )
 
-        # if a mask is present, try to pack it
+        # Pack attention mask if present.
         packed_mask = None
         if attention_mask is not None:
-            packed_mask = self._pack_attention_mask(attention_mask, bs=bs, v=v, seq=seq)
-            if packed_mask is None:
-                return self._call_base(
-                    attn,
-                    hidden_states,
-                    encoder_hidden_states=None,
-                    attention_mask=attention_mask,
-                    temb=temb,
-                    *args,
-                    **kwargs,
+            if attention_mask.ndim == 2:
+                packed_mask = rearrange(
+                    attention_mask, "(bs v) s -> bs (v s)", bs=bs, v=v,
+                )
+            elif attention_mask.ndim == 3:
+                packed_mask = rearrange(
+                    attention_mask, "(bs v) h s -> bs h (v s)", bs=bs, v=v,
                 )
 
-        # run base processor once on packed tokens (this is where views mix)
-        packed_out = self._call_base(
-            attn,
-            packed_tokens,
-            encoder_hidden_states=None,
+        # Run the original Attention on the packed sequence.
+        packed_out = self.base_attn(
+            packed,
             attention_mask=packed_mask,
-            temb=temb,  
-            *args,
             **kwargs,
         )
 
-        # unpack: (bs, v*seq, c) -> (bs*v, seq, c)
-        out_tokens = rearrange(packed_out, "bs (v s) c -> (bs v) s c", v=v, s=seq)
-
-        if is_4d:
-            out = rearrange(out_tokens, "b (h w) c -> b c h w", h=h, w=w)
-        else:
-            out = out_tokens
-
-        return out
+        # Unpack: (B, V*S, C) → (B*V, S, C)
+        return rearrange(
+            packed_out, "bs (v s) c -> (bs v) s c", v=v, s=seq,
+        )
 
 
-class CrossViewAttention:
-    """attach cross-view self-attn processors to a diffusers unet."""
+# ---------------------------------------------------------------------------
+# UNet inflation: walk the module tree and replace attn1 in-place
+# ---------------------------------------------------------------------------
 
-    def __init__(self, num_views: int, include_high_res: bool = False):
-        if num_views < 2:
-            raise ValueError("cross-view attention expects at least 2 views")
-        self.num_views = int(num_views)
-        self.include_high_res = bool(include_high_res)
-        self.enabled_processor_names: list[str] = []
+# SD 2.1 @ 512: 64×64 feature maps live in down_blocks.0 and up_blocks.3.
+# CAT3D: "we use 3D self-attention only in feature maps of size 32×32 and
+# smaller" due to "significant computational overhead for relative small gain
+# in fidelity."
+_HIGH_RES_BLOCKS = {"down_blocks.0", "up_blocks.3"}
 
-    def _should_wrap(self, name: str) -> bool:
-        # diffusers convention is attn1 = self-attn, attn2 = cross-attn
-        if not name.endswith("attn1.processor"):
-            return False
-        if self.include_high_res:
+
+def _is_high_res_block(name: str) -> bool:
+    for prefix in _HIGH_RES_BLOCKS:
+        if name.startswith(prefix + "."):
             return True
+    return False
 
-        # sd2.1 @ 512: 64x64 self-attn lives in down_blocks.0 and up_blocks.3
-        # cat3d skips 64x64 by default due to cost,we also do that
-        if name.startswith("down_blocks.0.") or name.startswith("up_blocks.3."):
-            return False
-        return True
 
-    def attach(self, unet: Any) -> None:
-        processors: dict[str, Any] = {}
-        self.enabled_processor_names = []
+def inflate_unet_attention(
+    unet: nn.Module,
+    num_views: int,
+    include_high_res: bool = False,
+) -> list[str]:
+    """Inflate 2D self-attention layers in a UNet to multi-view 3D attention.
 
-        for name, proc in unet.attn_processors.items():
-            base = proc.base_processor if isinstance(proc, CrossViewAttentionProcessor) else proc
-            if self._should_wrap(name):
-                processors[name] = CrossViewAttentionProcessor(self.num_views, base)
-                self.enabled_processor_names.append(name)
-            else:
-                processors[name] = base
+    Walks every ``BasicTransformerBlock`` (any module with both ``attn1`` and
+    ``attn2`` attributes) and replaces ``attn1`` with a
+    ``MultiViewSelfAttention`` wrapper.
 
-        unet.set_attn_processor(processors)
+    Args:
+        unet: A ``UNet2DConditionModel`` (or compatible) to modify **in-place**.
+        num_views: Number of views packed along the batch dimension.
+        include_high_res: Also inflate 64×64 blocks (expensive, off by default).
 
-    @property
-    def num_wrapped(self) -> int:
-        return len(self.enabled_processor_names)
+    Returns:
+        List of module paths that were inflated (for logging / verification).
+    """
+    inflated: list[str] = []
+
+    for name, module in unet.named_modules():
+        # BasicTransformerBlock has both attn1 (self) and attn2 (cross).
+        if not (hasattr(module, "attn1") and hasattr(module, "attn2")):
+            continue
+
+        if not include_high_res and _is_high_res_block(name):
+            continue
+
+        attn1 = module.attn1
+
+        # Don't double-wrap.
+        if isinstance(attn1, MultiViewSelfAttention):
+            continue
+
+        module.attn1 = MultiViewSelfAttention(attn1, num_views)
+        inflated.append(f"{name}.attn1")
+
+    return inflated

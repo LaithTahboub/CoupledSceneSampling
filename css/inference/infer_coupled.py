@@ -28,7 +28,9 @@ from css.data.colmap_reader import read_scene
 from css.data.dataset import (
     build_cropped_scaled_intrinsics,
     compute_plucker_tensor,
+    compute_scene_scale,
     load_image_tensor,
+    normalize_c2w_translation,
 )
 from css.models.EMA import load_pose_sd_checkpoint
 from css.models.pose_sd import PoseSD
@@ -241,11 +243,21 @@ def main():
         r1, r2 = find_two_closest(input_idx, input_c2ws_np)
         anchor_c2w = input_c2ws_np[r1]
 
-        pl_r1 = compute_plucker_tensor(anchor_c2w, input_c2ws_np[r1],
+        # Normalize translations by scene scale
+        positions = np.stack([input_c2ws_np[r1][:3, 3],
+                              input_c2ws_np[r2][:3, 3],
+                              input_c2ws_np[input_idx][:3, 3]])
+        s = compute_scene_scale(positions, percentile=95.0)
+        if s < 1e-4:
+            s = 1e-4
+        c2w_r2_norm = normalize_c2w_translation(anchor_c2w, input_c2ws_np[r2], s)
+        c2w_tgt_norm = normalize_c2w_translation(anchor_c2w, input_c2ws_np[input_idx], s)
+
+        pl_r1 = compute_plucker_tensor(anchor_c2w, anchor_c2w,
                                         colmap_Ks[r1], H2d, W2d, lh, lw).unsqueeze(0)
-        pl_r2 = compute_plucker_tensor(anchor_c2w, input_c2ws_np[r2],
+        pl_r2 = compute_plucker_tensor(anchor_c2w, c2w_r2_norm,
                                         colmap_Ks[r2], H2d, W2d, lh, lw).unsqueeze(0)
-        pl_tgt = compute_plucker_tensor(anchor_c2w, input_c2ws_np[input_idx],
+        pl_tgt = compute_plucker_tensor(anchor_c2w, c2w_tgt_norm,
                                          colmap_Ks[input_idx], H2d, W2d, lh, lw).unsqueeze(0)
 
         with torch.inference_mode():

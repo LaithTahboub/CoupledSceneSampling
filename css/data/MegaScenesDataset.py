@@ -30,7 +30,9 @@ from css.data.colmap_reader import read_scene
 from css.data.dataset import (
     build_cropped_scaled_intrinsics,
     compute_plucker_tensor,
+    compute_scene_scale,
     load_image_tensor,
+    normalize_c2w_translation,
 )
 from css.data.iou import compute_covisibility
 
@@ -65,6 +67,7 @@ class SceneRecord:
     K_ref2: np.ndarray
     K_tgt: np.ndarray
     score: float
+    scene_scale: float = 1.0  # from compute_scene_scale(); used to normalize translations
     difficulty: Difficulty = Difficulty.MEDIUM
 
 
@@ -179,6 +182,8 @@ class MegaScenesDataset(Dataset):
         max_pairs_per_target: int = 6,
         # Similarity threshold for dedup of kept pairs (camera-center distance)
         pair_similarity_thresh: float = 0.03,
+        # Minimum unique targets required to keep a scene (ensures diversity)
+        min_targets_per_scene: int = 1,
     ):
         self.H, self.W = H, W
         self.latent_h, self.latent_w = H // 8, W // 8
@@ -220,10 +225,15 @@ class MegaScenesDataset(Dataset):
 
         # Mine
         self.records: list[SceneRecord] = []
+        n_skipped_diversity = 0
         for scene_spec in scene_dirs:
-            self.records.extend(
-                self._mine_scene(Path(scene_spec), max_triplets_per_scene)
-            )
+            scene_records = self._mine_scene(Path(scene_spec), max_triplets_per_scene)
+            if scene_records and min_targets_per_scene > 1:
+                n_unique_targets = len({r.target_name for r in scene_records})
+                if n_unique_targets < min_targets_per_scene:
+                    n_skipped_diversity += 1
+                    continue
+            self.records.extend(scene_records)
 
         # Backward compat alias
         self.triplets = self.records
@@ -232,9 +242,13 @@ class MegaScenesDataset(Dataset):
         for t in self.records:
             self.bucket_counts[t.difficulty.value] += 1
 
+        if n_skipped_diversity:
+            print(f"MegaScenesDataset: skipped {n_skipped_diversity} scenes "
+                  f"with < {min_targets_per_scene} unique targets")
+
         if self.records:
             print(f"MegaScenesDataset: {len(self.records)} records "
-                  f"from {len(scene_dirs)} scenes")
+                  f"from {len(scene_dirs) - n_skipped_diversity} scenes")
             for d in Difficulty:
                 c = self.bucket_counts[d.value]
                 pct = c / len(self.records) * 100
@@ -288,6 +302,13 @@ class MegaScenesDataset(Dataset):
         positions = {img.id: img.c2w[:3, 3].astype(np.float64) for img in valid}
         view_dirs = {img.id: _viewing_direction(img.c2w) for img in valid}
         images_by_id = {img.id: img for img in valid}
+
+        # Scene scale for translation normalization
+        pos_array = np.stack(list(positions.values()))
+        scene_scale = compute_scene_scale(pos_array, percentile=95.0)
+        if scene_scale < 1e-4:
+            print(f"  SKIP {scene_name}: degenerate scene scale ({scene_scale:.2e})")
+            return []
         K_by_id = {
             img.id: build_cropped_scaled_intrinsics(
                 cameras[img.camera_id], self.H, self.W
@@ -425,6 +446,7 @@ class MegaScenesDataset(Dataset):
                     tgt_c2w=tgt.c2w.astype(np.float32),
                     K_ref1=K_by_id[r1], K_ref2=K_by_id[r2],
                     K_tgt=K_by_id[tgt.id], score=sc,
+                    scene_scale=scene_scale,
                     difficulty=diff,
                 )
                 kept_pairs.append(candidate)
@@ -456,9 +478,18 @@ class MegaScenesDataset(Dataset):
             bc = {d: 0 for d in Difficulty}
             for t in selected:
                 bc[t.difficulty] += 1
+            # Log raw and normalized translation stats
+            raw_dists = []
+            for t in selected:
+                raw_dists.append(float(np.linalg.norm(t.ref2_c2w[:3, 3] - t.ref1_c2w[:3, 3])))
+                raw_dists.append(float(np.linalg.norm(t.tgt_c2w[:3, 3] - t.ref1_c2w[:3, 3])))
             print(f"  {scene_name}: {len(selected)} records "
                   f"(E={bc[Difficulty.EASY]}, M={bc[Difficulty.MEDIUM]}, "
-                  f"H={bc[Difficulty.HARD]})")
+                  f"H={bc[Difficulty.HARD]}) | "
+                  f"scale={scene_scale:.4f}, "
+                  f"raw_t=[{min(raw_dists):.3f}, {max(raw_dists):.3f}], "
+                  f"norm_t=[{2.0*min(raw_dists)/(scene_scale+1e-8):.3f}, "
+                  f"{2.0*max(raw_dists)/(scene_scale+1e-8):.3f}]")
 
         return selected
 
@@ -477,14 +508,20 @@ class MegaScenesDataset(Dataset):
         target_img, _, _ = load_image_tensor(rec.images_dir, rec.target_name,
                                              self.H, self.W)
 
+        # Normalize translations relative to ref1 by scene scale
+        ref2_c2w_norm = normalize_c2w_translation(
+            rec.ref1_c2w, rec.ref2_c2w, rec.scene_scale)
+        tgt_c2w_norm = normalize_c2w_translation(
+            rec.ref1_c2w, rec.tgt_c2w, rec.scene_scale)
+
         plucker_ref1 = compute_plucker_tensor(
             rec.ref1_c2w, rec.ref1_c2w, rec.K_ref1,
             self.H, self.W, self.latent_h, self.latent_w)
         plucker_ref2 = compute_plucker_tensor(
-            rec.ref1_c2w, rec.ref2_c2w, rec.K_ref2,
+            rec.ref1_c2w, ref2_c2w_norm, rec.K_ref2,
             self.H, self.W, self.latent_h, self.latent_w)
         plucker_tgt = compute_plucker_tensor(
-            rec.ref1_c2w, rec.tgt_c2w, rec.K_tgt,
+            rec.ref1_c2w, tgt_c2w_norm, rec.K_tgt,
             self.H, self.W, self.latent_h, self.latent_w)
 
         return {

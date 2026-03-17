@@ -10,7 +10,7 @@
 #SBATCH --gres=gpu:rtxa6000:2
 #SBATCH --account=vulcan-jbhuang
 #SBATCH --qos=vulcan-scavenger
-#SBATCH --time=3-0:00:00
+#SBATCH --time=2-0:00:00
 #SBATCH --output=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/train_pose_sd_%j.out
 #SBATCH --error=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/train_pose_sd_%j.err
 
@@ -20,56 +20,62 @@ ROOT="/vulcanscratch/ltahboub/CoupledSceneSampling"
 SCENES_FILE=${SCENES_FILE:-"$ROOT/MegaScenes/scenes_colmap_ready.txt"}
 SCENES=${SCENES:-}
 
-OUTPUT=${OUTPUT:-$ROOT/checkpoints/pose_sd_v6}
-SEED=${SEED:-31}
+RUN_NAME=${RUN_NAME:-pose_sd_v8}
+OUTPUT=${OUTPUT:-$ROOT/checkpoints/${RUN_NAME}}
+SEED=${SEED:-311}
 
-# --- Training ---
+# - Training -
 TOTAL_STEPS=${TOTAL_STEPS:-200000}
 PER_GPU_BATCH_SIZE=${PER_GPU_BATCH_SIZE:-2}
-GRAD_ACCUM=${GRAD_ACCUM:-4}
+GRAD_ACCUM=${GRAD_ACCUM:-8}
 # Effective batch size: 2 * 8 GPUs * 8 accum = 128
-LR=${LR:-1e-4}
-TRAIN_MODE=${TRAIN_MODE:-cond}
+LR=${LR:-1.5e-5}
+TRAIN_MODE=${TRAIN_MODE:-full}
 WARMUP_STEPS=${WARMUP_STEPS:-1000}
-LR_SCHEDULER=${LR_SCHEDULER:-cosine}
+LR_SCHEDULER=${LR_SCHEDULER:-constant_with_warmup}
 
-# --- Data ---
-H=${H:-512}
-W=${W:-512}
-MAX_TRIPLETS_PER_SCENE=${MAX_TRIPLETS_PER_SCENE:-111}
+# - Data -
+H=${H:-256}
+W=${W:-256}
+MAX_TRIPLETS_PER_SCENE=${MAX_TRIPLETS_PER_SCENE:-132}
 MIN_POINTS_PER_IMAGE=${MIN_POINTS_PER_IMAGE:-400}
 MIN_ORIENTATION_DOT=${MIN_ORIENTATION_DOT:-0.5}
 MAX_FOCAL_LENGTH_RATIO=${MAX_FOCAL_LENGTH_RATIO:-2.0}
 MIN_REF_COVISIBILITY=${MIN_REF_COVISIBILITY:-0.10}
 MAX_REF_COVISIBILITY=${MAX_REF_COVISIBILITY:-0.70}
 NEAR_DUPLICATE_THRESHOLD=${NEAR_DUPLICATE_THRESHOLD:-0.82}
+MIN_TARGETS_PER_SCENE=${MIN_TARGETS_PER_SCENE:-5}
 
-# --- Conditioning dropout ---
+# - Conditioning dropout -
 COND_BOTH_KEPT=${COND_BOTH_KEPT:-0.85}
 COND_ONE_DROPPED=${COND_ONE_DROPPED:-0.10}
 COND_BOTH_DROPPED=${COND_BOTH_DROPPED:-0.05}
 
-# --- Bucket ratios ---
+# - Captioning -
+CAPTION_DIR=${CAPTION_DIR:-}           # path to caption JSONs; empty = no captions (null text)
+TEXT_DROP_PROB=${TEXT_DROP_PROB:-1}  # probability of dropping caption to "" per sample
+
+# - Bucket ratios -
 EASY_RATIO=${EASY_RATIO:-0.50}
 MEDIUM_RATIO=${MEDIUM_RATIO:-0.35}
 HARD_RATIO=${HARD_RATIO:-0.15}
 
-# --- Split ---
+# - Split -
 TEST_SCENES_PCT=${TEST_SCENES_PCT:-5.0}
 TEST_TARGETS_PER_SCENE=${TEST_TARGETS_PER_SCENE:-1}
-SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/pose_sd_seed${SEED}}
+SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/${RUN_NAME}_seed${SEED}}
 
-# --- Checkpoints & validation ---
+# - Checkpoints & validation -
 SAVE_EVERY=${SAVE_EVERY:-8000}
 VAL_EVERY=${VAL_EVERY:-3000}
 KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-5}
 VAL_SAMPLE_STEPS=${VAL_SAMPLE_STEPS:-50}
 VAL_CFG_SCALE=${VAL_CFG_SCALE:-3.0}
 
-# --- EMA ---
+# - EMA -
 EMA_DECAY=${EMA_DECAY:-0.9999}
 
-# --- Multi-GPU ---
+# - Multi-GPU -
 NUM_GPUS=${NUM_GPUS:-2}
 NUM_WORKERS=${NUM_WORKERS:-4}
 
@@ -99,6 +105,7 @@ ARGS=(
     --cond-both-kept "$COND_BOTH_KEPT"
     --cond-one-dropped "$COND_ONE_DROPPED"
     --cond-both-dropped "$COND_BOTH_DROPPED"
+    --text-drop-prob "$TEXT_DROP_PROB"
     --easy-ratio "$EASY_RATIO"
     --medium-ratio "$MEDIUM_RATIO"
     --hard-ratio "$HARD_RATIO"
@@ -109,6 +116,7 @@ ARGS=(
     --min-ref-covisibility "$MIN_REF_COVISIBILITY"
     --max-ref-covisibility "$MAX_REF_COVISIBILITY"
     --near-duplicate-threshold "$NEAR_DUPLICATE_THRESHOLD"
+    --min-targets-per-scene "$MIN_TARGETS_PER_SCENE"
     --test-scenes-pct "$TEST_SCENES_PCT"
     --test-targets-per-scene "$TEST_TARGETS_PER_SCENE"
     --save-every-steps "$SAVE_EVERY"
@@ -137,6 +145,10 @@ fi
 
 if [[ -n "$RESUME" ]]; then
     ARGS+=(--resume-from "$RESUME")
+fi
+
+if [[ -n "$CAPTION_DIR" ]]; then
+    ARGS+=(--caption-dir "$CAPTION_DIR")
 fi
 
 torchrun \

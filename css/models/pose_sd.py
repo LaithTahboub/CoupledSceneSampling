@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel
 from transformers import CLIPTextModel, CLIPTokenizer
 
-from css.models.cross_view_attention import CrossViewAttention
+from css.models.cross_view_attention import inflate_unet_attention
 
 
 def _expand_conv_in(unet: UNet2DConditionModel, new_in_channels: int) -> None:
@@ -63,17 +63,18 @@ class PoseSD(nn.Module):
         self.text_encoder.requires_grad_(False).eval()
 
         _expand_conv_in(self.unet, self.PER_VIEW_CH)
-        self.cross_view_attention = CrossViewAttention(num_views=self.NUM_VIEWS, include_high_res=False)
-        self.cross_view_attention.attach(self.unet)
+        inflated = inflate_unet_attention(self.unet, num_views=self.NUM_VIEWS, include_high_res=False)
+        print(f"[pose-sd] inflated {len(inflated)} self-attention layers to multi-view")
 
         with torch.no_grad():
             tokens = self.tokenizer([""], padding="max_length", max_length=77, return_tensors="pt")
             self.null_text_emb = self.text_encoder(tokens.input_ids.to(self.device))[0]
 
-    def configure_trainable(self, train_mode: str = "cond") -> None:
+    def configure_trainable(self, train_mode: str = "full") -> None:
         if train_mode == "full":
             self.unet.requires_grad_(True)
             return
+        # Legacy "cond" mode: only conv_in + attention layers
         self.unet.requires_grad_(False)
         self.unet.conv_in.requires_grad_(True)
         for name, param in self.unet.named_parameters():
@@ -90,7 +91,6 @@ class PoseSD(nn.Module):
                 self.unet.enable_xformers_memory_efficient_attention()
             except Exception as exc:
                 print(f"[pose-sd] xformers unavailable: {exc}")
-        self.cross_view_attention.attach(self.unet)
 
     def get_trainable_parameters(self) -> list[nn.Parameter]:
         return [p for p in self.unet.parameters() if p.requires_grad]

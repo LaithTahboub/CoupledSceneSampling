@@ -21,8 +21,8 @@
 set -euo pipefail
 
 ROOT=/vulcanscratch/ltahboub/CoupledSceneSampling
-CHECKPOINT=${CHECKPOINT:-$ROOT/checkpoints/pose_sd_v4/unet_step_160000.pt}
-SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/pose_sd_seed42}
+CHECKPOINT=${CHECKPOINT:-$ROOT/checkpoints/pose_sd_v6/unet_step_104000.pt}
+SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/pose_sd_seed31}
 DATA_ROOT=${DATA_ROOT:-$ROOT/MegaScenes}
 
 NUM_SCENES=${NUM_SCENES:-5}
@@ -32,8 +32,8 @@ SAMPLES_PER_TRIPLET=${SAMPLES_PER_TRIPLET:-3}
 
 NUM_STEPS=${NUM_STEPS:-50}
 CFG_SCALE=${CFG_SCALE:-3.0}
-H=${H:-256}
-W=${W:-256}
+H=${H:-512}
+W=${W:-512}
 SEED=${SEED:-12}
 
 OUT_DIR=${OUT_DIR:-$ROOT/outputs/eval_medium_$(date +%Y%m%d_%H%M%S)}

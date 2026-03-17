@@ -22,7 +22,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from css.data.dataset import compute_plucker_tensor
+from css.data.dataset import compute_plucker_tensor, compute_scene_scale, normalize_c2w_translation
 from css.models.EMA import load_pose_sd_checkpoint
 from css.models.pose_sd import PoseSD
 from css.inference.scene_sampling import plucker_to_rgb, to_uint8
@@ -162,9 +162,27 @@ def main():
         target_c2w[:3, 3] += offset_world
         K_tgt = (K_ref1 if anchor_idx == 0 else K_ref2).copy()
 
+    # Normalize translations by scene scale (same codepath as training)
+    all_positions = np.stack([c2w_ref1[:3, 3], c2w_ref2[:3, 3], target_c2w[:3, 3]])
+    scene_scale = compute_scene_scale(all_positions, percentile=95.0)
+    if scene_scale < 1e-4:
+        print(f"WARNING: very small scene scale ({scene_scale:.2e}), "
+              "DUSt3R may have failed to establish a baseline")
+        scene_scale = max(scene_scale, 1e-4)
+
+    raw_ref2 = np.linalg.norm(c2w_ref2[:3, 3] - c2w_ref1[:3, 3])
+    raw_tgt = np.linalg.norm(target_c2w[:3, 3] - c2w_ref1[:3, 3])
+    print(f"Scene scale: {scene_scale:.4f} | "
+          f"raw ||t_ref2||={raw_ref2:.4f}, raw ||t_tgt||={raw_tgt:.4f} | "
+          f"norm ||t_ref2||={2.0*raw_ref2/(scene_scale+1e-8):.4f}, "
+          f"norm ||t_tgt||={2.0*raw_tgt/(scene_scale+1e-8):.4f}")
+
+    c2w_ref2_norm = normalize_c2w_translation(c2w_ref1, c2w_ref2, scene_scale)
+    target_c2w_norm = normalize_c2w_translation(c2w_ref1, target_c2w, scene_scale)
+
     plucker_ref1 = compute_plucker_tensor(c2w_ref1, c2w_ref1, K_ref1, H, W, latent_h, latent_w)
-    plucker_ref2 = compute_plucker_tensor(c2w_ref1, c2w_ref2, K_ref2, H, W, latent_h, latent_w)
-    plucker_tgt = compute_plucker_tensor(c2w_ref1, target_c2w, K_tgt, H, W, latent_h, latent_w)
+    plucker_ref2 = compute_plucker_tensor(c2w_ref1, c2w_ref2_norm, K_ref2, H, W, latent_h, latent_w)
+    plucker_tgt = compute_plucker_tensor(c2w_ref1, target_c2w_norm, K_tgt, H, W, latent_h, latent_w)
 
     print("Loading model...")
     model = PoseSD()

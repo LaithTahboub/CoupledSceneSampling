@@ -409,7 +409,7 @@ def parse_args() -> argparse.Namespace:
 
     # Model
     p.add_argument("--pretrained-model", type=str, default="manojb/stable-diffusion-2-1-base")
-    p.add_argument("--train-mode", choices=["cond", "full"], default="cond")
+    p.add_argument("--train-mode", choices=["cond", "full"], default="full")
     p.add_argument("--gradient-checkpointing", action="store_true", default=True)
     p.add_argument("--xformers-attention", action="store_true")
 
@@ -428,6 +428,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-reject-near-duplicates", action="store_true")
     p.add_argument("--max-pairs-per-target", type=int, default=6)
     p.add_argument("--pair-similarity-thresh", type=float, default=0.03)
+    p.add_argument("--min-targets-per-scene", type=int, default=1,
+                    help="Skip scenes with fewer unique targets (ensures diversity)")
 
     # Data — bucket covisibility/distance ranges
     p.add_argument("--easy-min-covis", type=float, default=DataConfig.easy_min_covis)
@@ -589,6 +591,7 @@ def main() -> None:
         near_duplicate_threshold=args.near_duplicate_threshold,
         max_pairs_per_target=args.max_pairs_per_target,
         pair_similarity_thresh=args.pair_similarity_thresh,
+        min_targets_per_scene=args.min_targets_per_scene,
     )
 
     # Split

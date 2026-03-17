@@ -164,7 +164,7 @@ def run_validation(
     indices: list[int],
     *,
     num_steps: int = 50,
-    cfg_scale: float = 4.0,
+    cfg_scale: float = 3.0,
     seed: int = 42,
     max_samples: int = 16,
     compute_lpips: bool = True,

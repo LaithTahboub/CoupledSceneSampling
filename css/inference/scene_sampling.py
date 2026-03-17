@@ -10,8 +10,10 @@ from css.data.colmap_reader import Camera, ImageData, read_scene
 from css.data.dataset import (
     build_cropped_scaled_intrinsics,
     compute_plucker_tensor,
+    compute_scene_scale,
     load_image_tensor,
     name_allowed,
+    normalize_c2w_translation,
 )
 from css.data.iou import compute_covisibility
 
@@ -185,10 +187,18 @@ def build_single_sample(
     K_ref2 = build_cropped_scaled_intrinsics(cameras[ref2_img.camera_id], H, W)
     K_tgt = build_cropped_scaled_intrinsics(cameras[target_img.camera_id], H, W)
 
-    # ref1-anchored pluckers for cat3d-style channel concat.
+    # Normalize translations by scene scale
+    positions = np.stack([ref1_img.c2w[:3, 3], ref2_img.c2w[:3, 3], target_img.c2w[:3, 3]])
+    scene_scale = compute_scene_scale(positions, percentile=95.0)
+    if scene_scale < 1e-4:
+        scene_scale = 1e-4
+    ref2_c2w_norm = normalize_c2w_translation(ref1_img.c2w, ref2_img.c2w, scene_scale)
+    tgt_c2w_norm = normalize_c2w_translation(ref1_img.c2w, target_img.c2w, scene_scale)
+
+    # ref1-anchored pluckers from normalized poses
     plucker_ref1 = compute_plucker_tensor(ref1_img.c2w, ref1_img.c2w, K_ref1, H, W, latent_h, latent_w)
-    plucker_ref2 = compute_plucker_tensor(ref1_img.c2w, ref2_img.c2w, K_ref2, H, W, latent_h, latent_w)
-    plucker_tgt = compute_plucker_tensor(ref1_img.c2w, target_img.c2w, K_tgt, H, W, latent_h, latent_w)
+    plucker_ref2 = compute_plucker_tensor(ref1_img.c2w, ref2_c2w_norm, K_ref2, H, W, latent_h, latent_w)
+    plucker_tgt = compute_plucker_tensor(ref1_img.c2w, tgt_c2w_norm, K_tgt, H, W, latent_h, latent_w)
 
     return {
         "ref1_img": ref1_tensor.unsqueeze(0),
