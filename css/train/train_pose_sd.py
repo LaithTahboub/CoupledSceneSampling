@@ -464,6 +464,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cond-both-kept", type=float, default=0.85)
     p.add_argument("--cond-one-dropped", type=float, default=0.10)
     p.add_argument("--cond-both-dropped", type=float, default=0.05)
+    p.add_argument("--text-drop-prob", type=float, default=0.10,
+                    help="Probability of dropping text caption per sample (independent of ref dropout)")
+
+    # Captions
+    p.add_argument("--caption-dir", type=str, default=None,
+                    help="Directory with per-scene caption JSON files from caption_dataset.py")
 
     # Slot randomization
     p.add_argument("--no-randomize-slots", action="store_true")
@@ -559,6 +565,7 @@ def main() -> None:
         print(f"Building dataset at {args.H}x{args.W}...")
     dataset = MegaScenesDataset(
         scene_dirs=scenes, H=args.H, W=args.W,
+        caption_dir=args.caption_dir,
         # Bucket ranges
         easy_min_covis=args.easy_min_covis, easy_max_covis=args.easy_max_covis,
         easy_min_distance=args.easy_min_distance, easy_max_distance=args.easy_max_distance,
@@ -710,6 +717,7 @@ def main() -> None:
                         both_kept=args.cond_both_kept,
                         one_dropped=args.cond_one_dropped,
                         both_dropped=args.cond_both_dropped,
+                        text_drop_prob=args.text_drop_prob,
                         randomize_slots=cnfg.randomize_slot_order,
                     )
                     loss = loss / cnfg.gradient_accumulation_steps
@@ -751,6 +759,7 @@ def main() -> None:
                                 "train/n_both_kept": meta.get("n_both_kept", 0),
                                 "train/n_one_dropped": meta.get("n_one_dropped", 0),
                                 "train/n_both_dropped": meta.get("n_both_dropped", 0),
+                                "train/n_text_dropped": meta.get("n_text_dropped", 0),
                             }
                             # Log per-bucket losses
                             for diff_key, losses in bucket_losses.items():

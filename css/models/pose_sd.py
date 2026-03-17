@@ -211,6 +211,7 @@ class PoseSD(nn.Module):
         both_kept: float = 0.85,
         one_dropped: float = 0.10,
         both_dropped: float = 0.05,
+        text_drop_prob: float = 0.10,
         randomize_slots: bool = True,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Single-target training step."""
@@ -231,7 +232,26 @@ class PoseSD(nn.Module):
                                   device=self.device, dtype=torch.long)
         tgt_lat_noisy = self.scheduler.add_noise(tgt_lat_clean, noise, timesteps)
 
-        text_emb = self.null_text_emb.expand(b, -1, -1)
+        # Text conditioning: use captions from batch with dropout
+        captions = batch.get("caption", [""] * b)
+        if isinstance(captions, str):
+            captions = [captions] * b
+        captions = list(captions)
+
+        # Text conditioning dropout: independently replace captions with ""
+        n_text_dropped = 0
+        if text_drop_prob > 0:
+            for i in range(b):
+                if torch.rand(1).item() < text_drop_prob:
+                    captions[i] = ""
+                    n_text_dropped += 1
+
+        # Encode text: use null embedding for empty captions, real embeddings otherwise
+        has_text = any(c != "" for c in captions)
+        if has_text:
+            text_emb = self.get_text_embeddings(captions)
+        else:
+            text_emb = self.null_text_emb.expand(b, -1, -1)
 
         ref1_keep, ref2_keep = self.sample_cond_dropout(
             b, self.device, both_kept, one_dropped, both_dropped,
@@ -253,6 +273,7 @@ class PoseSD(nn.Module):
             "n_both_kept": int((ref1_keep & ref2_keep).sum()),
             "n_one_dropped": int((ref1_keep ^ ref2_keep).sum()),
             "n_both_dropped": int((~ref1_keep & ~ref2_keep).sum()),
+            "n_text_dropped": n_text_dropped,
         }
 
         return loss, meta

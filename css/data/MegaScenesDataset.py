@@ -17,6 +17,7 @@ Mining algorithm (target-centric):
 
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import dataclass
 from enum import Enum
@@ -152,6 +153,7 @@ class MegaScenesDataset(Dataset):
         *,
         H: int = 256,
         W: int = 256,
+        caption_dir: str | None = None,
         # Difficulty bucket ranges
         easy_min_covis: float = 0.45,  easy_max_covis: float = 0.80,
         easy_min_distance: float = 0.02, easy_max_distance: float = 0.15,
@@ -205,6 +207,17 @@ class MegaScenesDataset(Dataset):
         self.max_pairs_per_target = max_pairs_per_target
         self.pair_similarity_thresh = pair_similarity_thresh
 
+        # Load precomputed captions (per-scene JSON files from caption_dataset.py)
+        self._captions: dict[str, dict[str, str]] = {}
+        if caption_dir is not None:
+            caption_path = Path(caption_dir)
+            for scene_spec in scene_dirs:
+                scene_name = Path(scene_spec).name
+                cf = caption_path / f"{scene_name}.json"
+                if cf.exists():
+                    with open(cf) as f:
+                        self._captions[scene_name] = json.load(f)
+
         # Mine
         self.records: list[SceneRecord] = []
         for scene_spec in scene_dirs:
@@ -250,7 +263,7 @@ class MegaScenesDataset(Dataset):
 
         images_dir = scene_dir / "images"
         scene_name = scene_dir.name
-        prompt = ""
+        scene_captions = self._captions.get(scene_name, {})
 
         disk_files: set[str] = set()
         for p in images_dir.rglob("*"):
@@ -402,10 +415,11 @@ class MegaScenesDataset(Dataset):
                 if too_similar:
                     continue
 
+                tgt_caption = scene_captions.get(resolved[tgt.id], "")
                 rec = SceneRecord(
                     scene_name=scene_name, images_dir=images_dir,
                     ref1_name=resolved[r1], ref2_name=resolved[r2],
-                    target_name=resolved[tgt.id], prompt=prompt,
+                    target_name=resolved[tgt.id], prompt=tgt_caption,
                     ref1_c2w=images_by_id[r1].c2w.astype(np.float32),
                     ref2_c2w=images_by_id[r2].c2w.astype(np.float32),
                     tgt_c2w=tgt.c2w.astype(np.float32),
@@ -481,6 +495,7 @@ class MegaScenesDataset(Dataset):
             "plucker_ref2": plucker_ref2,
             "plucker_tgt": plucker_tgt,
             "prompt": rec.prompt,
+            "caption": rec.prompt,
             "scene_name": rec.scene_name,
             "ref1_name": rec.ref1_name,
             "ref2_name": rec.ref2_name,

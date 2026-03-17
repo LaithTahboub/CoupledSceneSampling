@@ -72,8 +72,8 @@ class CondDropoutConfig:
     one_ref_dropped: float = 0.10
     both_refs_dropped: float = 0.05
 
-    # Text is always empty for this phase, but keep the mechanism
-    text_drop_prob: float = 1.0  # always drop text (empty prompt phase)
+    # Text conditioning dropout (independent of ref dropout)
+    text_drop_prob: float = 0.10  # 10% chance of dropping caption to empty string
 
 
 @dataclass
