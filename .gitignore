@@ -19,7 +19,6 @@ work_dirs/
 /vulcanscratch/ltahboub/CoupledSceneSampling/stable-virtual-camera/.gradio
 .claude
 24*
-old
 pose_sd*/
 logs
 images_index.parquet

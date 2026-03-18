@@ -21,8 +21,8 @@
 set -euo pipefail
 
 ROOT=/vulcanscratch/ltahboub/CoupledSceneSampling
-CHECKPOINT=${CHECKPOINT:-$ROOT/checkpoints/pose_sd_v6/unet_step_104000.pt}
-SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/pose_sd_seed31}
+CHECKPOINT=${CHECKPOINT:-$ROOT/checkpoints/pose_sd_v5/unet_step_184000.pt}
+SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/pose_sd_seed42}
 DATA_ROOT=${DATA_ROOT:-$ROOT/MegaScenes}
 
 NUM_SCENES=${NUM_SCENES:-5}
@@ -30,11 +30,13 @@ SCENE_IDX=${SCENE_IDX:-16}  # 0-based offset into test scenes list
 TARGETS_PER_SCENE=${TARGETS_PER_SCENE:-3}
 SAMPLES_PER_TRIPLET=${SAMPLES_PER_TRIPLET:-3}
 
-NUM_STEPS=${NUM_STEPS:-50}
-CFG_SCALE=${CFG_SCALE:-3.0}
-H=${H:-512}
-W=${W:-512}
-SEED=${SEED:-12}
+ARCH_VERSION=${ARCH_VERSION:-"OLD"}
+
+NUM_STEPS=${NUM_STEPS:-25}
+CFG_SCALE=${CFG_SCALE:-3}
+H=${H:-256}
+W=${W:-256}
+SEED=${SEED:-112}
 
 OUT_DIR=${OUT_DIR:-$ROOT/outputs/eval_medium_$(date +%Y%m%d_%H%M%S)}
 
@@ -94,6 +96,11 @@ from css.models.pose_sd import PoseSD
 from css.models.EMA import load_pose_sd_checkpoint
 from css.inference.scene_sampling import load_scene_pools, build_single_sample, build_comparison_grid, to_uint8
 from css.data.iou import compute_covisibility
+
+if '$ARCH_VERSION' == 'OLD':
+    from css.old.pose_sd import PoseSD
+    from css.old.scene_sampling import load_scene_pools, build_single_sample, build_comparison_grid, to_uint8
+
 
 print('Loading model...')
 model = PoseSD()

@@ -412,6 +412,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--train-mode", choices=["cond", "full"], default="full")
     p.add_argument("--gradient-checkpointing", action="store_true", default=True)
     p.add_argument("--xformers-attention", action="store_true")
+    p.add_argument("--compile-unet", action="store_true",
+                    help="Use torch.compile on the UNet for ~20-40%% faster training")
 
     # Data — resolution
     p.add_argument("--H", type=int, default=DataConfig.H)
@@ -630,6 +632,7 @@ def main() -> None:
         num_workers=cnfg.num_workers,
         pin_memory=True,
         drop_last=True,
+        persistent_workers=cnfg.num_workers > 0,
     )
 
     # Model
@@ -638,6 +641,7 @@ def main() -> None:
     model.configure_memory_optimizations(
         gradient_checkpointing=args.gradient_checkpointing,
         xformers_attention=args.xformers_attention,
+        compile_unet=args.compile_unet,
     )
 
     trainable_params = model.get_trainable_parameters()

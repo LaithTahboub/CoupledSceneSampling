@@ -17,10 +17,10 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, UNet2DConditionModel
+from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel
 from transformers import CLIPTextModel, CLIPTokenizer
 
-from css.models.cross_view_attention import inflate_unet_attention
+from css.old.cross_view_attention import CrossViewAttention
 
 
 def _expand_conv_in(unet: UNet2DConditionModel, new_in_channels: int) -> None:
@@ -58,24 +58,22 @@ class PoseSD(nn.Module):
         self.text_encoder = CLIPTextModel.from_pretrained(pretrained_model, subfolder="text_encoder").to(self.device)
         self.tokenizer = CLIPTokenizer.from_pretrained(pretrained_model, subfolder="tokenizer")
         self.scheduler = DDPMScheduler.from_pretrained(pretrained_model, subfolder="scheduler")
-        self.inference_scheduler = DDIMScheduler.from_pretrained(pretrained_model, subfolder="scheduler")
 
         self.vae.requires_grad_(False).eval()
         self.text_encoder.requires_grad_(False).eval()
 
         _expand_conv_in(self.unet, self.PER_VIEW_CH)
-        inflated = inflate_unet_attention(self.unet, num_views=self.NUM_VIEWS, include_high_res=False)
-        print(f"[pose-sd] inflated {len(inflated)} self-attention layers to multi-view")
+        self.cross_view_attention = CrossViewAttention(num_views=self.NUM_VIEWS, include_high_res=False)
+        self.cross_view_attention.attach(self.unet)
 
         with torch.no_grad():
             tokens = self.tokenizer([""], padding="max_length", max_length=77, return_tensors="pt")
             self.null_text_emb = self.text_encoder(tokens.input_ids.to(self.device))[0]
 
-    def configure_trainable(self, train_mode: str = "full") -> None:
+    def configure_trainable(self, train_mode: str = "cond") -> None:
         if train_mode == "full":
             self.unet.requires_grad_(True)
             return
-        # Legacy "cond" mode: only conv_in + attention layers
         self.unet.requires_grad_(False)
         self.unet.conv_in.requires_grad_(True)
         for name, param in self.unet.named_parameters():
@@ -83,10 +81,7 @@ class PoseSD(nn.Module):
                 param.requires_grad_(True)
 
     def configure_memory_optimizations(
-        self,
-        gradient_checkpointing: bool = False,
-        xformers_attention: bool = False,
-        compile_unet: bool = False,
+        self, gradient_checkpointing: bool = False, xformers_attention: bool = False,
     ) -> None:
         if gradient_checkpointing:
             self.unet.enable_gradient_checkpointing()
@@ -95,9 +90,7 @@ class PoseSD(nn.Module):
                 self.unet.enable_xformers_memory_efficient_attention()
             except Exception as exc:
                 print(f"[pose-sd] xformers unavailable: {exc}")
-        if compile_unet:
-            self.unet = torch.compile(self.unet, mode="reduce-overhead")
-            print("[pose-sd] compiled UNet with torch.compile(mode='reduce-overhead')")
+        self.cross_view_attention.attach(self.unet)
 
     def get_trainable_parameters(self) -> list[nn.Parameter]:
         return [p for p in self.unet.parameters() if p.requires_grad]
@@ -307,14 +300,13 @@ class PoseSD(nn.Module):
         text_cond = self.get_text_embeddings([prompt]).expand(b, -1, -1)
         text_uncond = self.null_text_emb.expand(b, -1, -1)
 
-        sched = self.inference_scheduler
-        sched.set_timesteps(num_steps)
+        self.scheduler.set_timesteps(num_steps)
         gen = torch.Generator(device=self.device).manual_seed(seed)
         latent = torch.randn(ref1_lat.shape, generator=gen, device=self.device, dtype=ref1_lat.dtype)
 
-        for t in sched.timesteps:
+        for t in self.scheduler.timesteps:
             t_b = torch.full((b,), int(t), device=self.device, dtype=torch.long)
-            latent_in = sched.scale_model_input(latent, t)
+            latent_in = self.scheduler.scale_model_input(latent, t)
 
             packed_cond, tgt_slot = self._pack_views(
                 ref1_lat, ref2_lat, latent_in, pl_ref1, pl_ref2, pl_tgt,
@@ -330,6 +322,6 @@ class PoseSD(nn.Module):
             eps_uncond = self._predict_target_eps(packed_uncond, t_b, text_uncond, b, tgt_slot_uc)
 
             eps = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
-            latent = sched.step(eps, t, latent).prev_sample
+            latent = self.scheduler.step(eps, t, latent).prev_sample
 
         return self.decode_latent(latent)

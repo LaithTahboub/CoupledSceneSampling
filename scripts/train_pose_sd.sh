@@ -20,9 +20,9 @@ ROOT="/vulcanscratch/ltahboub/CoupledSceneSampling"
 SCENES_FILE=${SCENES_FILE:-"$ROOT/MegaScenes/scenes_colmap_ready.txt"}
 SCENES=${SCENES:-}
 
-RUN_NAME=${RUN_NAME:-pose_sd_v8}
+RUN_NAME=${RUN_NAME:-pose_sd_v9}
 OUTPUT=${OUTPUT:-$ROOT/checkpoints/${RUN_NAME}}
-SEED=${SEED:-311}
+SEED=${SEED:-301}
 
 # - Training -
 TOTAL_STEPS=${TOTAL_STEPS:-200000}
@@ -52,8 +52,8 @@ COND_ONE_DROPPED=${COND_ONE_DROPPED:-0.10}
 COND_BOTH_DROPPED=${COND_BOTH_DROPPED:-0.05}
 
 # - Captioning -
-CAPTION_DIR=${CAPTION_DIR:-}           # path to caption JSONs; empty = no captions (null text)
-TEXT_DROP_PROB=${TEXT_DROP_PROB:-1}  # probability of dropping caption to "" per sample
+CAPTION_DIR=${CAPTION_DIR:-${ROOT}/MegaScenesCaptions} # leave empty for none
+TEXT_DROP_PROB=${TEXT_DROP_PROB:-0.1}
 
 # - Bucket ratios -
 EASY_RATIO=${EASY_RATIO:-0.50}
@@ -62,14 +62,14 @@ HARD_RATIO=${HARD_RATIO:-0.15}
 
 # - Split -
 TEST_SCENES_PCT=${TEST_SCENES_PCT:-5.0}
-TEST_TARGETS_PER_SCENE=${TEST_TARGETS_PER_SCENE:-1}
+TEST_TARGETS_PER_SCENE=${TEST_TARGETS_PER_SCENE:-0}
 SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/${RUN_NAME}_seed${SEED}}
 
 # - Checkpoints & validation -
 SAVE_EVERY=${SAVE_EVERY:-8000}
-VAL_EVERY=${VAL_EVERY:-3000}
+VAL_EVERY=${VAL_EVERY:-2000}
 KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-5}
-VAL_SAMPLE_STEPS=${VAL_SAMPLE_STEPS:-50}
+VAL_SAMPLE_STEPS=${VAL_SAMPLE_STEPS:-25}
 VAL_CFG_SCALE=${VAL_CFG_SCALE:-3.0}
 
 # - EMA -
@@ -87,6 +87,8 @@ if [[ -f "$ROOT/.venv/bin/activate" ]]; then
 fi
 cd "$ROOT"
 mkdir -p logs
+
+COMPILE_UNET=${COMPILE_UNET:-1}
 
 ARGS=(
     --output "$OUTPUT"
@@ -145,6 +147,10 @@ fi
 
 if [[ -n "$RESUME" ]]; then
     ARGS+=(--resume-from "$RESUME")
+fi
+
+if [[ "$COMPILE_UNET" == "1" ]]; then
+    ARGS+=(--compile-unet)
 fi
 
 if [[ -n "$CAPTION_DIR" ]]; then
