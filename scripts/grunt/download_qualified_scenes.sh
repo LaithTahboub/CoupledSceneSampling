@@ -25,7 +25,7 @@ ROOT="/vulcanscratch/ltahboub/CoupledSceneSampling"
 SCRIPT_DIR="${ROOT}/scripts"
 DOWNLOAD_SCRIPT="${ROOT}/scripts/grunt/download_scene_data.sh"
 
-OUT_ROOT="${OUT_ROOT:-${ROOT}/MegaScenes}"
+OUT_ROOT="${OUT_ROOT:-/fs/nexus-scratch/ltahboub/MegaScenes}"
 COUNT="${COUNT:-1w}"
 CATEGORIES_JSON="${CATEGORIES_JSON:-${OUT_ROOT}/metadata/categories.json}"
 SCENES_READY_FILE="${SCENES_READY_FILE:-${OUT_ROOT}/scenes_colmap_ready.txt}"

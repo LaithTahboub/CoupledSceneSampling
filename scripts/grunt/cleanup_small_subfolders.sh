@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-MEGASCENES="${MEGASCENES:-/vulcanscratch/ltahboub/CoupledSceneSampling/MegaScenes}"
+MEGASCENES="${MEGASCENES:-/fs/nexus-scratch/ltahboub/MegaScenes}"
 MIN_IMAGES="${MIN_IMAGES:-50}"
 DRY_RUN=true
 

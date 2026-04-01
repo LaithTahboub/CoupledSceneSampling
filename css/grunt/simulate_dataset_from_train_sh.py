@@ -231,7 +231,7 @@ def main() -> None:
 
     variables = dict(defaults)
     variables["ROOT"] = str(root)
-    megascenes_root = _resolve_template(defaults.get("MEGASCENES_ROOT", "$ROOT/MegaScenes"), variables)
+    megascenes_root = _resolve_template(defaults.get("MEGASCENES_ROOT", "/fs/nexus-scratch/ltahboub/MegaScenes"), variables)
     variables["MEGASCENES_ROOT"] = megascenes_root
 
     scenes_file_str = args.scenes_file or _resolve_template(

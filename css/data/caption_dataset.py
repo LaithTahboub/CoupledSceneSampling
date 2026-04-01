@@ -1,9 +1,4 @@
 """Batch VLM captioning for MegaScenes target images.
-
-Uses Qwen2.5-VL-7B-Instruct (served via vLLM OpenAI-compatible API) to generate
-structured captions describing lighting, weather, time-of-day, and transient
-objects for each target image. Captions are saved per-scene as JSON files.
-
 Usage:
     # 1. Start vLLM server (on one or more GPUs):
     vllm serve Qwen/Qwen2.5-VL-7B-Instruct \

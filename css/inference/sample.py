@@ -1,6 +1,7 @@
 """Sample from a PoseSD checkpoint."""
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -25,9 +26,11 @@ def main():
     parser.add_argument("--target", type=str, default=None, help="Target image name (or random if not set)")
     parser.add_argument("--ref1", type=str, default=None, help="Ref1 image name (skip auto-selection)")
     parser.add_argument("--ref2", type=str, default=None, help="Ref2 image name (skip auto-selection)")
-    parser.add_argument("--prompt", default=None, help="Text prompt (auto-generated from scene name if not set)")
+    parser.add_argument("--prompt", default=None, help="Text prompt (overrides caption lookup if set)")
+    parser.add_argument("--caption-dir", default=None, help="Directory with per-scene caption JSONs")
     parser.add_argument("--num-steps", type=int, default=50)
     parser.add_argument("--cfg-scale", type=float, default=3.0)
+    parser.add_argument("--cfg-text", type=float, default=3.0, help="Text CFG scale")
     parser.add_argument("--min-covisibility", type=float, default=0.15)
     parser.add_argument("--max-covisibility", type=float, default=0.80)
     parser.add_argument("--min-distance", type=float, default=0.20)
@@ -43,10 +46,17 @@ def main():
     torch.manual_seed(args.seed)
 
     scene_dir = Path(args.scene)
-    # Model was trained with empty-string text conditioning, so default to ""
-    # to match training distribution. A non-empty prompt will act as novel
-    # conditioning that the model never saw, which can degrade quality.
-    prompt = args.prompt if args.prompt is not None else ""
+
+    # Prompt resolution: --prompt overrides everything, otherwise look up
+    # the target's caption from the caption dir, falling back to "".
+    prompt = args.prompt  # None means "auto from captions"
+    _scene_captions = {}
+    if prompt is None and args.caption_dir is not None:
+        caption_file = Path(args.caption_dir) / f"{scene_dir.name}.json"
+        if caption_file.exists():
+            _scene_captions = json.load(open(caption_file))
+    if prompt is None:
+        prompt = ""  # resolved after target is selected, below
 
     print("Loading model...")
     model = PoseSD()
@@ -88,6 +98,10 @@ def main():
 
     print(f"Target: {target_img.name}")
 
+    # Resolve caption if not explicitly set via --prompt
+    if args.prompt is None and _scene_captions:
+        prompt = _scene_captions.get(target_img.name, "")
+
     # Select references
     if args.ref1 is not None and args.ref2 is not None:
         ref1_img = _find_image(args.ref1, all_images)
@@ -116,6 +130,7 @@ def main():
             prompt=prompt,
             num_steps=args.num_steps,
             cfg_scale=args.cfg_scale,
+            cfg_text=args.cfg_text,
             seed=args.seed,
         )
 

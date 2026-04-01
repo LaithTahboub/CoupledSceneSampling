@@ -21,7 +21,7 @@ set -euo pipefail
 ROOT=${ROOT:-/vulcanscratch/ltahboub/CoupledSceneSampling}
 CHECKPOINT=${CHECKPOINT:-$ROOT/checkpoints/pose_sd_v1/unet_latest.pt}
 SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/pose_sd_seed42}
-DATA_ROOT=${DATA_ROOT:-$ROOT/MegaScenes}
+DATA_ROOT=${DATA_ROOT:-/fs/nexus-scratch/ltahboub/MegaScenes}
 MODE=${MODE:-triplet}
 
 # Single-triplet / images mode
@@ -30,11 +30,14 @@ TARGET=${TARGET:-}  # image name (or empty for random)
 REF1=${REF1:-}      # ref1 image name (images mode)
 REF2=${REF2:-}      # ref2 image name (images mode)
 
+# Captions
+CAPTION_DIR=${CAPTION_DIR:-/fs/nexus-scratch/ltahboub/MegaScenesCaptions}
+
 # Photos mode (DUSt3R)
 DIRECTION=${DIRECTION:-right}
 DISTANCE=${DISTANCE:-0.3}
 ANCHOR=${ANCHOR:-ref1}
-PROMPT=${PROMPT:-"a photo of a scene"}
+PROMPT=${PROMPT:-}
 
 # Batch mode: how many to sample, starting from TARGET_IDX
 NUM=${NUM:-5}
@@ -43,6 +46,7 @@ TARGET_IDX=${TARGET_IDX:-0}  # 0-based offset into withheld targets list
 # Generation params
 NUM_STEPS=${NUM_STEPS:-50}
 CFG_SCALE=${CFG_SCALE:-3.0}
+CFG_TEXT=${CFG_TEXT:-3.0}
 MIN_COVISIBILITY=${MIN_COVISIBILITY:-0.15}
 MAX_COVISIBILITY=${MAX_COVISIBILITY:-0.80}
 MIN_DISTANCE=${MIN_DISTANCE:-0.2}
@@ -65,12 +69,17 @@ COMMON_ARGS=(
     --checkpoint "$CHECKPOINT"
     --num-steps "$NUM_STEPS"
     --cfg-scale "$CFG_SCALE"
+    --cfg-text "$CFG_TEXT"
     --min-covisibility "$MIN_COVISIBILITY"
     --max-covisibility "$MAX_COVISIBILITY"
     --min-distance "$MIN_DISTANCE"
     --H "$H" --W "$W"
     --seed "$SEED"
+    --caption-dir "$CAPTION_DIR"
 )
+if [[ -n "$PROMPT" ]]; then
+    COMMON_ARGS+=(--prompt "$PROMPT")
+fi
 if [[ "$SHOW_PLUCKERS" == "1" ]]; then
     COMMON_ARGS+=(--show-pluckers)
 fi
@@ -118,10 +127,13 @@ photos)
         --checkpoint "$CHECKPOINT"
         --num-steps "$NUM_STEPS"
         --cfg-scale "$CFG_SCALE"
+        --cfg-text "$CFG_TEXT"
         --H "$H" --W "$W"
         --seed "$SEED"
-        --prompt "$PROMPT"
     )
+    if [[ -n "$PROMPT" ]]; then
+        PHOTO_ARGS+=(--prompt "$PROMPT")
+    fi
     if [[ -n "$TARGET" ]]; then
         PHOTO_ARGS+=(--target "$TARGET")
         safe_tgt=$(basename "$TARGET" | tr ' .' '_')

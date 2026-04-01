@@ -6,7 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-OUT_ROOT="${OUT_ROOT:-${ROOT}/MegaScenes}"
+OUT_ROOT="${OUT_ROOT:-/fs/nexus-scratch/ltahboub/MegaScenes}"
 DOWNLOAD_COUNT="${DOWNLOAD_COUNT:-140}"
 TARGET_SCENES="${TARGET_SCENES:-100}"
 SCENES_IMAGES_FILE="${SCENES_IMAGES_FILE:-${OUT_ROOT}/scenes_images_only.txt}"

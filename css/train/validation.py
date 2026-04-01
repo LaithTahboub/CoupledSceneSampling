@@ -5,11 +5,12 @@ Provides:
 - Fixed validation subsets by difficulty bucket
 - Reference-copying detection (LPIPS between generated and nearest ref)
 - Bucket-wise loss and metric logging
+- Multi-seed generation for more representative evaluation
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import torch
@@ -157,6 +158,17 @@ class ValMetrics:
     bucket_copy_ratio: dict[str, float] | None = None
 
 
+@dataclass
+class SeedResult:
+    """Metrics and generated image for a single seed."""
+    seed: int
+    generated: torch.Tensor
+    psnr: float = 0.0
+    ssim: float = 0.0
+    lpips: float = 0.0
+    copy_ratio: float = 1.0
+
+
 @torch.inference_mode()
 def run_validation(
     model,
@@ -165,14 +177,25 @@ def run_validation(
     *,
     num_steps: int = 50,
     cfg_scale: float = 3.0,
+    cfg_text: float = 3.0,
     seed: int = 42,
+    seeds_per_sample: int = 3,
     max_samples: int = 16,
     compute_lpips: bool = True,
 ) -> tuple[ValMetrics, list[dict]]:
-    """Run validation on selected indices, computing per-sample metrics.
+    """Run validation on selected indices with multiple seeds per sample.
+
+    For each validation sample, generates ``seeds_per_sample`` images using
+    seeds ``[seed, seed+1, ..., seed+seeds_per_sample-1]``.  Metrics are
+    averaged across seeds for each sample, then across samples.
 
     Returns:
         (aggregated_metrics, list_of_per_sample_dicts)
+
+        Each per-sample dict contains:
+          - "psnr", "ssim", "lpips", "copy_ratio": averaged across seeds
+          - "seeds": list[SeedResult] with per-seed images and metrics
+          - "scene_name", "target_name", "difficulty": metadata
     """
     lpips_fn = LPIPSMetric() if compute_lpips else None
 
@@ -181,41 +204,64 @@ def run_validation(
 
     indices_to_eval = indices[:max_samples]
 
+    seeds_list = [seed + si for si in range(seeds_per_sample)]
+
     for idx in indices_to_eval:
         item = val_dataset[idx]
-        generated = model.sample(
+        target_gt = item["target_img"]
+
+        # Batch all seeds into a single sample() call
+        all_generated = model.sample(
             ref1_img=item["ref1_img"].unsqueeze(0),
             ref2_img=item["ref2_img"].unsqueeze(0),
             pl_ref1=item["plucker_ref1"].unsqueeze(0),
             pl_ref2=item["plucker_ref2"].unsqueeze(0),
             pl_tgt=item["plucker_tgt"].unsqueeze(0),
             prompt=item.get("prompt", ""),
-            num_steps=num_steps, cfg_scale=cfg_scale, seed=seed,
-        )[0].cpu()
+            num_steps=num_steps,
+            cfg_scale=cfg_scale,
+            cfg_text=cfg_text,
+            seed=seeds_list if seeds_per_sample > 1 else seed,
+        ).cpu()
 
-        target_gt = item["target_img"]
+        seed_results: list[SeedResult] = []
+        for si, current_seed in enumerate(seeds_list):
+            generated = all_generated[si]
 
-        sample_metrics = {
-            "psnr": psnr(generated, target_gt),
-            "ssim": ssim(generated, target_gt),
+            sr = SeedResult(seed=current_seed, generated=generated,
+                            psnr=psnr(generated, target_gt),
+                            ssim=ssim(generated, target_gt))
+
+            if lpips_fn is not None:
+                sr.lpips = lpips_fn(generated, target_gt)
+                copy_info = reference_copy_score(
+                    generated, item["ref1_img"], item["ref2_img"],
+                    target_gt, lpips_fn,
+                )
+                sr.copy_ratio = copy_info["copy_ratio"]
+
+            seed_results.append(sr)
+
+        # Average metrics across seeds
+        sample_entry = {
+            "psnr": float(np.mean([s.psnr for s in seed_results])),
+            "ssim": float(np.mean([s.ssim for s in seed_results])),
             "scene_name": item["scene_name"],
             "target_name": item.get("target_name", ""),
             "difficulty": item.get("difficulty", "unknown"),
+            "seeds": seed_results,
+            # Keep first seed's generated for backward compat
+            "generated": seed_results[0].generated,
         }
 
-        if lpips_fn is not None:
-            sample_metrics["lpips"] = lpips_fn(generated, target_gt)
-            copy_info = reference_copy_score(
-                generated, item["ref1_img"], item["ref2_img"],
-                target_gt, lpips_fn,
-            )
-            sample_metrics.update(copy_info)
+        if compute_lpips:
+            sample_entry["lpips"] = float(np.mean([s.lpips for s in seed_results]))
+            sample_entry["copy_ratio"] = float(np.mean([s.copy_ratio for s in seed_results]))
 
-        per_sample.append(sample_metrics)
+        per_sample.append(sample_entry)
 
-        # Group by bucket
-        diff = sample_metrics["difficulty"]
-        bucket_metrics.setdefault(diff, []).append(sample_metrics)
+        diff = sample_entry["difficulty"]
+        bucket_metrics.setdefault(diff, []).append(sample_entry)
 
     # Aggregate
     if not per_sample:

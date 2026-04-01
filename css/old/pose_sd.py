@@ -287,9 +287,10 @@ class PoseSD(nn.Module):
         self, *,
         ref1_img: torch.Tensor, ref2_img: torch.Tensor,
         pl_ref1: torch.Tensor, pl_ref2: torch.Tensor, pl_tgt: torch.Tensor,
-        prompt: str = "", num_steps: int = 50, cfg_scale: float = 4.0, seed: int = 42,
+        prompt: str = "", num_steps: int = 50, cfg_scale: float = 3.0,
+        cfg_text: float = 1.0, seed: int = 42,
     ) -> torch.Tensor:
-        """Single-target inference."""
+        """Single-target inference. cfg_text is accepted for API compat but not used."""
         ref1_lat = self.encode_image(ref1_img.to(self.device))
         ref2_lat = self.encode_image(ref2_img.to(self.device))
         pl_ref1 = pl_ref1.to(self.device)

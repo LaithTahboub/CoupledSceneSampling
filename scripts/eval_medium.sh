@@ -10,33 +10,36 @@
 #SBATCH --partition=vulcan-ampere
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=48gb
+#SBATCH --mem=32gb
 #SBATCH --gres=gpu:rtxa6000:1
 #SBATCH --account=vulcan-jbhuang
 #SBATCH --qos=vulcan-medium
-#SBATCH --time=1-0:00:00
+#SBATCH --time=3:00:00
 #SBATCH --output=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/eval_medium_%j.out
 #SBATCH --error=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/eval_medium_%j.err
 
 set -euo pipefail
 
 ROOT=/vulcanscratch/ltahboub/CoupledSceneSampling
-CHECKPOINT=${CHECKPOINT:-$ROOT/checkpoints/pose_sd_v5/unet_step_184000.pt}
-SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/pose_sd_seed42}
-DATA_ROOT=${DATA_ROOT:-$ROOT/MegaScenes}
+CHECKPOINT=${CHECKPOINT:-$ROOT/checkpoints/pose_sd_v9_512x512/unet_latest.pt}
+SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/pose_sd_v9_seed101}
+DATA_ROOT=${DATA_ROOT:-/fs/nexus-scratch/ltahboub/MegaScenes}
 
-NUM_SCENES=${NUM_SCENES:-5}
-SCENE_IDX=${SCENE_IDX:-16}  # 0-based offset into test scenes list
+NUM_SCENES=${NUM_SCENES:-10}
+SCENE_IDX=${SCENE_IDX:-10}  # 0-based offset into test scenes list
 TARGETS_PER_SCENE=${TARGETS_PER_SCENE:-3}
 SAMPLES_PER_TRIPLET=${SAMPLES_PER_TRIPLET:-3}
+SCENE=${SCENE:-} # infer on one scene
+CAPTION_DIR=${CAPTION_DIR:-/fs/nexus-scratch/ltahboub/MegaScenesCaptions}
 
-ARCH_VERSION=${ARCH_VERSION:-"OLD"}
+ARCH_VERSION=${ARCH_VERSION:-"NEW"}
 
 NUM_STEPS=${NUM_STEPS:-25}
 CFG_SCALE=${CFG_SCALE:-3}
-H=${H:-256}
-W=${W:-256}
-SEED=${SEED:-112}
+CFG_TEXT=${CFG_TEXT:-4.5}
+H=${H:-512}
+W=${W:-512}
+SEED=${SEED:-11}
 
 OUT_DIR=${OUT_DIR:-$ROOT/outputs/eval_medium_$(date +%Y%m%d_%H%M%S)}
 
@@ -66,6 +69,7 @@ from PIL import Image
 split_json = '$SPLIT_DIR/split_info.json'
 data_root = Path('$DATA_ROOT')
 checkpoint = '$CHECKPOINT'
+caption_dir = Path('$CAPTION_DIR')
 out_dir = Path('$OUT_DIR')
 num_scenes = $NUM_SCENES
 scene_idx = $SCENE_IDX
@@ -73,6 +77,7 @@ targets_per_scene = $TARGETS_PER_SCENE
 samples_per_triplet = $SAMPLES_PER_TRIPLET
 num_steps = $NUM_STEPS
 cfg_scale = $CFG_SCALE
+cfg_text = $CFG_TEXT
 H, W = $H, $W
 base_seed = $SEED
 
@@ -82,14 +87,14 @@ random.seed(base_seed)
 
 # Load split
 info = json.load(open(split_json))
-test_scenes = info['test_scenes'][scene_idx:scene_idx + num_scenes]
+test_scenes = info['test_scenes'][scene_idx:scene_idx + num_scenes] if not '${SCENE}' else ['${SCENE}']
 print(f'Test scenes available: {len(info[\"test_scenes\"])}, using idx {scene_idx}..{scene_idx + len(test_scenes) - 1} ({len(test_scenes)} scenes)')
 
 # MEDIUM difficulty covisibility/distance ranges
 MEDIUM_MIN_COVIS = 0.25
-MEDIUM_MAX_COVIS = 0.50
+MEDIUM_MAX_COVIS = 0.60
 MEDIUM_MIN_DIST = 0.08
-MEDIUM_MAX_DIST = 0.40
+MEDIUM_MAX_DIST = 0.60
 
 # Load model once
 from css.models.pose_sd import PoseSD
@@ -123,6 +128,15 @@ for scene_name in test_scenes:
     except Exception as e:
         print(f'  SKIP (load failed): {e}')
         continue
+
+    # Load captions for this scene
+    scene_captions = {}
+    scene_caption_file = caption_dir / f'{Path(scene_name).name}.json'
+    if scene_caption_file.exists():
+        scene_captions = json.load(open(scene_caption_file))
+        print(f'  Loaded {len(scene_captions)} captions from {scene_caption_file.name}')
+    else:
+        print(f'  No caption file found at {scene_caption_file.name}')
 
     if len(reference_images) < 2 or len(target_images) == 0:
         print(f'  SKIP (not enough images: {len(target_images)} targets, {len(reference_images)} refs)')
@@ -174,6 +188,11 @@ for scene_name in test_scenes:
             sample = build_single_sample(cameras, images_dir, ref1, ref2, target_img, H, W)
             safe_tgt = Path(target_img.name).stem.replace('/', '_').replace(' ', '_')[:40]
 
+            # Look up caption for this target image
+            target_caption = scene_captions.get(target_img.name, '')
+            if not target_caption:
+                print(f'    (no caption for {target_img.name})')
+
             for si in range(samples_per_triplet):
                 s = base_seed + si
                 with torch.inference_mode():
@@ -183,21 +202,23 @@ for scene_name in test_scenes:
                         pl_ref1=sample['plucker_ref1'],
                         pl_ref2=sample['plucker_ref2'],
                         pl_tgt=sample['plucker_tgt'],
-                        prompt='',
+                        prompt=target_caption,
                         num_steps=num_steps,
                         cfg_scale=cfg_scale,
+                        cfg_text=cfg_text,
                         seed=s,
                     )
 
                 grid = build_comparison_grid(
                     sample['ref1_img'][0], sample['ref2_img'][0],
                     sample['target_img'][0], generated[0],
+                    prompt=target_caption,
                 )
 
                 out_path = scene_out / f'{safe_tgt}_seed{s}.png'
                 Image.fromarray(grid).save(out_path)
 
-            print(f'  [{scene_count+1}/{targets_per_scene}] {target_img.name} ({samples_per_triplet} seeds)')
+            	#print(f'  [{scene_count+1}/{targets_per_scene}] {target_img.name} ({samples_per_triplet} seeds) caption: {target_caption[:80]}{"..." if len(target_caption) > 80 else ""}')
             scene_count += 1
             total += 1
 

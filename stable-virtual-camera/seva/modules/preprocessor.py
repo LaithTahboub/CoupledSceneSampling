@@ -114,3 +114,131 @@ class Dust3rPipeline(object):
         Ks[:, :2, :2] *= (ori_img_whs / img_whs).mean(axis=1, keepdims=True)[..., None]
 
         return imgs, Ks, c2ws, points, point_colors
+
+
+class Mast3rPipeline(object):
+    """MASt3R-based pose estimation — drop-in replacement for Dust3rPipeline.
+
+    MASt3R (Matching And Stereo 3D Reconstruction) is built on top of DUSt3R
+    and produces higher-quality correspondences, which typically leads to more
+    accurate camera poses and denser point clouds.
+
+    Expects the MASt3R repo at ``third_party/mast3r/`` (with its bundled
+    ``dust3r/`` submodule).  The API mirrors ``Dust3rPipeline`` exactly so
+    either can be used interchangeably.
+    """
+
+    def __init__(self, device: str | torch.device = "cuda"):
+        mast3r_root = osp.realpath(
+            osp.join(osp.dirname(__file__), "../../third_party/mast3r/")
+        )
+        mast3r_dust3r = osp.join(mast3r_root, "dust3r")
+        for p in (mast3r_root, mast3r_dust3r):
+            if p not in sys.path:
+                sys.path.insert(0, p)
+
+        try:
+            with open(os.devnull, "w") as f, contextlib.redirect_stdout(f):
+                from mast3r.model import AsymmetricMASt3R  # type: ignore[import]
+                from dust3r.cloud_opt import (  # type: ignore[import]
+                    GlobalAlignerMode,
+                    global_aligner,
+                )
+                from dust3r.image_pairs import make_pairs  # type: ignore[import]
+                from dust3r.inference import inference  # type: ignore[import]
+                from dust3r.utils.image import load_images  # type: ignore[import]
+        except ImportError:
+            raise ImportError(
+                "MASt3R not found. Clone it into third_party/:\n"
+                "  cd stable-virtual-camera/third_party\n"
+                "  git clone --recursive https://github.com/naver/mast3r.git\n"
+                "and install deps: pip install scikit-learn roma"
+            )
+
+        self.device = torch.device(device)
+        self.model = AsymmetricMASt3R.from_pretrained(
+            "naver/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric"
+        ).to(self.device)
+
+        self._GlobalAlignerMode = GlobalAlignerMode
+        self._global_aligner = global_aligner
+        self._make_pairs = make_pairs
+        self._inference = inference
+        self._load_images = load_images
+
+    def infer_cameras_and_points(
+        self,
+        img_paths: list[str],
+        Ks: list[list] = None,
+        c2ws: list[list] = None,
+        batch_size: int = 16,
+        schedule: str = "cosine",
+        lr: float = 0.01,
+        niter: int = 500,
+        min_conf_thr: int = 3,
+    ) -> tuple[
+        list[np.ndarray], np.ndarray, np.ndarray, list[np.ndarray], list[np.ndarray]
+    ]:
+        num_img = len(img_paths)
+        if num_img == 1:
+            print("Only one image found, duplicating it to create a stereo pair.")
+            img_paths = img_paths * 2
+
+        images = self._load_images(img_paths, size=512)
+        pairs = self._make_pairs(
+            images,
+            scene_graph="complete",
+            prefilter=None,
+            symmetrize=True,
+        )
+        output = self._inference(pairs, self.model, self.device, batch_size=batch_size)
+
+        ori_imgs = [iio.imread(p) for p in img_paths]
+        ori_img_whs = np.array([img.shape[1::-1] for img in ori_imgs])
+        img_whs = np.concatenate([image["true_shape"][:, ::-1] for image in images], 0)
+
+        # MASt3R's bundled dust3r has a different global_aligner API:
+        # no same_focals/optimize_pp kwargs.
+        scene = self._global_aligner(
+            output,
+            device=self.device,
+            mode=self._GlobalAlignerMode.PointCloudOptimizer,
+            min_conf_thr=min_conf_thr,
+        )
+
+        if c2ws is not None:
+            scene.preset_pose(c2ws)
+
+        _ = scene.compute_global_alignment(
+            init="msp", niter=niter, schedule=schedule, lr=lr
+        )
+
+        imgs = cast(list, scene.imgs)
+        Ks = scene.get_intrinsics().detach().cpu().numpy().copy()
+        c2ws = scene.get_im_poses().detach().cpu().numpy()  # type: ignore
+        pts3d = [x.detach().cpu().numpy() for x in scene.get_pts3d()]  # type: ignore
+        if num_img > 1:
+            masks = [x.detach().cpu().numpy() for x in scene.get_masks()]
+            points = [p[m] for p, m in zip(pts3d, masks)]
+            point_colors = [img[m] for img, m in zip(imgs, masks)]
+        else:
+            points = [p.reshape(-1, 3) for p in pts3d]
+            point_colors = [img.reshape(-1, 3) for img in imgs]
+
+        # Convert back to the original image size.
+        imgs = ori_imgs
+        Ks[:, :2, -1] *= ori_img_whs / img_whs
+        Ks[:, :2, :2] *= (ori_img_whs / img_whs).mean(axis=1, keepdims=True)[..., None]
+
+        return imgs, Ks, c2ws, points, point_colors
+
+
+def get_pose_pipeline(
+    name: str = "dust3r", device: str | torch.device = "cuda",
+) -> Dust3rPipeline | Mast3rPipeline:
+    """Factory: return a pose-estimation pipeline by name."""
+    if name == "dust3r":
+        return Dust3rPipeline(device=device)
+    if name == "mast3r":
+        return Mast3rPipeline(device=device)
+    raise ValueError(f"Unknown pose estimator: {name!r} (choose 'dust3r' or 'mast3r')")

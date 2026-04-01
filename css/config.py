@@ -111,6 +111,8 @@ class TrainConfig:
     val_every_steps: int = 3_000
     val_sample_steps: int = 50
     val_cfg_scale: float = 3.0
+    val_cfg_text: float = 3.0
+    val_seeds_per_sample: int = 3
 
     # Misc
     seed: int = 42

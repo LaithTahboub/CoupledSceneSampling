@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DOWNLOAD_SCRIPT="${SCRIPT_DIR}/download_scene_data.sh"
 
-OUT_ROOT="${OUT_ROOT:-${ROOT}/MegaScenes}"
+OUT_ROOT="${OUT_ROOT:-/fs/nexus-scratch/ltahboub/MegaScenes}"
 COUNT="${COUNT:-140}"
 MIN_READY="${MIN_READY:-100}"
 CATEGORIES_JSON="${CATEGORIES_JSON:-${OUT_ROOT}/metadata/categories.json}"

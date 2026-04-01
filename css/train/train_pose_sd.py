@@ -23,6 +23,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from PIL import Image as PILImage, ImageDraw
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Sampler, WeightedRandomSampler
@@ -299,6 +300,82 @@ def _build_split(
 # Validation & logging
 # ---------------------------------------------------------------------------
 
+def _build_val_grid(
+    item: dict,
+    seed_results: list,
+    to_uint8_fn,
+) -> np.ndarray:
+    """Build a multi-seed validation grid.
+
+    Layout (vertical):
+        Row 0: [ref1 | ref2 | GT]  (with labels)
+        Row 1: [gen seed0]  [gen seed1]  [gen seed2]  (with seed/metric labels)
+        Row 2: prompt text (if present)
+
+    Each panel gets a small label strip at the top.
+    """
+    from css.train.validation import SeedResult
+
+    ref1 = to_uint8_fn(item["ref1_img"])
+    ref2 = to_uint8_fn(item["ref2_img"])
+    gt = to_uint8_fn(item["target_img"])
+    H, W = ref1.shape[0], ref1.shape[1]
+
+    label_h = 16
+    n_seeds = len(seed_results)
+
+    def _label_panel(img: np.ndarray, text: str) -> np.ndarray:
+        """Add a label strip above an image panel."""
+        strip = PILImage.new("RGB", (W, label_h), (30, 30, 30))
+        draw = ImageDraw.Draw(strip)
+        draw.text((4, 1), text, fill=(220, 220, 220))
+        return np.concatenate([np.array(strip), img], axis=0)
+
+    # Top row: [ref1 | ref2 | GT] padded to match bottom row width
+    top_panels = [
+        _label_panel(ref1, "ref1"),
+        _label_panel(ref2, "ref2"),
+        _label_panel(gt, "GT"),
+    ]
+    top_row = np.concatenate(top_panels, axis=1)  # (label_h + H, 3*W, 3)
+
+    # Bottom row: generated images per seed
+    bottom_panels = []
+    for sr in seed_results:
+        gen = to_uint8_fn(sr.generated)
+        label = f"seed {sr.seed}  P={sr.psnr:.1f} L={sr.lpips:.3f}"
+        bottom_panels.append(_label_panel(gen, label))
+    bottom_row = np.concatenate(bottom_panels, axis=1)  # (label_h + H, n_seeds*W, 3)
+
+    # Pad rows to the same width
+    target_w = max(top_row.shape[1], bottom_row.shape[1])
+    def _pad_w(arr: np.ndarray, w: int) -> np.ndarray:
+        if arr.shape[1] < w:
+            pad = np.zeros((arr.shape[0], w - arr.shape[1], 3), dtype=np.uint8)
+            return np.concatenate([arr, pad], axis=1)
+        return arr
+
+    grid = np.concatenate([
+        _pad_w(top_row, target_w),
+        _pad_w(bottom_row, target_w),
+    ], axis=0)
+
+    # Add prompt text below
+    prompt_text = item.get("caption", "") or item.get("prompt", "")
+    if prompt_text:
+        prompt_text = prompt_text.strip()
+        if len(prompt_text) > 220:
+            prompt_text = prompt_text[:217] + "..."
+        text_h = 20
+        canvas = PILImage.new("RGB", (grid.shape[1], grid.shape[0] + text_h), (0, 0, 0))
+        canvas.paste(PILImage.fromarray(grid), (0, 0))
+        draw = ImageDraw.Draw(canvas)
+        draw.text((4, grid.shape[0] + 3), prompt_text, fill=(200, 200, 200))
+        grid = np.array(canvas)
+
+    return grid
+
+
 @torch.inference_mode()
 def _log_validation(
     model: PoseSD,
@@ -307,90 +384,94 @@ def _log_validation(
     global_step: int,
     cfg: TrainConfig,
 ) -> None:
-    """Run validation and log metrics + sample images."""
+    """Run validation and log metrics + multi-seed sample images."""
     if not _is_main_process():
         return
 
+    # Unwrap DDP/compiled UNet so inference doesn't retrigger torch.compile.
+    # Use try/finally to guarantee the DDP wrapper is restored even on error,
+    # otherwise subsequent training would silently run without gradient sync.
+    raw_unet = model.unet
+    if isinstance(raw_unet, DDP):
+        model.unet = raw_unet.module
     model.eval()
 
-    # Select a diverse subset of validation samples
-    max_val = min(8, len(val_indices))
-    # Try to get samples from each bucket
-    bucket_indices: dict[str, list[int]] = {}
-    for i in val_indices:
-        item = val_dataset[i]
-        diff = item.get("difficulty", "unknown") if isinstance(item, dict) else "unknown"
-        bucket_indices.setdefault(diff, []).append(i)
+    try:
+        # Select a diverse subset of validation samples
+        max_val = min(8, len(val_indices))
+        # Try to get samples from each bucket — read difficulty from
+        # the pre-built records to avoid triggering full __getitem__
+        bucket_indices: dict[str, list[int]] = {}
+        base_ds = val_dataset.dataset if hasattr(val_dataset, "dataset") else val_dataset
+        for i in val_indices:
+            raw_idx = val_dataset.indices[i] if hasattr(val_dataset, "indices") else i
+            if hasattr(base_ds, "records"):
+                diff = base_ds.records[raw_idx].difficulty.value
+            else:
+                item = val_dataset[i]
+                diff = item.get("difficulty", "unknown") if isinstance(item, dict) else "unknown"
+            bucket_indices.setdefault(diff, []).append(i)
 
-    selected = []
-    for diff, idxs in bucket_indices.items():
-        n_from_bucket = max(1, max_val // max(1, len(bucket_indices)))
-        selected.extend(idxs[:n_from_bucket])
-    selected = selected[:max_val]
+        selected = []
+        for diff, idxs in bucket_indices.items():
+            n_from_bucket = max(1, max_val // max(1, len(bucket_indices)))
+            selected.extend(idxs[:n_from_bucket])
+        selected = selected[:max_val]
 
-    if not selected:
-        return
+        if not selected:
+            return
 
-    metrics, per_sample = run_validation(
-        model, val_dataset, selected,
-        num_steps=cfg.val_sample_steps,
-        cfg_scale=cfg.val_cfg_scale,
-        seed=cfg.seed,
-        max_samples=max_val,
-        compute_lpips=True,
-    )
-
-    if not _WANDB_AVAILABLE:
-        print(f"  Val step {global_step}: PSNR={metrics.psnr_mean:.2f} SSIM={metrics.ssim_mean:.4f} "
-              f"LPIPS={metrics.lpips_mean:.4f} CopyRatio={metrics.copy_ratio_mean:.3f}")
-        return
-
-    log_dict = {
-        "val/psnr": metrics.psnr_mean,
-        "val/ssim": metrics.ssim_mean,
-        "val/lpips": metrics.lpips_mean,
-        "val/copy_ratio": metrics.copy_ratio_mean,
-    }
-
-    # Per-bucket metrics
-    if metrics.bucket_psnr:
-        for diff, val in metrics.bucket_psnr.items():
-            log_dict[f"val/psnr_{diff}"] = val
-    if metrics.bucket_lpips:
-        for diff, val in metrics.bucket_lpips.items():
-            log_dict[f"val/lpips_{diff}"] = val
-    if metrics.bucket_copy_ratio:
-        for diff, val in metrics.bucket_copy_ratio.items():
-            log_dict[f"val/copy_ratio_{diff}"] = val
-
-    # Log sample images
-    for i, sample in enumerate(per_sample[:4]):
-        item = val_dataset[selected[i]]
-        generated = model.sample(
-            ref1_img=item["ref1_img"].unsqueeze(0),
-            ref2_img=item["ref2_img"].unsqueeze(0),
-            pl_ref1=item["plucker_ref1"].unsqueeze(0),
-            pl_ref2=item["plucker_ref2"].unsqueeze(0),
-            pl_tgt=item["plucker_tgt"].unsqueeze(0),
-            prompt=item.get("prompt", ""),
+        metrics, per_sample = run_validation(
+            model, val_dataset, selected,
             num_steps=cfg.val_sample_steps,
             cfg_scale=cfg.val_cfg_scale,
+            cfg_text=cfg.val_cfg_text,
             seed=cfg.seed,
-        )[0].cpu()
+            seeds_per_sample=cfg.val_seeds_per_sample,
+            max_samples=max_val,
+            compute_lpips=True,
+        )
 
-        strip = np.concatenate([
-            to_uint8(item["ref1_img"]),
-            to_uint8(item["ref2_img"]),
-            to_uint8(item["target_img"]),
-            to_uint8(generated),
-        ], axis=1)
-        diff = item.get("difficulty", "?")
-        caption = (f'{item["scene_name"]} | {diff} | '
-                   f'PSNR={sample["psnr"]:.1f} LPIPS={sample.get("lpips", 0):.3f} '
-                   f'CR={sample.get("copy_ratio", 0):.2f}')
-        log_dict[f"val/sample_{i}"] = wandb.Image(strip, caption=caption)
+        if not _WANDB_AVAILABLE:
+            print(f"  Val step {global_step}: PSNR={metrics.psnr_mean:.2f} SSIM={metrics.ssim_mean:.4f} "
+                  f"LPIPS={metrics.lpips_mean:.4f} CopyRatio={metrics.copy_ratio_mean:.3f}")
+            return
 
-    wandb.log(log_dict, step=global_step)
+        log_dict = {
+            "val/psnr": metrics.psnr_mean,
+            "val/ssim": metrics.ssim_mean,
+            "val/lpips": metrics.lpips_mean,
+            "val/copy_ratio": metrics.copy_ratio_mean,
+        }
+
+        # Per-bucket metrics
+        if metrics.bucket_psnr:
+            for diff, val in metrics.bucket_psnr.items():
+                log_dict[f"val/psnr_{diff}"] = val
+        if metrics.bucket_lpips:
+            for diff, val in metrics.bucket_lpips.items():
+                log_dict[f"val/lpips_{diff}"] = val
+        if metrics.bucket_copy_ratio:
+            for diff, val in metrics.bucket_copy_ratio.items():
+                log_dict[f"val/copy_ratio_{diff}"] = val
+
+        # Log multi-seed sample grids
+        for i, sample in enumerate(per_sample[:4]):
+            item = val_dataset[selected[i]]
+            grid = _build_val_grid(item, sample["seeds"], to_uint8)
+
+            diff = item.get("difficulty", "?")
+            caption = (f'{item["scene_name"]} | {diff} | '
+                       f'PSNR={sample["psnr"]:.1f} LPIPS={sample.get("lpips", 0):.3f} '
+                       f'CR={sample.get("copy_ratio", 0):.2f} '
+                       f'(avg {cfg.val_seeds_per_sample} seeds)')
+            log_dict[f"val/sample_{i}"] = wandb.Image(grid, caption=caption)
+
+        wandb.log(log_dict, step=global_step)
+
+    finally:
+        # Always restore DDP-wrapped UNet
+        model.unet = raw_unet
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +570,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--keep-checkpoints", type=int, default=5)
     p.add_argument("--val-sample-steps", type=int, default=50)
     p.add_argument("--val-cfg-scale", type=float, default=4.0)
+    p.add_argument("--val-cfg-text", type=float, default=3.0, help="Text CFG scale for validation")
+    p.add_argument("--val-seeds-per-sample", type=int, default=3,
+                    help="Number of seeds per validation sample")
 
     # Split
     p.add_argument("--test-scenes-pct", type=float, default=5.0)
@@ -519,6 +603,8 @@ def _args_to_train_config(args: argparse.Namespace) -> TrainConfig:
         keep_checkpoints=args.keep_checkpoints,
         val_sample_steps=args.val_sample_steps,
         val_cfg_scale=args.val_cfg_scale,
+        val_cfg_text=args.val_cfg_text,
+        val_seeds_per_sample=args.val_seeds_per_sample,
         seed=args.seed,
         num_workers=args.num_workers,
         mixed_precision=args.mixed_precision,

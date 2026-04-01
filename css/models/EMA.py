@@ -71,9 +71,16 @@ def _extract_unet_state(raw_ckpt):
 
 
 def _strip_module_prefix(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    if not any(k.startswith("module.") for k in state_dict):
-        return state_dict
-    return {k[len("module."):]: v for k, v in state_dict.items()}
+    cleaned = {}
+    for k, v in state_dict.items():
+        # Strip DDP "module." and torch.compile "_orig_mod." prefixes
+        while k.startswith(("module.", "_orig_mod.")):
+            if k.startswith("module."):
+                k = k[len("module."):]
+            elif k.startswith("_orig_mod."):
+                k = k[len("_orig_mod."):]
+        cleaned[k] = v
+    return cleaned
 
 
 def _infer_epoch_step_from_name(path: Path) -> tuple[int, int]:

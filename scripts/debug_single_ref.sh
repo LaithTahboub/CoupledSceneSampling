@@ -16,8 +16,8 @@
 set -euo pipefail
 
 ROOT="/vulcanscratch/ltahboub/CoupledSceneSampling"
-MEGASCENES_ROOT=${MEGASCENES_ROOT:-$ROOT/MegaScenes}
-SCENES_FILE=${SCENES_FILE:-"$ROOT/MegaScenes/scenes_colmap_ready.txt"}
+MEGASCENES_ROOT=${MEGASCENES_ROOT:-/fs/nexus-scratch/ltahboub/MegaScenes}
+SCENES_FILE=${SCENES_FILE:-"/fs/nexus-scratch/ltahboub/MegaScenes/scenes_colmap_ready.txt"}
 SCENES=${SCENES:-}
 
 OUTPUT=${OUTPUT:-$ROOT/checkpoints/single_ref_debug4}

@@ -5,38 +5,38 @@
 #SBATCH --job-name=css-pose-sd
 #SBATCH --partition=vulcan-scavenger
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=100gb
-#SBATCH --gres=gpu:rtxa6000:2
+#SBATCH --cpus-per-task=18
+#SBATCH --mem=144gb
+#SBATCH --gres=gpu:h200-sxm:2
 #SBATCH --account=vulcan-jbhuang
 #SBATCH --qos=vulcan-scavenger
-#SBATCH --time=2-0:00:00
+#SBATCH --time=3-00:00:00
 #SBATCH --output=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/train_pose_sd_%j.out
 #SBATCH --error=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/train_pose_sd_%j.err
 
 set -euo pipefail
 
 ROOT="/vulcanscratch/ltahboub/CoupledSceneSampling"
-SCENES_FILE=${SCENES_FILE:-"$ROOT/MegaScenes/scenes_colmap_ready.txt"}
+SCENES_FILE=${SCENES_FILE:-"/fs/nexus-scratch/ltahboub/MegaScenes/scenes_colmap_ready.txt"}
 SCENES=${SCENES:-}
 
-RUN_NAME=${RUN_NAME:-pose_sd_v9}
+RUN_NAME=${RUN_NAME:-pose_sd_v9_512x512}
 OUTPUT=${OUTPUT:-$ROOT/checkpoints/${RUN_NAME}}
-SEED=${SEED:-301}
+SEED=${SEED:-101}
 
 # - Training -
-TOTAL_STEPS=${TOTAL_STEPS:-200000}
-PER_GPU_BATCH_SIZE=${PER_GPU_BATCH_SIZE:-2}
-GRAD_ACCUM=${GRAD_ACCUM:-8}
-# Effective batch size: 2 * 8 GPUs * 8 accum = 128
-LR=${LR:-1.5e-5}
+TOTAL_STEPS=${TOTAL_STEPS:-60000}
+PER_GPU_BATCH_SIZE=${PER_GPU_BATCH_SIZE:-32}
+GRAD_ACCUM=${GRAD_ACCUM:-2}
+
+LR=${LR:-3e-5}
 TRAIN_MODE=${TRAIN_MODE:-full}
 WARMUP_STEPS=${WARMUP_STEPS:-1000}
-LR_SCHEDULER=${LR_SCHEDULER:-constant_with_warmup}
+LR_SCHEDULER=${LR_SCHEDULER:-cosine}
 
 # - Data -
-H=${H:-256}
-W=${W:-256}
+H=${H:-512}
+W=${W:-512}
 MAX_TRIPLETS_PER_SCENE=${MAX_TRIPLETS_PER_SCENE:-132}
 MIN_POINTS_PER_IMAGE=${MIN_POINTS_PER_IMAGE:-400}
 MIN_ORIENTATION_DOT=${MIN_ORIENTATION_DOT:-0.5}
@@ -52,13 +52,13 @@ COND_ONE_DROPPED=${COND_ONE_DROPPED:-0.10}
 COND_BOTH_DROPPED=${COND_BOTH_DROPPED:-0.05}
 
 # - Captioning -
-CAPTION_DIR=${CAPTION_DIR:-${ROOT}/MegaScenesCaptions} # leave empty for none
+CAPTION_DIR=${CAPTION_DIR:-/fs/nexus-scratch/ltahboub/MegaScenesCaptions} # leave empty for none
 TEXT_DROP_PROB=${TEXT_DROP_PROB:-0.1}
 
 # - Bucket ratios -
-EASY_RATIO=${EASY_RATIO:-0.50}
-MEDIUM_RATIO=${MEDIUM_RATIO:-0.35}
-HARD_RATIO=${HARD_RATIO:-0.15}
+EASY_RATIO=${EASY_RATIO:-0.20}
+MEDIUM_RATIO=${MEDIUM_RATIO:-0.60}
+HARD_RATIO=${HARD_RATIO:-0.20}
 
 # - Split -
 TEST_SCENES_PCT=${TEST_SCENES_PCT:-5.0}
@@ -67,10 +67,12 @@ SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/${RUN_NAME}_seed${SEED}}
 
 # - Checkpoints & validation -
 SAVE_EVERY=${SAVE_EVERY:-8000}
-VAL_EVERY=${VAL_EVERY:-2000}
-KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-5}
+VAL_EVERY=${VAL_EVERY:-5000}
+KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-3}
 VAL_SAMPLE_STEPS=${VAL_SAMPLE_STEPS:-25}
 VAL_CFG_SCALE=${VAL_CFG_SCALE:-3.0}
+VAL_CFG_TEXT=${VAL_CFG_TEXT:-3.0}
+VAL_SEEDS_PER_SAMPLE=${VAL_SEEDS_PER_SAMPLE:-3}
 
 # - EMA -
 EMA_DECAY=${EMA_DECAY:-0.9999}
@@ -126,6 +128,8 @@ ARGS=(
     --keep-checkpoints "$KEEP_CHECKPOINTS"
     --val-sample-steps "$VAL_SAMPLE_STEPS"
     --val-cfg-scale "$VAL_CFG_SCALE"
+    --val-cfg-text "$VAL_CFG_TEXT"
+    --val-seeds-per-sample "$VAL_SEEDS_PER_SAMPLE"
     --ema-decay "$EMA_DECAY"
     --H "$H"
     --W "$W"
@@ -159,5 +163,5 @@ fi
 
 torchrun \
     --nproc_per_node="$NUM_GPUS" \
-    --master_port="${MASTER_PORT:-29501}" \
+    --master_port="${MASTER_PORT:-29502}" \
     -m css.train.train_pose_sd "${ARGS[@]}"
