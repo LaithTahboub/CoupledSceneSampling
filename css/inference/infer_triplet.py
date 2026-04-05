@@ -24,52 +24,86 @@ _SEVA_ROOT = str(Path(__file__).resolve().parent.parent.parent / "stable-virtual
 if _SEVA_ROOT not in sys.path:
     sys.path.insert(0, _SEVA_ROOT)
 
-def load_image_tensor_exact(path: Path, H: int, W: int) -> torch.Tensor:
-    """Load image, center-crop to target aspect ratio, resize to exactly (W, H),
-    and return tensor with shape (1, 3, H, W) in [-1, 1].
+def load_image_tensor_exact(path: Path, H: int, W: int, *, pad: bool = False) -> torch.Tensor:
+    """Load image, resize to exactly (W, H), return tensor (1, 3, H, W) in [-1, 1].
+
+    When pad=False (default), center-crops to match the target aspect ratio.
+    When pad=True, fits the image inside (W, H) with black letterboxing.
     """
     img = Image.open(path).convert("RGB")
     src_w, src_h = img.size
-
     target_aspect = W / H
     src_aspect = src_w / src_h
 
-    if src_aspect > target_aspect:
-        # crop width
-        new_w = int(round(src_h * target_aspect))
-        left = (src_w - new_w) // 2
-        img = img.crop((left, 0, left + new_w, src_h))
-    elif src_aspect < target_aspect:
-        # crop height
-        new_h = int(round(src_w / target_aspect))
-        top = (src_h - new_h) // 2
-        img = img.crop((0, top, src_w, top + new_h))
-
-    img = img.resize((W, H), Image.Resampling.BICUBIC)
+    if pad:
+        # Fit inside (W, H) preserving aspect ratio, pad the rest with black
+        if src_aspect > target_aspect:
+            # Image is wider: fit to width, pad height
+            new_w = W
+            new_h = int(round(W / src_aspect))
+        else:
+            # Image is taller: fit to height, pad width
+            new_h = H
+            new_w = int(round(H * src_aspect))
+        img = img.resize((new_w, new_h), Image.Resampling.BICUBIC)
+        canvas = Image.new("RGB", (W, H), (0, 0, 0))
+        paste_x = (W - new_w) // 2
+        paste_y = (H - new_h) // 2
+        canvas.paste(img, (paste_x, paste_y))
+        img = canvas
+    else:
+        if src_aspect > target_aspect:
+            new_w = int(round(src_h * target_aspect))
+            left = (src_w - new_w) // 2
+            img = img.crop((left, 0, left + new_w, src_h))
+        elif src_aspect < target_aspect:
+            new_h = int(round(src_w / target_aspect))
+            top = (src_h - new_h) // 2
+            img = img.crop((0, top, src_w, top + new_h))
+        img = img.resize((W, H), Image.Resampling.BICUBIC)
 
     arr = np.asarray(img, dtype=np.float32) / 127.5 - 1.0
     tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)
     return tensor
 
-def adjust_K_for_crop_resize(K: np.ndarray, src_w: int, src_h: int, H: int, W: int) -> np.ndarray:
-    """Adjust intrinsics for center-crop + resize from (src_w, src_h) to (W, H)."""
+
+def adjust_K_for_crop_resize(K: np.ndarray, src_w: int, src_h: int, H: int, W: int,
+                              *, pad: bool = False) -> np.ndarray:
+    """Adjust intrinsics for center-crop + resize (or pad + resize) from (src_w, src_h) to (W, H)."""
     K = K.copy()
     target_aspect = W / H
     src_aspect = src_w / src_h
 
-    if src_aspect > target_aspect:
-        new_w = int(src_h * target_aspect)
-        K[0, 2] -= (src_w - new_w) / 2.0
-        K[0] *= W / new_w
-        K[1] *= H / src_h
-    elif src_aspect < target_aspect:
-        new_h = int(src_w / target_aspect)
-        K[1, 2] -= (src_h - new_h) / 2.0
-        K[0] *= W / src_w
-        K[1] *= H / new_h
+    if pad:
+        # Fit-inside: scale preserving aspect, then offset for centering
+        if src_aspect > target_aspect:
+            scale = W / src_w
+            new_h = int(round(W / src_aspect))
+            paste_y = (H - new_h) // 2
+            K[0] *= scale
+            K[1] *= scale
+            K[1, 2] += paste_y
+        else:
+            scale = H / src_h
+            new_w = int(round(H * src_aspect))
+            paste_x = (W - new_w) // 2
+            K[0] *= scale
+            K[1] *= scale
+            K[0, 2] += paste_x
     else:
-        K[0] *= W / src_w
-        K[1] *= H / src_h
+        if src_aspect > target_aspect:
+            new_w = int(src_h * target_aspect)
+            K[0, 2] -= (src_w - new_w) / 2.0
+            K[0] *= W / new_w
+            K[1] *= H / src_h
+        elif src_aspect < target_aspect:
+            new_h = int(src_w / target_aspect)
+            K[1, 2] -= (src_h - new_h) / 2.0
+            K[0] *= W / src_w
+            K[1] *= H / new_h
+        else:
+            K[0] *= W / src_w
+            K[1] *= H / src_h
 
     return K
 
@@ -89,8 +123,10 @@ def main():
     parser.add_argument("--cfg-scale", type=float, default=3.0, help="Geometry CFG scale")
     parser.add_argument("--cfg-text", type=float, default=4.5, help="Text CFG scale (0=ignore text)")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--num-samples", type=int, default=1, help="Number of samples; increments seed each time")
+    parser.add_argument("--num-samples", type=int, default=3, help="Number of samples; increments seed each time")
     parser.add_argument("--prompt", default="", help="Text prompt for generation")
+    parser.add_argument("--no-crop", action="store_true",
+                        help="Pad (letterbox) instead of center-crop to preserve full FoV")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
@@ -150,9 +186,10 @@ def main():
         del pipe
         torch.cuda.empty_cache()
 
-        # --- Adjust intrinsics for center-crop + resize to (H, W) ---
+        # --- Adjust intrinsics for center-crop (or pad) + resize to (H, W) ---
         K_adj = [
-            adjust_K_for_crop_resize(Ks[i], orig_sizes[i][0], orig_sizes[i][1], H, W)
+            adjust_K_for_crop_resize(Ks[i], orig_sizes[i][0], orig_sizes[i][1], H, W,
+                                     pad=args.no_crop)
             for i in range(3)
         ]
 
@@ -164,8 +201,8 @@ def main():
         pl_tgt = compute_plucker_tensor(c2w_ref1, c2w_tgt, K_adj[2], H, W, lh, lw).unsqueeze(0)
 
         # --- Load images ---
-        ref1_tensor = load_image_tensor_exact(Path(args.ref1), H, W)
-        ref2_tensor = load_image_tensor_exact(Path(args.ref2), H, W)
+        ref1_tensor = load_image_tensor_exact(Path(args.ref1), H, W, pad=args.no_crop)
+        ref2_tensor = load_image_tensor_exact(Path(args.ref2), H, W, pad=args.no_crop)
 
     assert ref1_tensor.shape[-2:] == (H, W)
     assert ref2_tensor.shape[-2:] == (H, W)
@@ -185,7 +222,7 @@ def main():
         target_tensor, _, _ = load_image_tensor(images_dir, tgt_data.name, H, W)
         target_tensor = target_tensor.unsqueeze(0)
     else:
-        target_tensor = load_image_tensor_exact(Path(args.target), H, W)
+        target_tensor = load_image_tensor_exact(Path(args.target), H, W, pad=args.no_crop)
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 

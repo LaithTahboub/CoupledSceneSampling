@@ -229,9 +229,9 @@ def main():
     p.add_argument("--prompt", default=None,
                     help="Text prompt (overrides caption lookup if set)")
     # Shared
-    p.add_argument("--H", type=int, default=256)
-    p.add_argument("--W", type=int, default=256)
-    p.add_argument("--num-steps", type=int, default=50)
+    p.add_argument("--H", type=int, default=512)
+    p.add_argument("--W", type=int, default=512)
+    p.add_argument("--num-steps", type=int, default=25)
     p.add_argument("--cfg-scale", type=float, default=3.0)
     p.add_argument("--cfg-text", type=float, default=3.0, help="Text CFG scale")
     p.add_argument("--seed", type=int, default=112)

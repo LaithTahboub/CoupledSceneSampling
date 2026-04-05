@@ -24,6 +24,8 @@ from enum import Enum
 from pathlib import Path
 
 import numpy as np
+import torch
+from PIL import Image
 from torch.utils.data import Dataset
 
 from css.data.colmap_reader import read_scene
@@ -33,6 +35,85 @@ from css.data.dataset import (
     load_image_tensor,
 )
 from css.data.iou import compute_covisibility
+
+
+def _random_crop_and_resize(
+    pil_img: Image.Image, H: int, W: int,
+) -> tuple[Image.Image, float, float]:
+    """Random crop to target aspect ratio, then resize.
+
+    Returns (cropped_resized_image, crop_offset_x, crop_offset_y)
+    where offsets are in *original* pixel coordinates.
+    """
+    src_w, src_h = pil_img.size
+    target_aspect = W / H
+    src_aspect = src_w / src_h
+
+    if src_aspect > target_aspect:
+        # Source is wider: random horizontal crop
+        new_w = int(src_h * target_aspect)
+        max_offset = src_w - new_w
+        offset_x = random.randint(0, max(max_offset, 0))
+        offset_y = 0
+        pil_img = pil_img.crop((offset_x, 0, offset_x + new_w, src_h))
+    elif src_aspect < target_aspect:
+        # Source is taller: random vertical crop
+        new_h = int(src_w / target_aspect)
+        max_offset = src_h - new_h
+        offset_x = 0
+        offset_y = random.randint(0, max(max_offset, 0))
+        pil_img = pil_img.crop((0, offset_y, src_w, offset_y + new_h))
+    else:
+        offset_x, offset_y = 0, 0
+
+    pil_img = pil_img.resize((W, H), Image.LANCZOS)
+    return pil_img, float(offset_x), float(offset_y)
+
+
+def _load_image_random_crop(
+    images_dir: Path, image_name: str, H: int, W: int,
+) -> tuple[torch.Tensor, float, float, int, int]:
+    """Load image with random crop. Returns (tensor, offset_x, offset_y, src_w, src_h)."""
+    path = images_dir / image_name
+    with Image.open(path) as pil:
+        rgb = pil.convert("RGB")
+        src_w, src_h = rgb.size
+        cropped, off_x, off_y = _random_crop_and_resize(rgb, H, W)
+        arr = np.array(cropped, dtype=np.float32) / 255.0
+    tensor = torch.from_numpy(arr).permute(2, 0, 1) * 2 - 1
+    return tensor, off_x, off_y, src_w, src_h
+
+
+def _adjust_K_for_crop(
+    K_orig: np.ndarray, src_w: int, src_h: int, H: int, W: int,
+    offset_x: float, offset_y: float,
+) -> np.ndarray:
+    """Adjust original intrinsics for a crop at (offset_x, offset_y) + resize to (W, H).
+
+    This is the same math as build_cropped_scaled_intrinsics but with an
+    arbitrary crop offset instead of assuming center crop.
+    """
+    K = K_orig.copy()
+    target_aspect = W / H
+    src_aspect = src_w / src_h
+
+    if src_aspect > target_aspect:
+        # Horizontal crop
+        new_w = int(src_h * target_aspect)
+        K[0, 2] -= offset_x
+        K[0] *= W / new_w
+        K[1] *= H / src_h
+    elif src_aspect < target_aspect:
+        # Vertical crop
+        new_h = int(src_w / target_aspect)
+        K[1, 2] -= offset_y
+        K[0] *= W / src_w
+        K[1] *= H / new_h
+    else:
+        K[0] *= W / src_w
+        K[1] *= H / src_h
+
+    return K
 
 
 class Difficulty(Enum):
@@ -61,11 +142,19 @@ class SceneRecord:
     ref1_c2w: np.ndarray   # (4, 4)
     ref2_c2w: np.ndarray
     tgt_c2w: np.ndarray
-    K_ref1: np.ndarray     # (3, 3) adjusted for crop+resize
+    K_ref1: np.ndarray     # (3, 3) adjusted for center-crop+resize
     K_ref2: np.ndarray
     K_tgt: np.ndarray
     score: float
     difficulty: Difficulty = Difficulty.MEDIUM
+    # Original (pre-crop) intrinsics and source image dimensions — needed
+    # for random-crop augmentation to recompute K with a different offset.
+    K_ref1_orig: np.ndarray | None = None   # (3, 3) original camera K
+    K_ref2_orig: np.ndarray | None = None
+    K_tgt_orig: np.ndarray | None = None
+    ref1_src_wh: tuple[int, int] | None = None  # (width, height)
+    ref2_src_wh: tuple[int, int] | None = None
+    tgt_src_wh: tuple[int, int] | None = None
 
 
 # Keep old name as alias for backward compat
@@ -181,6 +270,16 @@ class MegaScenesDataset(Dataset):
         pair_similarity_thresh: float = 0.03,
         # Minimum unique targets required to keep a scene (ensures diversity)
         min_targets_per_scene: int = 1,
+        # Identity augmentation: probability of replacing a triplet with an
+        # identity/copy variant so the model learns to reproduce references
+        # when the target pose matches.  Three sub-types are sampled:
+        #   full_identity (40%): ref1=ref2=target (same image, identity pluckers)
+        #   copy_ref1    (30%): target=ref1 (target image/pose copied from ref1)
+        #   copy_ref2    (30%): target=ref2 (target image/pose copied from ref2)
+        identity_aug_prob: float = 0.05,
+        # Random crop augmentation: probability of using a random crop offset
+        # instead of center crop, improving generalization to different framings.
+        random_crop_prob: float = 0.15,
     ):
         self.H, self.W = H, W
         self.latent_h, self.latent_w = H // 8, W // 8
@@ -208,6 +307,8 @@ class MegaScenesDataset(Dataset):
         self.near_duplicate_threshold = near_duplicate_threshold
         self.max_pairs_per_target = max_pairs_per_target
         self.pair_similarity_thresh = pair_similarity_thresh
+        self.identity_aug_prob = identity_aug_prob
+        self.random_crop_prob = random_crop_prob
 
         # Load precomputed captions (per-scene JSON files from caption_dataset.py)
         self._captions: dict[str, dict[str, str]] = {}
@@ -303,6 +404,15 @@ class MegaScenesDataset(Dataset):
             img.id: build_cropped_scaled_intrinsics(
                 cameras[img.camera_id], self.H, self.W
             ).astype(np.float32)
+            for img in valid
+        }
+        # Store original K and source dimensions for random-crop augmentation
+        K_orig_by_id = {
+            img.id: cameras[img.camera_id].K.astype(np.float32)
+            for img in valid
+        }
+        src_wh_by_id = {
+            img.id: (cameras[img.camera_id].width, cameras[img.camera_id].height)
             for img in valid
         }
 
@@ -437,6 +547,12 @@ class MegaScenesDataset(Dataset):
                     K_ref1=K_by_id[r1], K_ref2=K_by_id[r2],
                     K_tgt=K_by_id[tgt.id], score=sc,
                     difficulty=diff,
+                    K_ref1_orig=K_orig_by_id[r1],
+                    K_ref2_orig=K_orig_by_id[r2],
+                    K_tgt_orig=K_orig_by_id[tgt.id],
+                    ref1_src_wh=src_wh_by_id[r1],
+                    ref2_src_wh=src_wh_by_id[r2],
+                    tgt_src_wh=src_wh_by_id[tgt.id],
                 )
                 kept_pairs.append(candidate)
                 kept_records.append(rec)
@@ -481,21 +597,137 @@ class MegaScenesDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         rec = self.records[idx]
 
-        ref1_img, _, _ = load_image_tensor(rec.images_dir, rec.ref1_name,
-                                           self.H, self.W)
-        ref2_img, _, _ = load_image_tensor(rec.images_dir, rec.ref2_name,
-                                           self.H, self.W)
-        target_img, _, _ = load_image_tensor(rec.images_dir, rec.target_name,
-                                             self.H, self.W)
+        # Identity augmentation: stochastically replace the triplet with
+        # a copy variant so the model learns to reproduce a reference when
+        # the target pose coincides with it.
+        aug_type = "none"
+        if self.identity_aug_prob > 0 and random.random() < self.identity_aug_prob:
+            r = random.random()
+            if r < 0.4:
+                aug_type = "full_identity"
+            elif r < 0.7:
+                aug_type = "copy_ref1"
+            else:
+                aug_type = "copy_ref2"
+
+        if aug_type == "full_identity":
+            # All three views are the same image at the same pose
+            img, _, _ = load_image_tensor(rec.images_dir, rec.ref1_name,
+                                          self.H, self.W)
+            plucker_id = compute_plucker_tensor(
+                rec.ref1_c2w, rec.ref1_c2w, rec.K_ref1,
+                self.H, self.W, self.latent_h, self.latent_w)
+            return {
+                "ref1_img": img, "ref2_img": img.clone(),
+                "target_img": img.clone(),
+                "plucker_ref1": plucker_id,
+                "plucker_ref2": plucker_id.clone(),
+                "plucker_tgt": plucker_id.clone(),
+                "prompt": rec.prompt, "caption": rec.prompt,
+                "scene_name": rec.scene_name,
+                "ref1_name": rec.ref1_name,
+                "ref2_name": rec.ref1_name,
+                "target_name": rec.ref1_name,
+                "difficulty": rec.difficulty.value,
+            }
+
+        if aug_type == "copy_ref1":
+            # Target = ref1 (same image and pose); ref2 stays normal
+            ref1_img, _, _ = load_image_tensor(rec.images_dir, rec.ref1_name,
+                                               self.H, self.W)
+            ref2_img, _, _ = load_image_tensor(rec.images_dir, rec.ref2_name,
+                                               self.H, self.W)
+            plucker_ref1 = compute_plucker_tensor(
+                rec.ref1_c2w, rec.ref1_c2w, rec.K_ref1,
+                self.H, self.W, self.latent_h, self.latent_w)
+            plucker_ref2 = compute_plucker_tensor(
+                rec.ref1_c2w, rec.ref2_c2w, rec.K_ref2,
+                self.H, self.W, self.latent_h, self.latent_w)
+            return {
+                "ref1_img": ref1_img, "ref2_img": ref2_img,
+                "target_img": ref1_img.clone(),
+                "plucker_ref1": plucker_ref1,
+                "plucker_ref2": plucker_ref2,
+                "plucker_tgt": plucker_ref1.clone(),
+                "prompt": rec.prompt, "caption": rec.prompt,
+                "scene_name": rec.scene_name,
+                "ref1_name": rec.ref1_name,
+                "ref2_name": rec.ref2_name,
+                "target_name": rec.ref1_name,
+                "difficulty": rec.difficulty.value,
+            }
+
+        if aug_type == "copy_ref2":
+            # Target = ref2 (same image and pose); ref1 stays normal
+            ref1_img, _, _ = load_image_tensor(rec.images_dir, rec.ref1_name,
+                                               self.H, self.W)
+            ref2_img, _, _ = load_image_tensor(rec.images_dir, rec.ref2_name,
+                                               self.H, self.W)
+            plucker_ref1 = compute_plucker_tensor(
+                rec.ref1_c2w, rec.ref1_c2w, rec.K_ref1,
+                self.H, self.W, self.latent_h, self.latent_w)
+            plucker_ref2 = compute_plucker_tensor(
+                rec.ref1_c2w, rec.ref2_c2w, rec.K_ref2,
+                self.H, self.W, self.latent_h, self.latent_w)
+            return {
+                "ref1_img": ref1_img, "ref2_img": ref2_img,
+                "target_img": ref2_img.clone(),
+                "plucker_ref1": plucker_ref1,
+                "plucker_ref2": plucker_ref2,
+                "plucker_tgt": plucker_ref2.clone(),
+                "prompt": rec.prompt, "caption": rec.prompt,
+                "scene_name": rec.scene_name,
+                "ref1_name": rec.ref1_name,
+                "ref2_name": rec.ref2_name,
+                "target_name": rec.ref2_name,
+                "difficulty": rec.difficulty.value,
+            }
+
+        # Random crop augmentation: each view gets an independent random
+        # crop offset, and pluckers are recomputed with the adjusted K.
+        use_random_crop = (
+            self.random_crop_prob > 0
+            and rec.K_ref1_orig is not None
+            and random.random() < self.random_crop_prob
+        )
+
+        if use_random_crop:
+            ref1_img, off1_x, off1_y, _, _ = _load_image_random_crop(
+                rec.images_dir, rec.ref1_name, self.H, self.W)
+            ref2_img, off2_x, off2_y, _, _ = _load_image_random_crop(
+                rec.images_dir, rec.ref2_name, self.H, self.W)
+            target_img, offt_x, offt_y, _, _ = _load_image_random_crop(
+                rec.images_dir, rec.target_name, self.H, self.W)
+
+            sw1, sh1 = rec.ref1_src_wh
+            sw2, sh2 = rec.ref2_src_wh
+            swt, sht = rec.tgt_src_wh
+
+            K_r1 = _adjust_K_for_crop(rec.K_ref1_orig, sw1, sh1,
+                                      self.H, self.W, off1_x, off1_y)
+            K_r2 = _adjust_K_for_crop(rec.K_ref2_orig, sw2, sh2,
+                                      self.H, self.W, off2_x, off2_y)
+            K_tg = _adjust_K_for_crop(rec.K_tgt_orig, swt, sht,
+                                      self.H, self.W, offt_x, offt_y)
+        else:
+            ref1_img, _, _ = load_image_tensor(rec.images_dir, rec.ref1_name,
+                                               self.H, self.W)
+            ref2_img, _, _ = load_image_tensor(rec.images_dir, rec.ref2_name,
+                                               self.H, self.W)
+            target_img, _, _ = load_image_tensor(rec.images_dir, rec.target_name,
+                                                 self.H, self.W)
+            K_r1 = rec.K_ref1
+            K_r2 = rec.K_ref2
+            K_tg = rec.K_tgt
 
         plucker_ref1 = compute_plucker_tensor(
-            rec.ref1_c2w, rec.ref1_c2w, rec.K_ref1,
+            rec.ref1_c2w, rec.ref1_c2w, K_r1,
             self.H, self.W, self.latent_h, self.latent_w)
         plucker_ref2 = compute_plucker_tensor(
-            rec.ref1_c2w, rec.ref2_c2w, rec.K_ref2,
+            rec.ref1_c2w, rec.ref2_c2w, K_r2,
             self.H, self.W, self.latent_h, self.latent_w)
         plucker_tgt = compute_plucker_tensor(
-            rec.ref1_c2w, rec.tgt_c2w, rec.K_tgt,
+            rec.ref1_c2w, rec.tgt_c2w, K_tg,
             self.H, self.W, self.latent_h, self.latent_w)
 
         return {

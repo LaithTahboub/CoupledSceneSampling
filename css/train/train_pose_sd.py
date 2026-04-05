@@ -513,6 +513,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pair-similarity-thresh", type=float, default=0.03)
     p.add_argument("--min-targets-per-scene", type=int, default=1,
                     help="Skip scenes with fewer unique targets (ensures diversity)")
+    p.add_argument("--identity-aug-prob", type=float, default=0.05,
+                    help="Probability of replacing a triplet with an identity/copy variant "
+                         "(teaches the model to reproduce references at matching poses)")
+    p.add_argument("--random-crop-prob", type=float, default=0.15,
+                    help="Probability of random crop instead of center crop per triplet "
+                         "(improves generalization to different framings)")
 
     # Data — bucket covisibility/distance ranges
     p.add_argument("--easy-min-covis", type=float, default=DataConfig.easy_min_covis)
@@ -680,6 +686,8 @@ def main() -> None:
         max_pairs_per_target=args.max_pairs_per_target,
         pair_similarity_thresh=args.pair_similarity_thresh,
         min_targets_per_scene=args.min_targets_per_scene,
+        identity_aug_prob=args.identity_aug_prob,
+        random_crop_prob=args.random_crop_prob,
     )
 
     # Split

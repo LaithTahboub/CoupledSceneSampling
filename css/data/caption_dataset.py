@@ -1,7 +1,7 @@
 """Batch VLM captioning for MegaScenes target images.
 Usage:
     # 1. Start vLLM server (on one or more GPUs):
-    vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
+    vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
         --host 0.0.0.0 --port 8000 \
         --tensor-parallel-size 2 \
         --max-model-len 4096 \
@@ -28,75 +28,70 @@ import base64
 import json
 import re
 import sys
-import time
+import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
+import openai
 
 
-# ---------------------------------------------------------------------------
-# System / user prompts
-# ---------------------------------------------------------------------------
+SYSTEM_PROMPT = """
+You are an image captioning system for a scene relighting dataset. Given a photograph, produce a single concise caption describing the scene's lighting, atmosphere, and transient properties.
 
-SYSTEM_PROMPT = """\
-You are a precise image captioning system for a novel view synthesis dataset. Your job is to describe ONLY the transient and environmental properties of a photograph — NOT the permanent structure of the scene.
+The caption should read as one natural descriptive sentence in the following flow:
 
-You will output a single caption in the following structured format:
-"A photo of [scene_type], [lighting], [weather], [time_of_day], [transient_objects]"
+"A [scene type], [lighting and shadow description], [sky and weather], [time of day and season], [transient objects if any]."
 
-Rules:
-- [scene_type]: One brief noun phrase describing what the scene is (e.g., "a Gothic cathedral", "a Japanese temple", "a stone bridge over a river"). Do NOT name the specific landmark.
-- [lighting]: Describe the lighting conditions (e.g., "in harsh midday sunlight", "under soft overcast light", "with dramatic golden hour side-lighting", "illuminated by streetlights at night", "in flat diffuse lighting").
-- [weather]: Describe visible weather (e.g., "on a clear day", "during light rain", "in foggy conditions", "with snow on the ground", "under partly cloudy skies"). If unclear, say "in clear conditions".
-- [time_of_day]: (e.g., "at dawn", "in the afternoon", "at dusk", "at night"). If ambiguous, omit.
-- [transient_objects]: List visible transient elements as a comma-separated clause (e.g., "with tourists in the foreground", "with parked cars along the street", "with a crowd of people and umbrellas", "with construction scaffolding on the left"). If none, omit.
+Focus on:
+- Scene type as a brief noun phrase (e.g., "a stone bridge over a river", "a cobblestone plaza"). Do NOT name specific landmarks.
+- Lighting: source type, direction, color/temperature (e.g., "warm amber", "cool bluish-white"), shadow hardness and direction, overall contrast. Mention fill or secondary light only if clearly visible.
+- Sky and weather: sky color, cloud type, atmospheric conditions like fog, haze, rain, or wet ground reflections.
+- Time and season: state if inferable from shadows, light angle, foliage, snow, or clothing.
+- Transient/temporary objects: people, vehicles, animals, scaffolding, etc., with approximate position in frame. Omit if none.
 
-Output ONLY the caption string. No explanation, no JSON, no markdown."""
+Use specific color terms ("warm golden-amber light", "pale gray overcast sky", "cool steel-blue shadows") rather than vague descriptions. Only describe what is visible. Output ONLY the caption — no explanation, no labels, no line breaks.
+"""
+USER_PROMPT = "Describe this photograph."
 
-USER_PROMPT = "Describe this photograph following the system instructions exactly."
+_thread_local = threading.local()
 
 
-# ---------------------------------------------------------------------------
-# Image encoding
-# ---------------------------------------------------------------------------
+def get_client(api_base: str) -> openai.OpenAI:
+    client = getattr(_thread_local, "client", None)
+    if client is None:
+        client = openai.OpenAI(base_url=api_base, api_key="dummy")
+        _thread_local.client = client
+    return client
+
 
 def encode_image_base64(image_path: Path, max_size: int = 1024) -> str:
-    """Load image, resize if needed, return base64-encoded JPEG."""
     img = Image.open(image_path).convert("RGB")
     w, h = img.size
     if max(w, h) > max_size:
         scale = max_size / max(w, h)
         img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
     buf = BytesIO()
-    img.save(buf, format="JPEG", quality=90)
+    img.save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-
-# ---------------------------------------------------------------------------
-# API call
-# ---------------------------------------------------------------------------
 
 def caption_single_image(
     image_path: Path,
     api_base: str,
     model: str,
-    temperature: float = 0.3,
-    max_tokens: int = 120,
+    temperature: float = 0.23,
+    max_tokens: int = 100,
     max_image_size: int = 1024,
 ) -> str:
-    """Send a single image to the vLLM OpenAI-compatible API and return the caption."""
-    import openai
-
-    client = openai.OpenAI(base_url=api_base, api_key="dummy")
+    client = get_client(api_base)
     b64 = encode_image_base64(image_path, max_size=max_image_size)
 
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": [
@@ -104,7 +99,10 @@ def caption_single_image(
                         "type": "image_url",
                         "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
                     },
-                    {"type": "text", "text": USER_PROMPT},
+                    {
+                        "type": "text",
+                        "text": f"{SYSTEM_PROMPT}\n\n{USER_PROMPT}",
+                    },
                 ],
             },
         ],
@@ -148,21 +146,15 @@ def caption_scene(
     api_base: str,
     model: str,
     *,
-    batch_size: int = 32,
-    num_workers: int = 4,
-    temperature: float = 0.3,
-    max_tokens: int = 120,
+    batch_size: int = 128,
+    num_workers: int = 12,
+    temperature: float = 0.23,
+    max_tokens: int = 100,
     max_image_size: int = 1024,
     resume: bool = True,
 ) -> dict[str, str]:
-    """Caption all images in a scene, saving results to a per-scene JSON file.
-
-    Returns the complete caption dict for this scene.
-    """
     scene_name = scene_dir.name
     caption_file = output_dir / f"{scene_name}.json"
-
-    # Load existing captions for resumption
     captions = load_existing_captions(caption_file) if resume else {}
 
     images = discover_scene_images(scene_dir)
@@ -170,7 +162,6 @@ def caption_scene(
         print(f"  SKIP {scene_name}: no images found")
         return captions
 
-    # Filter out already-captioned images
     images_dir = scene_dir / "images"
     todo = []
     for img_path in images:
@@ -184,36 +175,38 @@ def caption_scene(
 
     print(f"  {scene_name}: {len(todo)} images to caption ({len(captions)} already done)")
 
-    # Process in batches using thread pool for concurrent API calls
     failed = 0
-    for batch_start in range(0, len(todo), batch_size):
-        batch = todo[batch_start : batch_start + batch_size]
+    completed_since_save = 0
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            futures = {}
-            for rel, img_path in batch:
-                fut = executor.submit(
-                    caption_single_image,
-                    img_path, api_base, model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    max_image_size=max_image_size,
-                )
-                futures[fut] = rel
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {}
+        for rel, img_path in todo:
+            fut = executor.submit(
+                caption_single_image,
+                img_path, api_base, model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_image_size=max_image_size,
+            )
+            futures[fut] = rel
 
-            for fut in as_completed(futures):
-                rel = futures[fut]
-                try:
-                    caption = fut.result()
-                    captions[rel] = caption
-                except Exception as e:
-                    print(f"    FAIL {rel}: {e}")
-                    failed += 1
+        for fut in as_completed(futures):
+            rel = futures[fut]
+            try:
+                captions[rel] = fut.result()
+            except Exception as e:
+                print(f"    FAIL {rel}: {e}")
+                failed += 1
 
-        # Save after each batch for resumability
-        output_dir.mkdir(parents=True, exist_ok=True)
-        with open(caption_file, "w") as f:
-            json.dump(captions, f, indent=2)
+            completed_since_save += 1
+            if completed_since_save >= batch_size:
+                with open(caption_file, "w") as f:
+                    json.dump(captions, f)
+                completed_since_save = 0
+
+    with open(caption_file, "w") as f:
+        json.dump(captions, f)
 
     n_new = len(todo) - failed
     print(f"  {scene_name}: captioned {n_new} new images ({failed} failed)")
@@ -285,14 +278,14 @@ def parse_args() -> argparse.Namespace:
                     help="Directory to save per-scene caption JSON files")
     p.add_argument("--api-base", type=str, default="http://localhost:8000/v1",
                     help="vLLM OpenAI-compatible API base URL")
-    p.add_argument("--model", type=str, default="Qwen/Qwen2.5-VL-7B-Instruct",
+    p.add_argument("--model", type=str, default="Qwen/Qwen3-VL-30B-A3B-Instruct",
                     help="Model name as registered in vLLM")
-    p.add_argument("--batch-size", type=int, default=32,
+    p.add_argument("--batch-size", type=int, default=128,
                     help="Number of images to process per save-batch")
-    p.add_argument("--num-workers", type=int, default=8,
+    p.add_argument("--num-workers", type=int, default=12,
                     help="Concurrent API requests per batch")
-    p.add_argument("--temperature", type=float, default=0.3)
-    p.add_argument("--max-tokens", type=int, default=120)
+    p.add_argument("--temperature", type=float, default=0.23)
+    p.add_argument("--max-tokens", type=int, default=100)
     p.add_argument("--max-image-size", type=int, default=1024,
                     help="Resize images so max dimension <= this value")
     p.add_argument("--no-resume", action="store_true",
