@@ -139,7 +139,7 @@ class RelightFlux(nn.Module):
         # CLIP text encoder (pooled output only)
         self.text_encoder = CLIPTextModel.from_pretrained(
             pretrained_model, subfolder="text_encoder",
-        ).to(self.device)
+        )
         self.tokenizer = CLIPTokenizer.from_pretrained(
             pretrained_model, subfolder="tokenizer",
         )
@@ -147,7 +147,7 @@ class RelightFlux(nn.Module):
         # T5 text encoder (sequence output)
         self.text_encoder_2 = T5EncoderModel.from_pretrained(
             pretrained_model, subfolder="text_encoder_2",
-        ).to(self.device)
+        )
         self.tokenizer_2 = T5TokenizerFast.from_pretrained(
             pretrained_model, subfolder="tokenizer_2",
         )
@@ -156,6 +156,7 @@ class RelightFlux(nn.Module):
         self.vae.requires_grad_(False).eval()
         self.text_encoder.requires_grad_(False).eval()
         self.text_encoder_2.requires_grad_(False).eval()
+        self.text_device = torch.device("cpu")
 
         # --- Expand input projection for per-view channels ---
         _expand_x_embedder(self.transformer, self.PACKED_TOKEN_DIM)
@@ -171,15 +172,8 @@ class RelightFlux(nn.Module):
         # --- Precompute null text embeddings ---
         with torch.no_grad():
             null_clip_emb, null_t5_emb = self._encode_text_raw([""])
-            self.null_clip_pooled = null_clip_emb   # (1, 768)
-            self.null_t5_emb = null_t5_emb          # (1, S, 4096)
-
-        # --- Offload text encoders to CPU to free GPU memory ---
-        # They are only needed in get_text_embeddings() which moves them
-        # temporarily to GPU.  This saves ~20GB+ for the T5-XXL encoder.
-        self.text_encoder.to("cpu")
-        self.text_encoder_2.to("cpu")
-        torch.cuda.empty_cache()
+            self.register_buffer("null_clip_pooled", null_clip_emb, persistent=False)
+            self.register_buffer("null_t5_emb", null_t5_emb, persistent=False)
 
     # ------------------------------------------------------------------
     # Training configuration
@@ -211,6 +205,12 @@ class RelightFlux(nn.Module):
     def get_trainable_parameters(self) -> list[nn.Parameter]:
         return [p for p in self.transformer.parameters() if p.requires_grad]
 
+    def _conditioning_device(self) -> torch.device:
+        return next(self.transformer.parameters()).device
+
+    def _conditioning_dtype(self) -> torch.dtype:
+        return next(self.transformer.parameters()).dtype
+
     # ------------------------------------------------------------------
     # Text encoding
     # ------------------------------------------------------------------
@@ -219,50 +219,36 @@ class RelightFlux(nn.Module):
     def _encode_text_raw(self, prompts: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode prompts with both CLIP (pooled) and T5 (sequence).
 
-        Text encoders may live on CPU (offloaded after __init__).  This method
-        temporarily moves them to the model's device for encoding, then moves
-        them back to free GPU memory.
+        The Flux text encoders are frozen and permanently kept on CPU to avoid
+        repeatedly materializing T5-XXL on GPU during training. Only the much
+        smaller embedding tensors are transferred to the transformer device.
 
         Returns:
-            clip_pooled: (B, 768) - CLIP pooled embedding (on self.device)
-            t5_hidden:   (B, S, 4096) - T5 sequence embedding (on self.device)
+            clip_pooled: (B, 768) - CLIP pooled embedding on the transformer device
+            t5_hidden:   (B, S, 4096) - T5 sequence embedding on the transformer device
         """
-        # Move CLIP to GPU, encode, move back
-        clip_was_cpu = next(self.text_encoder.parameters()).device.type == "cpu"
-        if clip_was_cpu:
-            self.text_encoder.to(self.device)
+        out_device = self._conditioning_device()
+        out_dtype = self._conditioning_dtype()
 
         clip_tokens = self.tokenizer(
             prompts, padding="max_length", max_length=77,
             truncation=True, return_tensors="pt",
         )
         clip_out = self.text_encoder(
-            clip_tokens.input_ids.to(self.device),
-            attention_mask=clip_tokens.attention_mask.to(self.device),
+            clip_tokens.input_ids.to(self.text_device),
+            attention_mask=clip_tokens.attention_mask.to(self.text_device),
         )
-        clip_pooled = clip_out.pooler_output  # (B, 768)
-
-        if clip_was_cpu:
-            self.text_encoder.to("cpu")
-
-        # Move T5 to GPU, encode, move back
-        t5_was_cpu = next(self.text_encoder_2.parameters()).device.type == "cpu"
-        if t5_was_cpu:
-            self.text_encoder_2.to(self.device)
+        clip_pooled = clip_out.pooler_output.to(device=out_device, dtype=out_dtype)
 
         t5_tokens = self.tokenizer_2(
             prompts, padding="max_length", max_length=self.text_max_length,
             truncation=True, return_tensors="pt",
         )
         t5_out = self.text_encoder_2(
-            t5_tokens.input_ids.to(self.device),
-            attention_mask=t5_tokens.attention_mask.to(self.device),
+            t5_tokens.input_ids.to(self.text_device),
+            attention_mask=t5_tokens.attention_mask.to(self.text_device),
         )
-        t5_hidden = t5_out.last_hidden_state  # (B, S, 4096)
-
-        if t5_was_cpu:
-            self.text_encoder_2.to("cpu")
-            torch.cuda.empty_cache()
+        t5_hidden = t5_out.last_hidden_state.to(device=out_device, dtype=out_dtype)
 
         return clip_pooled, t5_hidden
 
