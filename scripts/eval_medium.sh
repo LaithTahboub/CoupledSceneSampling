@@ -1,5 +1,5 @@
 #!/bin/bash
-# Evaluate PoseSD on MEDIUM-difficulty triplets from test scenes.
+# Evaluate RelightSD on MEDIUM-difficulty triplets from test scenes.
 # Generates SAMPLES_PER_TRIPLET outputs per triplet with different seeds.
 #
 # Usage:
@@ -21,8 +21,8 @@
 set -euo pipefail
 
 ROOT=/vulcanscratch/ltahboub/CoupledSceneSampling
-CHECKPOINT=${CHECKPOINT:-$ROOT/checkpoints/pose_sd_v9_512x512/unet_latest.pt}
-SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/pose_sd_v9_seed101}
+CHECKPOINT=${CHECKPOINT:-$ROOT/checkpoints/relight_sd_v9_512x512/unet_latest.pt}
+SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/relight_sd_v9_seed101}
 DATA_ROOT=${DATA_ROOT:-/fs/nexus-scratch/ltahboub/MegaScenes}
 
 NUM_SCENES=${NUM_SCENES:-10}
@@ -97,19 +97,19 @@ MEDIUM_MIN_DIST = 0.08
 MEDIUM_MAX_DIST = 0.60
 
 # Load model once
-from css.models.pose_sd import PoseSD
-from css.models.EMA import load_pose_sd_checkpoint
+from css.models.relight_sd import RelightSD
+from css.models.EMA import load_relight_sd_checkpoint
 from css.inference.scene_sampling import load_scene_pools, build_single_sample, build_comparison_grid, to_uint8
 from css.data.iou import compute_covisibility
 
 if '$ARCH_VERSION' == 'OLD':
-    from css.old.pose_sd import PoseSD
+    from css.old.relight_sd import RelightSD
     from css.old.scene_sampling import load_scene_pools, build_single_sample, build_comparison_grid, to_uint8
 
 
 print('Loading model...')
-model = PoseSD()
-load_pose_sd_checkpoint(model, checkpoint, model.device)
+model = RelightSD()
+load_relight_sd_checkpoint(model, checkpoint, model.device)
 model.eval()
 print(f'Loaded: {checkpoint}')
 

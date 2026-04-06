@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Inference from a PoseSD checkpoint.
+# Inference from a RelightSD checkpoint.
 #
 # Modes (set MODE=):
 #   triplet  - Single scene + target (default), auto-select refs
@@ -13,14 +13,14 @@
 #   MODE=images SCENE=/path/to/scene REF1=img1.jpg REF2=img2.jpg TARGET=img3.jpg ./scripts/infer.sh
 #   MODE=photos REF1=photo1.jpg REF2=photo2.jpg TARGET=photo3.jpg ./scripts/infer.sh
 #   MODE=photos REF1=photo1.jpg REF2=photo2.jpg DIRECTION=right DISTANCE=0.3 ./scripts/infer.sh
-#   MODE=scenes SPLIT_DIR=splits/pose_sd_seed42 NUM=5 ./scripts/infer.sh
-#   MODE=targets SPLIT_DIR=splits/pose_sd_seed42 NUM=10 ./scripts/infer.sh
+#   MODE=scenes SPLIT_DIR=splits/relight_sd_seed42 NUM=5 ./scripts/infer.sh
+#   MODE=targets SPLIT_DIR=splits/relight_sd_seed42 NUM=10 ./scripts/infer.sh
 
 set -euo pipefail
 
 ROOT=${ROOT:-/vulcanscratch/ltahboub/CoupledSceneSampling}
-CHECKPOINT=${CHECKPOINT:-$ROOT/checkpoints/pose_sd_v1/unet_latest.pt}
-SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/pose_sd_seed42}
+CHECKPOINT=${CHECKPOINT:-$ROOT/checkpoints/relight_sd_v1/unet_latest.pt}
+SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/relight_sd_seed42}
 DATA_ROOT=${DATA_ROOT:-/fs/nexus-scratch/ltahboub/MegaScenes}
 MODE=${MODE:-triplet}
 

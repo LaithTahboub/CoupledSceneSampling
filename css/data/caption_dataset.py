@@ -83,7 +83,7 @@ def caption_single_image(
     api_base: str,
     model: str,
     temperature: float = 0.23,
-    max_tokens: int = 100,
+    max_tokens: int = 80,
     max_image_size: int = 1024,
 ) -> str:
     client = get_client(api_base)

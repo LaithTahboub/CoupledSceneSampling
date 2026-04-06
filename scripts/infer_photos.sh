@@ -1,5 +1,5 @@
 #!/bin/bash
-# Infer on arbitrary photos using MAST3R for pose estimation + PoseSD.
+# Infer on arbitrary photos using MAST3R for pose estimation + RelightSD.
 #
 # Usage:
 #   REF1=photo1.jpg REF2=photo2.jpg TARGET=photo3.jpg sbatch scripts/infer_photos.sh
@@ -18,7 +18,7 @@
 set -euo pipefail
 
 ROOT=${ROOT:-/vulcanscratch/ltahboub/CoupledSceneSampling}
-CHECKPOINT=${CHECKPOINT:-$ROOT/checkpoints/pose_sd_v9_512x512/unet_latest.pt}
+CHECKPOINT=${CHECKPOINT:-$ROOT/checkpoints/relight_sd_v9_512x512/unet_latest.pt}
 
 REF1=${REF1:-}
 REF2=${REF2:-}

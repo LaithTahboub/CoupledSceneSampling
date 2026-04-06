@@ -1,4 +1,4 @@
-"""Sample from a PoseSD checkpoint."""
+"""Sample from a RelightSD checkpoint."""
 
 import argparse
 import json
@@ -8,8 +8,8 @@ import numpy as np
 import torch
 from PIL import Image
 
-from css.models.EMA import load_pose_sd_checkpoint
-from css.models.pose_sd import PoseSD
+from css.models.EMA import load_relight_sd_checkpoint
+from css.models.relight_sd import RelightSD
 from css.inference.scene_sampling import (
     build_comparison_grid,
     build_single_sample,
@@ -59,8 +59,8 @@ def main():
         prompt = ""  # resolved after target is selected, below
 
     print("Loading model...")
-    model = PoseSD()
-    load_pose_sd_checkpoint(model, args.checkpoint, model.device)
+    model = RelightSD()
+    load_relight_sd_checkpoint(model, args.checkpoint, model.device)
     model.eval()
     print(f"Loaded checkpoint: {args.checkpoint}")
 

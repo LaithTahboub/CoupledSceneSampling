@@ -1,4 +1,4 @@
-"""Validation utilities for PoseSD training.
+"""Validation utilities for RelightSD training.
 
 Provides:
 - PSNR, SSIM, LPIPS metrics

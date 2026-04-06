@@ -37,15 +37,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from css.models.EMA import load_pose_sd_checkpoint
-from css.models.pose_sd import PoseSD
+from css.models.EMA import load_relight_sd_checkpoint
+from css.models.relight_sd import RelightSD
 
 
 class CoupledDiffusionRunner:
     def __init__(
         self,
-        pose_sd_pretrained: str,
-        pose_sd_checkpoint: str | None,
+        relight_sd_pretrained: str,
+        relight_sd_checkpoint: str | None,
         device: str,
         use_half: bool = True,
         offload_pose_unet: bool = True,
@@ -63,20 +63,20 @@ class CoupledDiffusionRunner:
         self.discretization = DDPMDiscretization()
         self.dust3r = Dust3rPipeline(device=device)
 
-        self.pose_sd = PoseSD(pretrained_model=pose_sd_pretrained, device=device)
-        if pose_sd_checkpoint:
-            load_pose_sd_checkpoint(self.pose_sd, pose_sd_checkpoint, device)
-        self.pose_sd.eval()
-        self.sd_alphas = self.pose_sd.scheduler.alphas_cumprod.to(device)
+        self.relight_sd = RelightSD(pretrained_model=relight_sd_pretrained, device=device)
+        if relight_sd_checkpoint:
+            load_relight_sd_checkpoint(self.relight_sd, relight_sd_checkpoint, device)
+        self.relight_sd.eval()
+        self.sd_alphas = self.relight_sd.scheduler.alphas_cumprod.to(device)
         if self.use_half:
             self.seva_model.half()
             self.ae.half()
             self.conditioner.half()
-            self.pose_sd.unet.half()
-            self.pose_sd.vae.half()
-            self.pose_sd.text_encoder.half()
+            self.relight_sd.unet.half()
+            self.relight_sd.vae.half()
+            self.relight_sd.text_encoder.half()
         if self.offload_pose_unet:
-            self.pose_sd.unet.to("cpu")
+            self.relight_sd.unet.to("cpu")
         if self.offload_seva_model:
             self.seva_model.to("cpu")
         if str(self.device).startswith("cuda"):
@@ -240,7 +240,7 @@ class CoupledDiffusionRunner:
         sd_chunk_size,
     ):
         if self.offload_pose_unet:
-            self.pose_sd.unet.to(self.device)
+            self.relight_sd.unet.to(self.device)
             torch.cuda.empty_cache()
         alpha_bar = self.sd_alphas[t]
         h, w = x.shape[-2], x.shape[-1]
@@ -294,20 +294,20 @@ class CoupledDiffusionRunner:
             t_cond = text_cond.expand(C, -1, -1)
             t_uncond = text_uncond.expand(C, -1, -1)
             with self._autocast_context():
-                packed_c = self.pose_sd._pack_views(
+                packed_c = self.relight_sd._pack_views(
                     ref1_lat, ref2_lat, x_chunk, pl_ref1, pl_ref2, pl_tgt
                 )
-                eps_c = self.pose_sd._predict_target_eps(packed_c, t_b, t_cond, C)
+                eps_c = self.relight_sd._predict_target_eps(packed_c, t_b, t_cond, C)
                 keep_none = torch.zeros(C, device=self.device, dtype=torch.bool)
-                packed_u = self.pose_sd._pack_views(
+                packed_u = self.relight_sd._pack_views(
                     ref1_lat, ref2_lat, x_chunk, pl_ref1, pl_ref2, pl_tgt, keep_none
                 )
-                eps_u = self.pose_sd._predict_target_eps(packed_u, t_b, t_uncond, C)
+                eps_u = self.relight_sd._predict_target_eps(packed_u, t_b, t_uncond, C)
             eps = self._cfg(eps_c, eps_u, cfg_sd)
             x0_chunks.append(self._x0_from_eps(x_chunk, eps, alpha_bar))
         out = torch.cat(x0_chunks, 0)
         if self.offload_pose_unet:
-            self.pose_sd.unet.to("cpu")
+            self.relight_sd.unet.to("cpu")
             torch.cuda.empty_cache()
         return out
 
@@ -393,18 +393,18 @@ class CoupledDiffusionRunner:
             )
 
             with self._autocast_context():
-                sd_ref_latents = self.pose_sd.encode_image(
+                sd_ref_latents = self.relight_sd.encode_image(
                     (
                         input_imgs.permute(0, 3, 1, 2).to(self.device, dtype=self.sample_dtype)
                         * 2.0
                         - 1.0
                     )
                 )
-            text_cond = self.pose_sd.get_text_embeddings([prompt])
-            text_uncond = self.pose_sd.null_text_emb
-            # Offload PoseSD components not used during iterative denoising.
-            self.pose_sd.vae.to("cpu")
-            self.pose_sd.text_encoder.to("cpu")
+            text_cond = self.relight_sd.get_text_embeddings([prompt])
+            text_uncond = self.relight_sd.null_text_emb
+            # Offload RelightSD components not used during iterative denoising.
+            self.relight_sd.vae.to("cpu")
+            self.relight_sd.text_encoder.to("cpu")
             if str(self.device).startswith("cuda"):
                 torch.cuda.empty_cache()
 
@@ -502,8 +502,8 @@ def main():
     parser.add_argument("--device", default="cuda:0")
 
     parser.add_argument("--prompt", default="")
-    parser.add_argument("--pose-sd-pretrained", default="manojb/stable-diffusion-2-1-base")
-    parser.add_argument("--pose-sd-checkpoint", default="/vulcanscratch/ltahboub/CoupledSceneSampling/checkpoints/pose_sd_v1/unet_latest.pt")
+    parser.add_argument("--relight-sd-pretrained", default="manojb/stable-diffusion-2-1-base")
+    parser.add_argument("--relight-sd-checkpoint", default="/vulcanscratch/ltahboub/CoupledSceneSampling/checkpoints/relight_sd_v1/unet_latest.pt")
     parser.add_argument("--coupling-strength", type=float, default=0.2)
     parser.add_argument("--cfg-seva", type=float, default=3.0)
     parser.add_argument("--cfg-sd", type=float, default=7.5)
@@ -537,8 +537,8 @@ def main():
         return
 
     runner = CoupledDiffusionRunner(
-        pose_sd_pretrained=args.pose_sd_pretrained,
-        pose_sd_checkpoint=args.pose_sd_checkpoint,
+        relight_sd_pretrained=args.relight_sd_pretrained,
+        relight_sd_checkpoint=args.relight_sd_checkpoint,
         device=args.device,
         use_half=not args.fp32,
         offload_pose_unet=not args.no_offload_pose_unet,

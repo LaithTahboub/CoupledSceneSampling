@@ -10,16 +10,16 @@ to a single scene, otherwise iterates over test scenes from the split.
 Usage:
     # Eval mode — identical to eval_medium.sh:
     python -m css.inference.infer_camera_sweep \
-        --checkpoint checkpoints/pose_sd_v5/unet_step_184000.pt
+        --checkpoint checkpoints/relight_sd_v5/unet_step_184000.pt
 
     # Specific scene:
     python -m css.inference.infer_camera_sweep \
-        --checkpoint checkpoints/pose_sd_v5/unet_step_184000.pt \
+        --checkpoint checkpoints/relight_sd_v5/unet_step_184000.pt \
         --scene MegaScenes/025_796__Duomo__Milan
 
     # Sweep mode — camera offset sweep per triplet:
     python -m css.inference.infer_camera_sweep \
-        --checkpoint checkpoints/pose_sd_v5/unet_step_184000.pt \
+        --checkpoint checkpoints/relight_sd_v5/unet_step_184000.pt \
         --mode sweep --direction right --offsets -0.5 0.0 0.5 1.0
 """
 
@@ -38,7 +38,7 @@ from css.data.dataset import (
     compute_plucker_tensor,
 )
 from css.data.iou import compute_covisibility
-from css.models.EMA import load_pose_sd_checkpoint
+from css.models.EMA import load_relight_sd_checkpoint
 
 
 # MEDIUM difficulty thresholds (same as eval_medium.sh)
@@ -56,7 +56,7 @@ DIRECTIONS = {
     "back": np.array([0, 0, 1], dtype=np.float64),
 }
 
-_DEFAULT_SPLIT = "splits/pose_sd_seed42"
+_DEFAULT_SPLIT = "splits/relight_sd_seed42"
 _DEFAULT_DATA_ROOT = "/fs/nexus-scratch/ltahboub/MegaScenes"
 
 
@@ -202,9 +202,9 @@ def generate_sweep(model, sample, ref1, tgt, cameras, args,
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--checkpoint", default="/vulcanscratch/ltahboub/CoupledSceneSampling/checkpoints/pose_sd_v4/unet_step_160000.pt")
+    p.add_argument("--checkpoint", default="/vulcanscratch/ltahboub/CoupledSceneSampling/checkpoints/relight_sd_v4/unet_step_160000.pt")
     p.add_argument("--arch", choices=["OLD", "NEW"], default="OLD",
-                    help="OLD = css.old.pose_sd, NEW = css.models.pose_sd")
+                    help="OLD = css.old.relight_sd, NEW = css.models.relight_sd")
     p.add_argument("--mode", choices=["eval", "sweep"], default="sweep",
                     help="eval = generate at target pose (like eval_medium.sh), "
                          "sweep = offset target camera per triplet")
@@ -248,12 +248,12 @@ def main():
 
     # --- Import arch-specific modules (same pattern as eval_medium.sh) ---
     if args.arch == "OLD":
-        from css.old.pose_sd import PoseSD
+        from css.old.relight_sd import RelightSD
         from css.old.scene_sampling import (
             build_comparison_grid, build_single_sample, load_scene_pools, to_uint8,
         )
     else:
-        from css.models.pose_sd import PoseSD
+        from css.models.relight_sd import RelightSD
         from css.inference.scene_sampling import (
             build_comparison_grid, build_single_sample, load_scene_pools, to_uint8,
         )
@@ -264,8 +264,8 @@ def main():
 
     # --- Load model (identical to eval_medium.sh) ---
     print("Loading model...")
-    model = PoseSD()
-    load_pose_sd_checkpoint(model, args.checkpoint, model.device)
+    model = RelightSD()
+    load_relight_sd_checkpoint(model, args.checkpoint, model.device)
     model.eval()
     print(f"Loaded: {args.checkpoint}")
 

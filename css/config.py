@@ -1,5 +1,5 @@
 """
-Training configuration for PoseSD.
+Training configuration for RelightSD and RelightFlux.
 """
 
 from __future__ import annotations
@@ -15,6 +15,15 @@ class ModelConfig:
     gradient_checkpointing: bool = True
     xformers_attention: bool = False
     include_high_res_attention: bool = False
+
+
+@dataclass
+class FluxModelConfig:
+    pretrained_model: str = "black-forest-labs/FLUX.1-dev"
+    train_mode: str = "full"  # "cond" (x_embedder + attn only) or "full"
+    prediction_target: str = "velocity"  # flow matching
+    gradient_checkpointing: bool = True
+    text_max_length: int = 512  # T5 max sequence length
 
 
 @dataclass
@@ -129,7 +138,7 @@ class TrainConfig:
     wandb_mode: str = "online"
 
     # Paths
-    output_dir: str = "checkpoints/pose_sd_vn"
+    output_dir: str = "checkpoints/relight_sd_vn"
     scenes_file: str | None = None
     scenes: list[str] = field(default_factory=list)
     split_dir: str | None = None

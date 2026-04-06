@@ -1,4 +1,7 @@
-"""Training script for PoseSD (3-view, Plucker-conditioned).
+"""Training script for RelightFlux (3-view, Plucker-conditioned, Flux.1-dev backbone).
+
+Flow matching training with velocity prediction.  Mirrors train_relight_sd.py
+but targets the Flux DiT architecture.
 
 Supports:
 - Multi-GPU training via DDP (torchrun)
@@ -31,8 +34,8 @@ from tqdm import tqdm
 
 from css.config import DataConfig, TrainConfig
 from css.data.MegaScenesDataset import Difficulty, MegaScenesDataset, SceneRecord
-from css.models.EMA import EMAModel, load_pose_sd_checkpoint, save_pose_sd_checkpoint
-from css.models.pose_sd import PoseSD
+from css.models.EMA import CPUEMAModel, EMAModel
+from css.models.relight_flux import RelightFlux
 from css.train.validation import ValMetrics, run_validation, to_uint8
 
 try:
@@ -43,7 +46,7 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Distributed helpers
+# Distributed helpers (same as train_relight_sd.py)
 # ---------------------------------------------------------------------------
 
 def _is_main_process() -> bool:
@@ -71,7 +74,7 @@ def _cleanup_distributed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Utilities
+# Utilities (same as train_relight_sd.py)
 # ---------------------------------------------------------------------------
 
 def _set_seed(seed: int) -> None:
@@ -107,7 +110,6 @@ def _build_lr_scheduler(
             return step / max(1, warmup_steps)
         if scheduler_type == "constant_with_warmup":
             return 1.0
-        # Cosine decay
         progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
         return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
@@ -119,7 +121,6 @@ def _compute_bucket_weights(
     indices: list[int],
     bucket_ratios: dict[Difficulty, float],
 ) -> list[float]:
-    """Compute per-sample weights so that expected sampling matches bucket ratios."""
     bucket_counts: dict[Difficulty, int] = {d: 0 for d in Difficulty}
     idx_difficulties: list[Difficulty] = []
     for i in indices:
@@ -143,7 +144,6 @@ def _build_weighted_sampler(
     indices: list[int],
     bucket_ratios: dict[Difficulty, float],
 ) -> WeightedRandomSampler:
-    """Build a weighted sampler for single-GPU training."""
     weights = _compute_bucket_weights(dataset, indices, bucket_ratios)
     return WeightedRandomSampler(
         weights=weights,
@@ -153,12 +153,7 @@ def _build_weighted_sampler(
 
 
 class DistributedWeightedSampler(Sampler[int]):
-    """Distributed sampler that respects bucket-ratio weights.
-
-    Each rank gets a disjoint subset of indices (like DistributedSampler),
-    but within that subset, samples are drawn according to bucket weights
-    (like WeightedRandomSampler).
-    """
+    """Distributed sampler that respects bucket-ratio weights."""
 
     def __init__(
         self,
@@ -182,7 +177,6 @@ class DistributedWeightedSampler(Sampler[int]):
         self.seed = seed
         self.epoch = 0
 
-        # Pad to make evenly divisible
         self.total_size = int(math.ceil(len(indices) / num_replicas)) * num_replicas
         self.num_samples = self.total_size // num_replicas
 
@@ -193,20 +187,15 @@ class DistributedWeightedSampler(Sampler[int]):
         return self.num_samples
 
     def __iter__(self):
-        # Deterministic shuffle (same across all ranks for consistent partitioning)
         g = torch.Generator()
         g.manual_seed(self.seed + self.epoch)
         perm = torch.randperm(len(self.all_indices), generator=g).tolist()
 
-        # Pad
         while len(perm) < self.total_size:
             perm.append(perm[len(perm) % len(self.all_indices)])
 
-        # Partition: each rank gets every num_replicas-th element
-        # rank_perm contains Subset-local indices (0..len(all_indices)-1)
         rank_perm = perm[self.rank::self.num_replicas]
 
-        # Look up difficulty using the raw dataset index for weight computation
         weights = []
         bucket_counts: dict[Difficulty, int] = {d: 0 for d in Difficulty}
         idx_diffs: list[Difficulty] = []
@@ -224,7 +213,6 @@ class DistributedWeightedSampler(Sampler[int]):
             else:
                 weights.append(0.0)
 
-        # Weighted sampling within this rank's partition
         weights_t = torch.tensor(weights, dtype=torch.double)
         if weights_t.sum() < 1e-12:
             sample_order = torch.randperm(len(rank_perm), generator=g).tolist()
@@ -234,12 +222,11 @@ class DistributedWeightedSampler(Sampler[int]):
                 generator=g,
             ).tolist()
 
-        # Yield Subset-local indices (not raw dataset indices)
         yield from (rank_perm[s] for s in sample_order)
 
 
 # ---------------------------------------------------------------------------
-# Train/test split
+# Train/test split (identical to train_relight_sd.py)
 # ---------------------------------------------------------------------------
 
 def _build_split(
@@ -297,6 +284,98 @@ def _build_split(
 
 
 # ---------------------------------------------------------------------------
+# Checkpoint save/load for RelightFlux
+# ---------------------------------------------------------------------------
+
+def _unwrap_transformer(model: RelightFlux):
+    """Get the raw transformer module, stripping DDP wrappers."""
+    t = model.transformer
+    return t.module if hasattr(t, "module") else t
+
+
+def save_relight_flux_checkpoint(
+    model: RelightFlux,
+    ckpt_path: str | Path,
+    optimizer: torch.optim.Optimizer | None = None,
+    lr_scheduler=None,
+    ema: EMAModel | CPUEMAModel | None = None,
+    epoch: int = 0,
+    global_step: int = 0,
+) -> None:
+    payload = {
+        "format_version": 1,
+        "backbone": "flux",
+        "epoch": int(epoch),
+        "global_step": int(global_step),
+        "transformer": _unwrap_transformer(model).state_dict(),
+        "optimizer": optimizer.state_dict() if optimizer is not None else None,
+        "lr_scheduler": lr_scheduler.state_dict() if lr_scheduler is not None else None,
+        "ema": ema.state_dict() if ema is not None else None,
+    }
+    torch.save(payload, Path(ckpt_path))
+
+
+def _strip_module_prefix(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    cleaned = {}
+    for k, v in state_dict.items():
+        while k.startswith(("module.", "_orig_mod.")):
+            if k.startswith("module."):
+                k = k[len("module."):]
+            elif k.startswith("_orig_mod."):
+                k = k[len("_orig_mod."):]
+        cleaned[k] = v
+    return cleaned
+
+
+def load_relight_flux_checkpoint(
+    model: RelightFlux,
+    ckpt_path: str | Path,
+    device,
+    optimizer: torch.optim.Optimizer | None = None,
+    lr_scheduler=None,
+    ema: EMAModel | CPUEMAModel | None = None,
+    strict: bool = True,
+) -> dict[str, int]:
+    import re
+
+    ckpt_path = Path(ckpt_path)
+    raw = torch.load(ckpt_path, map_location=device)
+
+    # Extract transformer state dict
+    if isinstance(raw, dict):
+        if "transformer" in raw:
+            t_state = raw["transformer"]
+        elif "state_dict" in raw:
+            t_state = raw["state_dict"]
+        else:
+            t_state = raw
+    else:
+        t_state = raw
+
+    t_state = _strip_module_prefix(t_state)
+    _unwrap_transformer(model).load_state_dict(t_state, strict=strict)
+
+    epoch, global_step = 0, 0
+    if isinstance(raw, dict):
+        epoch = int(raw.get("epoch", 0))
+        global_step = int(raw.get("global_step", 0))
+        if optimizer is not None and raw.get("optimizer") is not None:
+            optimizer.load_state_dict(raw["optimizer"])
+        if lr_scheduler is not None and raw.get("lr_scheduler") is not None:
+            lr_scheduler.load_state_dict(raw["lr_scheduler"])
+        if ema is not None and raw.get("ema") is not None:
+            ema.load_state_dict(raw["ema"])
+
+    # Fallback: infer from filename
+    if global_step == 0:
+        m = re.search(r"step(\d+)", ckpt_path.stem)
+        if m:
+            global_step = int(m.group(1))
+
+    return {"epoch": epoch, "global_step": global_step}
+
+
+# ---------------------------------------------------------------------------
 # Validation & logging
 # ---------------------------------------------------------------------------
 
@@ -305,15 +384,7 @@ def _build_val_grid(
     seed_results: list,
     to_uint8_fn,
 ) -> np.ndarray:
-    """Build a multi-seed validation grid.
-
-    Layout (vertical):
-        Row 0: [ref1 | ref2 | GT]  (with labels)
-        Row 1: [gen seed0]  [gen seed1]  [gen seed2]  (with seed/metric labels)
-        Row 2: prompt text (if present)
-
-    Each panel gets a small label strip at the top.
-    """
+    """Build a multi-seed validation grid (same layout as SD version)."""
     from css.train.validation import SeedResult
 
     ref1 = to_uint8_fn(item["ref1_img"])
@@ -322,32 +393,27 @@ def _build_val_grid(
     H, W = ref1.shape[0], ref1.shape[1]
 
     label_h = 16
-    n_seeds = len(seed_results)
 
     def _label_panel(img: np.ndarray, text: str) -> np.ndarray:
-        """Add a label strip above an image panel."""
         strip = PILImage.new("RGB", (W, label_h), (30, 30, 30))
         draw = ImageDraw.Draw(strip)
         draw.text((4, 1), text, fill=(220, 220, 220))
         return np.concatenate([np.array(strip), img], axis=0)
 
-    # Top row: [ref1 | ref2 | GT] padded to match bottom row width
     top_panels = [
         _label_panel(ref1, "ref1"),
         _label_panel(ref2, "ref2"),
         _label_panel(gt, "GT"),
     ]
-    top_row = np.concatenate(top_panels, axis=1)  # (label_h + H, 3*W, 3)
+    top_row = np.concatenate(top_panels, axis=1)
 
-    # Bottom row: generated images per seed
     bottom_panels = []
     for sr in seed_results:
         gen = to_uint8_fn(sr.generated)
         label = f"seed {sr.seed}  P={sr.psnr:.1f} L={sr.lpips:.3f}"
         bottom_panels.append(_label_panel(gen, label))
-    bottom_row = np.concatenate(bottom_panels, axis=1)  # (label_h + H, n_seeds*W, 3)
+    bottom_row = np.concatenate(bottom_panels, axis=1)
 
-    # Pad rows to the same width
     target_w = max(top_row.shape[1], bottom_row.shape[1])
     def _pad_w(arr: np.ndarray, w: int) -> np.ndarray:
         if arr.shape[1] < w:
@@ -360,7 +426,6 @@ def _build_val_grid(
         _pad_w(bottom_row, target_w),
     ], axis=0)
 
-    # Add prompt text below
     prompt_text = item.get("caption", "") or item.get("prompt", "")
     if prompt_text:
         prompt_text = prompt_text.strip()
@@ -378,29 +443,22 @@ def _build_val_grid(
 
 @torch.inference_mode()
 def _log_validation(
-    model: PoseSD,
+    model: RelightFlux,
     val_dataset,
     val_indices: list[int],
     global_step: int,
     cfg: TrainConfig,
 ) -> None:
-    """Run validation and log metrics + multi-seed sample images."""
     if not _is_main_process():
         return
 
-    # Unwrap DDP/compiled UNet so inference doesn't retrigger torch.compile.
-    # Use try/finally to guarantee the DDP wrapper is restored even on error,
-    # otherwise subsequent training would silently run without gradient sync.
-    raw_unet = model.unet
-    if isinstance(raw_unet, DDP):
-        model.unet = raw_unet.module
+    raw_transformer = model.transformer
+    if isinstance(raw_transformer, DDP):
+        model.transformer = raw_transformer.module
     model.eval()
 
     try:
-        # Select a diverse subset of validation samples
         max_val = min(8, len(val_indices))
-        # Try to get samples from each bucket — read difficulty from
-        # the pre-built records to avoid triggering full __getitem__
         bucket_indices: dict[str, list[int]] = {}
         base_ds = val_dataset.dataset if hasattr(val_dataset, "dataset") else val_dataset
         for i in val_indices:
@@ -444,7 +502,6 @@ def _log_validation(
             "val/copy_ratio": metrics.copy_ratio_mean,
         }
 
-        # Per-bucket metrics
         if metrics.bucket_psnr:
             for diff, val in metrics.bucket_psnr.items():
                 log_dict[f"val/psnr_{diff}"] = val
@@ -455,7 +512,6 @@ def _log_validation(
             for diff, val in metrics.bucket_copy_ratio.items():
                 log_dict[f"val/copy_ratio_{diff}"] = val
 
-        # Log multi-seed sample grids
         for i, sample in enumerate(per_sample[:4]):
             item = val_dataset[selected[i]]
             grid = _build_val_grid(item, sample["seeds"], to_uint8)
@@ -470,8 +526,7 @@ def _log_validation(
         wandb.log(log_dict, step=global_step)
 
     finally:
-        # Always restore DDP-wrapped UNet
-        model.unet = raw_unet
+        model.transformer = raw_transformer
 
 
 # ---------------------------------------------------------------------------
@@ -479,26 +534,25 @@ def _log_validation(
 # ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train PoseSD with multi-GPU support")
+    p = argparse.ArgumentParser(description="Train RelightFlux with multi-GPU support")
 
     # Paths
     p.add_argument("--scenes", nargs="*", default=None)
     p.add_argument("--scenes-file", type=str, default=None)
-    p.add_argument("--output", type=str, default="checkpoints/pose_sd_v2")
+    p.add_argument("--output", type=str, default="checkpoints/relight_flux_v1")
     p.add_argument("--split-dir", type=str, default=None)
     p.add_argument("--resume-from", type=str, default=None)
 
     # Model
-    p.add_argument("--pretrained-model", type=str, default="manojb/stable-diffusion-2-1-base")
+    p.add_argument("--pretrained-model", type=str, default="black-forest-labs/FLUX.1-dev")
     p.add_argument("--train-mode", choices=["cond", "full"], default="full")
     p.add_argument("--gradient-checkpointing", action="store_true", default=True)
-    p.add_argument("--xformers-attention", action="store_true")
-    p.add_argument("--compile-unet", action="store_true",
-                    help="Use torch.compile on the UNet for ~20-40%% faster training")
+    p.add_argument("--compile-transformer", action="store_true",
+                    help="Use torch.compile on the transformer")
 
-    # Data — resolution
-    p.add_argument("--H", type=int, default=DataConfig.H)
-    p.add_argument("--W", type=int, default=DataConfig.W)
+    # Data — resolution (512 for training; 1024 OOMs on backward pass with 12B + 3-view attn)
+    p.add_argument("--H", type=int, default=512)
+    p.add_argument("--W", type=int, default=512)
 
     # Data — triplet mining (defaults from DataConfig)
     p.add_argument("--max-triplets-per-scene", type=int, default=DataConfig.max_triplets_per_scene)
@@ -511,14 +565,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-reject-near-duplicates", action="store_true")
     p.add_argument("--max-pairs-per-target", type=int, default=6)
     p.add_argument("--pair-similarity-thresh", type=float, default=0.03)
-    p.add_argument("--min-targets-per-scene", type=int, default=1,
-                    help="Skip scenes with fewer unique targets (ensures diversity)")
-    p.add_argument("--identity-aug-prob", type=float, default=0.05,
-                    help="Probability of replacing a triplet with an identity/copy variant "
-                         "(teaches the model to reproduce references at matching poses)")
-    p.add_argument("--random-crop-prob", type=float, default=0.15,
-                    help="Probability of random crop instead of center crop per triplet "
-                         "(improves generalization to different framings)")
+    p.add_argument("--min-targets-per-scene", type=int, default=1)
+    p.add_argument("--identity-aug-prob", type=float, default=0.03)
+    p.add_argument("--random-crop-prob", type=float, default=0.15)
 
     # Data — bucket covisibility/distance ranges
     p.add_argument("--easy-min-covis", type=float, default=DataConfig.easy_min_covis)
@@ -535,10 +584,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hard-max-distance", type=float, default=DataConfig.hard_max_distance)
 
     # Training
-    p.add_argument("--total-steps", type=int, default=200_000)
-    p.add_argument("--per-gpu-batch-size", type=int, default=2)
-    p.add_argument("--gradient-accumulation-steps", type=int, default=1)
-    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--total-steps", type=int, default=60_000)
+    p.add_argument("--per-gpu-batch-size", type=int, default=1)  # Flux is ~12B, smaller batch
+    p.add_argument("--gradient-accumulation-steps", type=int, default=8)
+    p.add_argument("--lr", type=float, default=1e-5)  # Lower LR for large model
     p.add_argument("--weight-decay", type=float, default=1e-2)
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--warmup-steps", type=int, default=1000)
@@ -555,12 +604,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cond-both-kept", type=float, default=0.85)
     p.add_argument("--cond-one-dropped", type=float, default=0.10)
     p.add_argument("--cond-both-dropped", type=float, default=0.05)
-    p.add_argument("--text-drop-prob", type=float, default=0.10,
-                    help="Probability of dropping text caption per sample (independent of ref dropout)")
+    p.add_argument("--text-drop-prob", type=float, default=0.10)
 
     # Captions
-    p.add_argument("--caption-dir", type=str, default=None,
-                    help="Directory with per-scene caption JSON files from caption_dataset.py")
+    p.add_argument("--caption-dir", type=str, default=None)
 
     # Slot randomization
     p.add_argument("--no-randomize-slots", action="store_true")
@@ -571,14 +618,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hard-ratio", type=float, default=0.15)
 
     # Checkpoints & validation
-    p.add_argument("--save-every-steps", type=int, default=10_000)
-    p.add_argument("--val-every-steps", type=int, default=5_000)
-    p.add_argument("--keep-checkpoints", type=int, default=5)
-    p.add_argument("--val-sample-steps", type=int, default=50)
-    p.add_argument("--val-cfg-scale", type=float, default=4.0)
-    p.add_argument("--val-cfg-text", type=float, default=3.0, help="Text CFG scale for validation")
-    p.add_argument("--val-seeds-per-sample", type=int, default=3,
-                    help="Number of seeds per validation sample")
+    p.add_argument("--save-every-steps", type=int, default=5_000)
+    p.add_argument("--val-every-steps", type=int, default=3_000)
+    p.add_argument("--keep-checkpoints", type=int, default=3)
+    p.add_argument("--val-sample-steps", type=int, default=28)
+    p.add_argument("--val-cfg-scale", type=float, default=3.0)
+    p.add_argument("--val-cfg-text", type=float, default=3.0)
+    p.add_argument("--val-seeds-per-sample", type=int, default=3)
 
     # Split
     p.add_argument("--test-scenes-pct", type=float, default=5.0)
@@ -644,7 +690,7 @@ def main() -> None:
     if is_main:
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    # W&B init (main process only)
+    # W&B init
     if is_main and _WANDB_AVAILABLE and cnfg.wandb_mode != "disabled":
         wandb.init(
             project=cnfg.wandb_project, name=cnfg.wandb_name, mode=cnfg.wandb_mode,
@@ -656,27 +702,23 @@ def main() -> None:
     if not scenes:
         raise ValueError("Provide --scenes or --scenes-file")
 
-    # Dataset — all mining params explicitly wired from CLI
+    # Dataset
     if is_main:
         print(f"Building dataset at {args.H}x{args.W}...")
     dataset = MegaScenesDataset(
         scene_dirs=scenes, H=args.H, W=args.W,
         caption_dir=args.caption_dir,
-        # Bucket ranges
         easy_min_covis=args.easy_min_covis, easy_max_covis=args.easy_max_covis,
         easy_min_distance=args.easy_min_distance, easy_max_distance=args.easy_max_distance,
         medium_min_covis=args.medium_min_covis, medium_max_covis=args.medium_max_covis,
         medium_min_distance=args.medium_min_distance, medium_max_distance=args.medium_max_distance,
         hard_min_covis=args.hard_min_covis, hard_max_covis=args.hard_max_covis,
         hard_min_distance=args.hard_min_distance, hard_max_distance=args.hard_max_distance,
-        # Bucket ratios
         easy_ratio=args.easy_ratio,
         medium_ratio=args.medium_ratio,
         hard_ratio=args.hard_ratio,
-        # Ref-ref constraints
         min_ref_covisibility=args.min_ref_covisibility,
         max_ref_covisibility=args.max_ref_covisibility,
-        # Quality filtering
         max_triplets_per_scene=args.max_triplets_per_scene,
         min_orientation_dot=args.min_orientation_dot,
         max_focal_length_ratio=args.max_focal_length_ratio,
@@ -705,7 +747,6 @@ def main() -> None:
     train_dataset = torch.utils.data.Subset(dataset, train_indices)
     val_dataset = torch.utils.data.Subset(dataset, test_indices)
 
-    # Build weighted sampler for bucket ratios
     bucket_ratios = {
         Difficulty.EASY: args.easy_ratio,
         Difficulty.MEDIUM: args.medium_ratio,
@@ -730,24 +771,28 @@ def main() -> None:
     )
 
     # Model
-    model = PoseSD(pretrained_model=args.pretrained_model, device=str(device))
+    if is_main:
+        print(f"Loading RelightFlux from {args.pretrained_model}...")
+    model = RelightFlux(pretrained_model=args.pretrained_model, device=str(device))
     model.configure_trainable(args.train_mode)
     model.configure_memory_optimizations(
         gradient_checkpointing=args.gradient_checkpointing,
-        xformers_attention=args.xformers_attention,
-        compile_unet=args.compile_unet,
+        compile_transformer=args.compile_transformer,
     )
 
     trainable_params = model.get_trainable_parameters()
     if is_main:
-        print(f"Trainable params: {sum(p.numel() for p in trainable_params):,}")
+        total_params = sum(p.numel() for p in model.transformer.parameters())
+        trainable_count = sum(p.numel() for p in trainable_params)
+        print(f"Total transformer params: {total_params:,}")
+        print(f"Trainable params: {trainable_count:,}")
         eff_batch = cnfg.per_gpu_batch_size * _world_size() * cnfg.gradient_accumulation_steps
         print(f"Effective batch size: {eff_batch} "
               f"({cnfg.per_gpu_batch_size} x {_world_size()} GPUs x {cnfg.gradient_accumulation_steps} accum)")
 
     # DDP wrapping
     if dist.is_initialized():
-        model.unet = DDP(model.unet, device_ids=[_local_rank()], find_unused_parameters=False)
+        model.transformer = DDP(model.transformer, device_ids=[_local_rank()], find_unused_parameters=False)
 
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -766,7 +811,7 @@ def main() -> None:
     # EMA
     ema = None
     if cnfg.ema_enabled:
-        ema = EMAModel(trainable_params, decay=cnfg.ema_decay)
+        ema = CPUEMAModel(trainable_params, decay=cnfg.ema_decay)
 
     # Resume
     global_step = 0
@@ -774,7 +819,7 @@ def main() -> None:
     if cnfg.resume_from:
         if is_main:
             print(f"Resuming from {cnfg.resume_from}")
-        resumed = load_pose_sd_checkpoint(
+        resumed = load_relight_flux_checkpoint(
             model, cnfg.resume_from, device,
             optimizer=optimizer,
             lr_scheduler=lr_scheduler,
@@ -783,14 +828,14 @@ def main() -> None:
         global_step = resumed["global_step"]
         start_epoch = resumed["epoch"]
 
-    # AMP scaler
+    # AMP
     dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "no": torch.float32}
     amp_dtype = dtype_map[cnfg.mixed_precision]
     use_amp = cnfg.mixed_precision != "no"
 
     # Training loop
     if is_main:
-        print(f"\nStarting training for {cnfg.total_steps} steps...")
+        print(f"\nStarting Flux training for {cnfg.total_steps} steps...")
 
     epoch = start_epoch
     done = False
@@ -811,7 +856,6 @@ def main() -> None:
             bucket_losses: dict[str, list[float]] = {}
 
             for batch_idx, batch in enumerate(pbar):
-                # Forward pass
                 with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                     loss, meta = model.training_step(
                         batch,
@@ -827,12 +871,10 @@ def main() -> None:
                 accum_loss += loss.item() * cnfg.gradient_accumulation_steps
                 accum_steps += 1
 
-                # Track per-bucket losses
                 if "difficulty" in batch:
                     for diff_val in batch["difficulty"]:
                         bucket_losses.setdefault(diff_val, []).append(loss.item() * cnfg.gradient_accumulation_steps)
 
-                # Optimizer step at accumulation boundary
                 if accum_steps % cnfg.gradient_accumulation_steps == 0:
                     if cnfg.grad_clip > 0:
                         torch.nn.utils.clip_grad_norm_(trainable_params, cnfg.grad_clip)
@@ -862,7 +904,6 @@ def main() -> None:
                                 "train/n_both_dropped": meta.get("n_both_dropped", 0),
                                 "train/n_text_dropped": meta.get("n_text_dropped", 0),
                             }
-                            # Log per-bucket losses
                             for diff_key, losses in bucket_losses.items():
                                 if losses:
                                     log_dict[f"train/loss_{diff_key}"] = np.mean(losses)
@@ -886,17 +927,16 @@ def main() -> None:
                     if global_step % cnfg.save_every_steps == 0 and is_main:
                         if ema is not None:
                             ema.apply_shadow(trainable_params)
-                        save_pose_sd_checkpoint(
-                            model, output_dir / f"unet_step_{global_step}.pt",
+                        save_relight_flux_checkpoint(
+                            model, output_dir / f"transformer_step_{global_step}.pt",
                             optimizer=optimizer, lr_scheduler=lr_scheduler,
                             ema=ema, epoch=epoch + 1, global_step=global_step,
                         )
                         if ema is not None:
                             ema.restore(trainable_params)
 
-                        # Always save latest
-                        save_pose_sd_checkpoint(
-                            model, output_dir / "unet_latest.pt",
+                        save_relight_flux_checkpoint(
+                            model, output_dir / "transformer_latest.pt",
                             optimizer=optimizer, lr_scheduler=lr_scheduler,
                             ema=ema, epoch=epoch + 1, global_step=global_step,
                         )
@@ -913,8 +953,8 @@ def main() -> None:
         if is_main:
             if ema is not None:
                 ema.apply_shadow(trainable_params)
-            save_pose_sd_checkpoint(
-                model, output_dir / "unet_final.pt",
+            save_relight_flux_checkpoint(
+                model, output_dir / "transformer_final.pt",
                 optimizer=optimizer, lr_scheduler=lr_scheduler,
                 ema=ema, epoch=epoch, global_step=global_step,
             )
@@ -926,8 +966,8 @@ def main() -> None:
         _cleanup_distributed()
 
 
-def _cleanup_checkpoints(output_dir: Path, keep: int = 5) -> None:
-    ckpts = sorted(output_dir.glob("unet_step_*.pt"), key=lambda p: p.stat().st_mtime)
+def _cleanup_checkpoints(output_dir: Path, keep: int = 3) -> None:
+    ckpts = sorted(output_dir.glob("transformer_step_*.pt"), key=lambda p: p.stat().st_mtime)
     for p in ckpts[:-keep]:
         print(f"Removing old checkpoint: {p.name}")
         p.unlink()

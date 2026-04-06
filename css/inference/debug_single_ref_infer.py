@@ -12,7 +12,7 @@ import torch
 from PIL import Image, ImageDraw
 
 from css.debug_single_ref_experiment import SingleRefPairDataset, SingleRefSD, _to_uint8
-from css.models.EMA import load_pose_sd_checkpoint
+from css.models.EMA import load_relight_sd_checkpoint
 
 
 def _set_seed(seed: int) -> None:
@@ -113,7 +113,7 @@ def main() -> None:
         title = f"{rec.scene_name} | ref={rec.ref_name} | tgt={rec.target_name} | covis={rec.covisibility:.3f}"
 
     model = SingleRefSD(pretrained_model=args.pretrained_model)
-    load_pose_sd_checkpoint(model, args.checkpoint, model.device)
+    load_relight_sd_checkpoint(model, args.checkpoint, model.device)
     model.eval()
 
     generated: list[torch.Tensor] = []

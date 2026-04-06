@@ -18,7 +18,7 @@ from css.data.dataset import (
     compute_plucker_tensor,
 )
 from css.inference.scene_sampling import build_comparison_grid, load_scene_pools
-from css.models.EMA import load_pose_sd_checkpoint
+from css.models.EMA import load_relight_sd_checkpoint
 
 _SEVA_ROOT = str(Path(__file__).resolve().parent.parent.parent / "stable-virtual-camera")
 if _SEVA_ROOT not in sys.path:
@@ -109,11 +109,11 @@ def adjust_K_for_crop_resize(K: np.ndarray, src_w: int, src_h: int, H: int, W: i
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Triplet inference with MAST3R + PoseSD")
+    parser = argparse.ArgumentParser(description="Triplet inference with MAST3R + RelightSD")
     parser.add_argument("--ref1", required=True, help="Reference image 1 (path or name within scene)")
     parser.add_argument("--ref2", required=True, help="Reference image 2 (path or name within scene)")
     parser.add_argument("--target", required=True, help="Target image (path or name within scene)")
-    parser.add_argument("--checkpoint", required=True, help="PoseSD checkpoint")
+    parser.add_argument("--checkpoint", required=True, help="RelightSD checkpoint")
     parser.add_argument("--scene", default=None, help="Scene directory with COLMAP data (skip MAST3R)")
     parser.add_argument("--output", default="output.png")
     parser.add_argument("--arch", choices=["NEW", "OLD"], default="NEW")
@@ -206,15 +206,15 @@ def main():
 
     assert ref1_tensor.shape[-2:] == (H, W)
     assert ref2_tensor.shape[-2:] == (H, W)
-    # --- Load PoseSD ---
-    print("Loading PoseSD...")
+    # --- Load RelightSD ---
+    print("Loading RelightSD...")
     if args.arch == "OLD":
-        from css.old.pose_sd import PoseSD
+        from css.old.relight_sd import RelightSD
     else:
-        from css.models.pose_sd import PoseSD
+        from css.models.relight_sd import RelightSD
 
-    model = PoseSD(device=args.device)
-    load_pose_sd_checkpoint(model, args.checkpoint, model.device)
+    model = RelightSD(device=args.device)
+    load_relight_sd_checkpoint(model, args.checkpoint, model.device)
     model.eval()
 
     # --- Generate ---

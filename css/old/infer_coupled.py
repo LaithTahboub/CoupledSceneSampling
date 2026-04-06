@@ -1,14 +1,14 @@
-"""Coupled SEVA + PoseSD inference on a COLMAP scene.
+"""Coupled SEVA + RelightSD inference on a COLMAP scene.
 
 Generates a SEVA video interpolating between ordered input images, then
-replaces frames near each input keyframe with PoseSD-canonicalized versions
+replaces frames near each input keyframe with RelightSD-canonicalized versions
 using the two closest input images as references.
 
 Usage:
     python -m css.inference.infer_coupled \
         --scene /path/to/MegaScenes/scene \
         --inputs img1.jpg img2.jpg img3.jpg \
-        --checkpoint /path/to/pose_sd_unet.pt \
+        --checkpoint /path/to/relight_sd_unet.pt \
         --output coupled_video.mp4
 """
 
@@ -32,8 +32,8 @@ from css.data.dataset import (
     load_image_tensor,
     normalize_c2w_translation,
 )
-from css.models.EMA import load_pose_sd_checkpoint
-from css.models.pose_sd import PoseSD
+from css.models.EMA import load_relight_sd_checkpoint
+from css.models.relight_sd import RelightSD
 
 import sys
 
@@ -100,19 +100,19 @@ def keyframe_indices_in_video(num_inputs: int, num_target_frames: int) -> list[i
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Coupled SEVA + PoseSD inference")
+    parser = argparse.ArgumentParser(description="Coupled SEVA + RelightSD inference")
     parser.add_argument("--scene", required=True, help="COLMAP scene directory")
     parser.add_argument("--inputs", nargs="+", required=True,
                         help="Ordered image names from the scene")
-    parser.add_argument("--checkpoint", required=True, help="PoseSD checkpoint")
+    parser.add_argument("--checkpoint", required=True, help="RelightSD checkpoint")
     parser.add_argument("--output", default=None, help="Output video path")
     parser.add_argument("--save-root", default="work_dirs/coupled")
     parser.add_argument("--seed", type=int, default=23)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--transition-sec", type=float, default=1.5)
-    parser.add_argument("--pose-sd-cfg", type=float, default=3.0)
-    parser.add_argument("--pose-sd-steps", type=int, default=50)
+    parser.add_argument("--relight-sd-cfg", type=float, default=3.0)
+    parser.add_argument("--relight-sd-steps", type=int, default=50)
     parser.add_argument("--pose-estimator", choices=["dust3r", "mast3r"], default="mast3r",
                         help="Pose estimation backend (default: mast3r)")
     args = parser.parse_args()
@@ -122,7 +122,7 @@ def main():
     image_names = args.inputs
     num_inputs = len(image_names)
 
-    # --- Load COLMAP data for PoseSD (intrinsics + images) ---
+    # --- Load COLMAP data for RelightSD (intrinsics + images) ---
     cameras, images_dir, colmap_imgs = resolve_colmap_images(scene_dir, image_names)
     img_paths = [str(images_dir / img.name) for img in colmap_imgs]
 
@@ -218,13 +218,13 @@ def main():
     num_video_frames = len(frames)
     print(f"SEVA output: {num_video_frames} frames")
 
-    # --- Load PoseSD ---
-    print("Loading PoseSD...")
-    pose_sd = PoseSD()
-    load_pose_sd_checkpoint(pose_sd, args.checkpoint, pose_sd.device)
-    pose_sd.eval()
+    # --- Load RelightSD ---
+    print("Loading RelightSD...")
+    relight_sd = RelightSD()
+    load_relight_sd_checkpoint(relight_sd, args.checkpoint, relight_sd.device)
+    relight_sd.eval()
 
-    # Prepare PoseSD inputs: COLMAP intrinsics + image tensors at 576x576
+    # Prepare RelightSD inputs: COLMAP intrinsics + image tensors at 576x576
     H2d, W2d = 576, 576
     lh, lw = H2d // 8, W2d // 8
     colmap_Ks = [build_cropped_scaled_intrinsics(cameras[ci.camera_id], H2d, W2d)
@@ -235,8 +235,8 @@ def main():
     # Map each keyframe to its position in the video
     kf_video_indices = keyframe_indices_in_video(num_inputs, num_video_frames)
 
-    # --- Replace keyframe positions with PoseSD outputs ---
-    print("PoseSD canonicalization...")
+    # --- Replace keyframe positions with RelightSD outputs ---
+    print("RelightSD canonicalization...")
     for input_idx in range(num_inputs):
         frame_idx = kf_video_indices[input_idx]
         if frame_idx >= num_video_frames:
@@ -263,11 +263,11 @@ def main():
                                          colmap_Ks[input_idx], H2d, W2d, lh, lw).unsqueeze(0)
 
         with torch.inference_mode():
-            gen = pose_sd.sample(
+            gen = relight_sd.sample(
                 ref1_img=ref_tensors[r1], ref2_img=ref_tensors[r2],
                 pl_ref1=pl_r1, pl_ref2=pl_r2, pl_tgt=pl_tgt,
-                prompt="", num_steps=args.pose_sd_steps,
-                cfg_scale=args.pose_sd_cfg, seed=args.seed,
+                prompt="", num_steps=args.relight_sd_steps,
+                cfg_scale=args.relight_sd_cfg, seed=args.seed,
             )[0]
 
         gen_np = ((gen.clamp(-1, 1) + 1) / 2 * 255).byte().permute(1, 2, 0).cpu().numpy()

@@ -57,6 +57,62 @@ class EMAModel:
             ).clone()
 
 
+class CPUEMAModel:
+    """EMA helper that stores shadow params on CPU to save GPU memory.
+
+    Designed for large models (e.g. Flux ~12B) where GPU cannot hold
+    both the live parameters and a full shadow copy.  The update() method
+    copies each param to CPU, blends, and stores — slower than GPU EMA
+    but uses zero extra GPU memory.
+    """
+
+    def __init__(self, params, decay: float = 0.9999):
+        if not (0.0 < decay < 1.0):
+            raise ValueError(f"EMA decay must be in (0, 1), got {decay}")
+        self.decay = float(decay)
+        self.shadow_params = [p.detach().float().cpu().clone() for p in params]
+        self.collected_params: list[torch.Tensor] | None = None
+
+    def update(self, params) -> None:
+        with torch.no_grad():
+            for shadow, p in zip(self.shadow_params, params):
+                p_cpu = p.detach().float().cpu()
+                shadow.mul_(self.decay).add_(p_cpu, alpha=1.0 - self.decay)
+
+    def apply_shadow(self, params) -> None:
+        """Copy live params to collected_params (on CPU), then overwrite live with shadow."""
+        self.collected_params = [p.detach().float().cpu().clone() for p in params]
+        with torch.no_grad():
+            for p, shadow in zip(params, self.shadow_params):
+                p.copy_(shadow.to(device=p.device, dtype=p.dtype))
+
+    def restore(self, params) -> None:
+        if self.collected_params is None:
+            return
+        with torch.no_grad():
+            for p, live in zip(params, self.collected_params):
+                p.copy_(live.to(device=p.device, dtype=p.dtype))
+        self.collected_params = None
+
+    def state_dict(self) -> dict:
+        return {
+            "decay": self.decay,
+            "shadow_params": [t.detach().cpu() for t in self.shadow_params],
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        self.decay = float(state.get("decay", self.decay))
+        loaded = state.get("shadow_params")
+        if loaded is None:
+            return
+        if len(loaded) != len(self.shadow_params):
+            raise ValueError(
+                f"EMA param length mismatch: checkpoint={len(loaded)} current={len(self.shadow_params)}"
+            )
+        for i, t in enumerate(loaded):
+            self.shadow_params[i] = t.float().cpu().clone()
+
+
 def _extract_unet_state(raw_ckpt):
     if isinstance(raw_ckpt, dict):
         if "unet" in raw_ckpt and isinstance(raw_ckpt["unet"], dict):
@@ -100,7 +156,7 @@ def _unwrap_unet(model):
     return unet.module if hasattr(unet, "module") else unet
 
 
-def load_pose_sd_checkpoint(
+def load_relight_sd_checkpoint(
     model,
     ckpt_path: str | Path,
     device,
@@ -132,7 +188,7 @@ def load_pose_sd_checkpoint(
     return {"epoch": epoch, "global_step": global_step}
 
 
-def save_pose_sd_checkpoint(
+def save_relight_sd_checkpoint(
     model,
     ckpt_path: str | Path,
     optimizer: torch.optim.Optimizer | None = None,

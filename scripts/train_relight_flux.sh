@@ -1,18 +1,18 @@
 #!/bin/bash
-# PoseSD training: 3-view (ref1, ref2, target) with Plucker ray conditioning.
-# Multi-GPU via torchrun (8x A6000).
+# RelightFlux training: 3-view (ref1, ref2, target) with Plucker ray conditioning.
+# Multi-GPU via torchrun on Flux.1-dev backbone (~12B params).
 
-#SBATCH --job-name=css-pose-sd
+#SBATCH --job-name=css-relight-flux
 #SBATCH --partition=vulcan-scavenger
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=18
-#SBATCH --mem=144gb
+#SBATCH --mem=256gb
 #SBATCH --gres=gpu:h200-sxm:2
 #SBATCH --account=vulcan-jbhuang
 #SBATCH --qos=vulcan-scavenger
 #SBATCH --time=3-00:00:00
-#SBATCH --output=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/train_pose_sd_%j.out
-#SBATCH --error=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/train_pose_sd_%j.err
+#SBATCH --output=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/train_relight_flux_%j.out
+#SBATCH --error=/vulcanscratch/ltahboub/CoupledSceneSampling/logs/train_relight_flux_%j.err
 
 set -euo pipefail
 
@@ -20,25 +20,29 @@ ROOT="/vulcanscratch/ltahboub/CoupledSceneSampling"
 SCENES_FILE=${SCENES_FILE:-"/fs/nexus-scratch/ltahboub/MegaScenes/scenes_colmap_ready.txt"}
 SCENES=${SCENES:-}
 
-RUN_NAME=${RUN_NAME:-pose_sd_v10}
+RUN_NAME=${RUN_NAME:-relight_flux_v1}
 OUTPUT=${OUTPUT:-$ROOT/checkpoints/${RUN_NAME}}
 SEED=${SEED:-101}
 
 # - Training -
+# Flux is ~12B params — smaller batch, more gradient accumulation
 TOTAL_STEPS=${TOTAL_STEPS:-60000}
-PER_GPU_BATCH_SIZE=${PER_GPU_BATCH_SIZE:-32}
-GRAD_ACCUM=${GRAD_ACCUM:-2}
+PER_GPU_BATCH_SIZE=${PER_GPU_BATCH_SIZE:-1}
+GRAD_ACCUM=${GRAD_ACCUM:-8}
 
-LR=${LR:-2e-5}
+LR=${LR:-1e-5}
 TRAIN_MODE=${TRAIN_MODE:-full}
 WARMUP_STEPS=${WARMUP_STEPS:-1000}
 LR_SCHEDULER=${LR_SCHEDULER:-cosine}
 
 # - Data -
+# 512x512 for training (1024x1024 OOMs during backward on H200 with
+# 3-view multi-view attention on 12B Flux transformer).
+# Inference can still run at 1024x1024 (no backward pass).
 H=${H:-512}
 W=${W:-512}
-MAX_TRIPLETS_PER_SCENE=${MAX_TRIPLETS_PER_SCENE:-900}
-MIN_POINTS_PER_IMAGE=${MIN_POINTS_PER_IMAGE:-400}
+MAX_TRIPLETS_PER_SCENE=${MAX_TRIPLETS_PER_SCENE:-300000}
+MIN_POINTS_PER_IMAGE=${MIN_POINTS_PER_IMAGE:-300}
 MIN_ORIENTATION_DOT=${MIN_ORIENTATION_DOT:-0.4}
 MAX_FOCAL_LENGTH_RATIO=${MAX_FOCAL_LENGTH_RATIO:-2.0}
 MIN_REF_COVISIBILITY=${MIN_REF_COVISIBILITY:-0.15}
@@ -52,7 +56,7 @@ COND_ONE_DROPPED=${COND_ONE_DROPPED:-0.10}
 COND_BOTH_DROPPED=${COND_BOTH_DROPPED:-0.05}
 
 # - Captioning -
-CAPTION_DIR=${CAPTION_DIR:-/fs/nexus-scratch/ltahboub/MegaScenesCaptions} # leave empty for none
+CAPTION_DIR=${CAPTION_DIR:-/fs/nexus-scratch/ltahboub/MegaScenesCaptions}
 TEXT_DROP_PROB=${TEXT_DROP_PROB:-0.1}
 
 # - Data augmentation -
@@ -70,10 +74,10 @@ TEST_TARGETS_PER_SCENE=${TEST_TARGETS_PER_SCENE:-0}
 SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/${RUN_NAME}_seed${SEED}}
 
 # - Checkpoints & validation -
-SAVE_EVERY=${SAVE_EVERY:-8000}
-VAL_EVERY=${VAL_EVERY:-5000}
+SAVE_EVERY=${SAVE_EVERY:-5000}
+VAL_EVERY=${VAL_EVERY:-3000}
 KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-3}
-VAL_SAMPLE_STEPS=${VAL_SAMPLE_STEPS:-25}
+VAL_SAMPLE_STEPS=${VAL_SAMPLE_STEPS:-28}
 VAL_CFG_SCALE=${VAL_CFG_SCALE:-3.0}
 VAL_CFG_TEXT=${VAL_CFG_TEXT:-3.0}
 VAL_SEEDS_PER_SAMPLE=${VAL_SEEDS_PER_SAMPLE:-3}
@@ -94,7 +98,7 @@ fi
 cd "$ROOT"
 mkdir -p logs
 
-COMPILE_UNET=${COMPILE_UNET:-1}
+COMPILE_TRANSFORMER=${COMPILE_TRANSFORMER:-0}
 
 ARGS=(
     --output "$OUTPUT"
@@ -159,8 +163,8 @@ if [[ -n "$RESUME" ]]; then
     ARGS+=(--resume-from "$RESUME")
 fi
 
-if [[ "$COMPILE_UNET" == "1" ]]; then
-    ARGS+=(--compile-unet)
+if [[ "$COMPILE_TRANSFORMER" == "1" ]]; then
+    ARGS+=(--compile-transformer)
 fi
 
 if [[ -n "$CAPTION_DIR" ]]; then
@@ -169,5 +173,5 @@ fi
 
 torchrun \
     --nproc_per_node="$NUM_GPUS" \
-    --master_port="${MASTER_PORT:-29502}" \
-    -m css.train.train_pose_sd "${ARGS[@]}"
+    --master_port="${MASTER_PORT:-29503}" \
+    -m css.train.train_relight_flux "${ARGS[@]}"

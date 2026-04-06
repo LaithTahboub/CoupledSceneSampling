@@ -1,7 +1,7 @@
 """Inference-time image captioning utility.
 
 Captions a single image using the same VLM and structured prompt used for
-dataset captioning, producing a caption suitable for PoseSD text conditioning.
+dataset captioning, producing a caption suitable for RelightSD text conditioning.
 
 Usage as CLI:
     # Start vLLM server first, then:
@@ -28,7 +28,7 @@ from css.data.caption_dataset import (
 
 
 class ImageCaptioner:
-    """Caption a single image using a VLM for PoseSD text conditioning.
+    """Caption a single image using a VLM for RelightSD text conditioning.
 
     Can be used as a callable: captioner(image_path) -> caption string.
     """
@@ -81,7 +81,7 @@ class ImageCaptioner:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Caption an image for PoseSD")
+    p = argparse.ArgumentParser(description="Caption an image for RelightSD")
     p.add_argument("image", type=str, help="Path to the image")
     p.add_argument("--api-base", type=str, default="http://localhost:8000/v1")
     p.add_argument("--model", type=str, default="Qwen/Qwen2.5-VL-7B-Instruct")

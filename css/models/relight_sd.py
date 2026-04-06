@@ -1,4 +1,4 @@
-"""PoseSD: 3-view model with Plucker ray conditioning.
+"""RelightSD: 3-view model with Plucker ray conditioning.
 
 Views are packed as (B*V, 11, h, w) with per-view channels:
 latent(4) + plucker(6) + mask(1).
@@ -17,10 +17,10 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel
+from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, UNet2DConditionModel
 from transformers import CLIPTextModel, CLIPTokenizer
 
-from css.old.cross_view_attention import CrossViewAttention
+from css.models.cross_view_attention import inflate_unet_attention
 
 
 def _expand_conv_in(unet: UNet2DConditionModel, new_in_channels: int) -> None:
@@ -41,7 +41,7 @@ def _expand_conv_in(unet: UNet2DConditionModel, new_in_channels: int) -> None:
     unet.config.in_channels = new_in_channels
 
 
-class PoseSD(nn.Module):
+class RelightSD(nn.Module):
     """3-view model: 2 refs + 1 target with Plucker conditioning."""
 
     NUM_VIEWS = 3          # default for single-target (backward compat)
@@ -58,22 +58,24 @@ class PoseSD(nn.Module):
         self.text_encoder = CLIPTextModel.from_pretrained(pretrained_model, subfolder="text_encoder").to(self.device)
         self.tokenizer = CLIPTokenizer.from_pretrained(pretrained_model, subfolder="tokenizer")
         self.scheduler = DDPMScheduler.from_pretrained(pretrained_model, subfolder="scheduler")
+        self.inference_scheduler = DDIMScheduler.from_pretrained(pretrained_model, subfolder="scheduler")
 
         self.vae.requires_grad_(False).eval()
         self.text_encoder.requires_grad_(False).eval()
 
         _expand_conv_in(self.unet, self.PER_VIEW_CH)
-        self.cross_view_attention = CrossViewAttention(num_views=self.NUM_VIEWS, include_high_res=False)
-        self.cross_view_attention.attach(self.unet)
+        inflated = inflate_unet_attention(self.unet, num_views=self.NUM_VIEWS, include_high_res=False)
+        print(f"[relight-sd] inflated {len(inflated)} self-attention layers to multi-view")
 
         with torch.no_grad():
             tokens = self.tokenizer([""], padding="max_length", max_length=77, return_tensors="pt")
             self.null_text_emb = self.text_encoder(tokens.input_ids.to(self.device))[0]
 
-    def configure_trainable(self, train_mode: str = "cond") -> None:
+    def configure_trainable(self, train_mode: str = "full") -> None:
         if train_mode == "full":
             self.unet.requires_grad_(True)
             return
+        # Legacy "cond" mode: only conv_in + attention layers
         self.unet.requires_grad_(False)
         self.unet.conv_in.requires_grad_(True)
         for name, param in self.unet.named_parameters():
@@ -81,7 +83,10 @@ class PoseSD(nn.Module):
                 param.requires_grad_(True)
 
     def configure_memory_optimizations(
-        self, gradient_checkpointing: bool = False, xformers_attention: bool = False,
+        self,
+        gradient_checkpointing: bool = False,
+        xformers_attention: bool = False,
+        compile_unet: bool = False,
     ) -> None:
         if gradient_checkpointing:
             self.unet.enable_gradient_checkpointing()
@@ -89,8 +94,11 @@ class PoseSD(nn.Module):
             try:
                 self.unet.enable_xformers_memory_efficient_attention()
             except Exception as exc:
-                print(f"[pose-sd] xformers unavailable: {exc}")
-        self.cross_view_attention.attach(self.unet)
+                print(f"[relight-sd] xformers unavailable: {exc}")
+        if compile_unet:
+            mode = "default" if gradient_checkpointing else "reduce-overhead"
+            self.unet = torch.compile(self.unet, mode=mode)
+            print(f"[relight-sd] compiled UNet with torch.compile(mode='{mode}')")
 
     def get_trainable_parameters(self) -> list[nn.Parameter]:
         return [p for p in self.unet.parameters() if p.requires_grad]
@@ -119,8 +127,16 @@ class PoseSD(nn.Module):
         ref1_keep: torch.Tensor | None = None,
         ref2_keep: torch.Tensor | None = None,
         slot_order: list[int] | None = None,
+        keep_pluckers: bool = False,
     ) -> tuple[torch.Tensor, int]:
-        """Pack 3 views into (B*3, 11, h, w). Unchanged from original."""
+        """Pack 3 views into (B*3, 11, h, w).
+
+        Args:
+            keep_pluckers: If True, Plucker ray maps are never zeroed by the
+                keep masks — only ref latents and masks are dropped.  This
+                preserves the full geometric layout in the unconditional CFG
+                branch so the model always knows the 3-camera arrangement.
+        """
         b, _, h, w = tgt_lat.shape
         dtype, device = tgt_lat.dtype, tgt_lat.device
 
@@ -131,13 +147,15 @@ class PoseSD(nn.Module):
         if ref1_keep is not None:
             keep1 = ref1_keep.to(device=device, dtype=dtype).view(b, 1, 1, 1)
             ref1_lat = ref1_lat * keep1
-            pl_ref1 = pl_ref1 * keep1
+            if not keep_pluckers:
+                pl_ref1 = pl_ref1 * keep1
             m_ref1 = m_ref1 * keep1
 
         if ref2_keep is not None:
             keep2 = ref2_keep.to(device=device, dtype=dtype).view(b, 1, 1, 1)
             ref2_lat = ref2_lat * keep2
-            pl_ref2 = pl_ref2 * keep2
+            if not keep_pluckers:
+                pl_ref2 = pl_ref2 * keep2
             m_ref2 = m_ref2 * keep2
 
         v_tgt = torch.cat([tgt_lat, pl_tgt, m_tgt], dim=1)
@@ -264,6 +282,7 @@ class PoseSD(nn.Module):
             pl_ref1, pl_ref2, pl_tgt,
             ref1_keep=ref1_keep, ref2_keep=ref2_keep,
             slot_order=slot_order,
+            keep_pluckers=True,
         )
         pred = self._predict_target_eps(packed, timesteps, text_emb, batch_size=b, target_slot=target_slot)
 
@@ -287,42 +306,104 @@ class PoseSD(nn.Module):
         self, *,
         ref1_img: torch.Tensor, ref2_img: torch.Tensor,
         pl_ref1: torch.Tensor, pl_ref2: torch.Tensor, pl_tgt: torch.Tensor,
-        prompt: str = "", num_steps: int = 50, cfg_scale: float = 3.0,
-        cfg_text: float = 1.0, seed: int = 42,
+        prompt: str = "", num_steps: int = 25,
+        cfg_scale: float = 3.0, cfg_text: float = 3.0,
+        seed: int | list[int] = 42,
     ) -> torch.Tensor:
-        """Single-target inference. cfg_text is accepted for API compat but not used."""
+        """Inference with dual CFG, batched across both CFG branches and seeds.
+
+        All 3 CFG branches are batched into a single UNet forward pass per
+        denoising step.  When ``seed`` is a list, each seed produces an
+        independent sample in a single batched call — inputs are automatically
+        expanded along the batch dimension.
+
+          eps_uncond  = f(no refs, no text)
+          eps_geo     = f(refs,    no text)
+          eps_full    = f(refs,    text)
+
+          eps = eps_uncond
+              + cfg_scale * (eps_geo  - eps_uncond)   # geometry guidance
+              + cfg_text  * (eps_full - eps_geo)       # text guidance
+
+        Args:
+            seed: single int or list of ints.  List produces len(seed) outputs
+                  in one batched forward pass (inputs must have B=1).
+
+        Returns:
+            (B, 3, H, W) decoded images in [-1, 1], where B = len(seeds).
+        """
+        seeds = [seed] if isinstance(seed, int) else list(seed)
+        n_seeds = len(seeds)
+
         ref1_lat = self.encode_image(ref1_img.to(self.device))
         ref2_lat = self.encode_image(ref2_img.to(self.device))
         pl_ref1 = pl_ref1.to(self.device)
         pl_ref2 = pl_ref2.to(self.device)
         pl_tgt = pl_tgt.to(self.device)
+
+        # Expand B=1 inputs to batch of n_seeds
+        if n_seeds > 1 and ref1_lat.shape[0] == 1:
+            ref1_lat = ref1_lat.expand(n_seeds, -1, -1, -1)
+            ref2_lat = ref2_lat.expand(n_seeds, -1, -1, -1)
+            pl_ref1 = pl_ref1.expand(n_seeds, -1, -1, -1)
+            pl_ref2 = pl_ref2.expand(n_seeds, -1, -1, -1)
+            pl_tgt = pl_tgt.expand(n_seeds, -1, -1, -1)
+
         b = ref1_lat.shape[0]
+        V = self.NUM_VIEWS
 
         text_cond = self.get_text_embeddings([prompt]).expand(b, -1, -1)
         text_uncond = self.null_text_emb.expand(b, -1, -1)
 
-        self.scheduler.set_timesteps(num_steps)
-        gen = torch.Generator(device=self.device).manual_seed(seed)
-        latent = torch.randn(ref1_lat.shape, generator=gen, device=self.device, dtype=ref1_lat.dtype)
+        sched = self.inference_scheduler
+        sched.set_timesteps(num_steps)
 
-        for t in self.scheduler.timesteps:
+        # Generate independent noise per seed
+        latent_shape = (1, *ref1_lat.shape[1:])
+        noise_parts = []
+        for s in seeds:
+            g = torch.Generator(device=self.device).manual_seed(s)
+            noise_parts.append(
+                torch.randn(latent_shape, generator=g, device=self.device, dtype=ref1_lat.dtype)
+            )
+        latent = torch.cat(noise_parts, dim=0)
+
+        ref1_drop = torch.zeros(b, dtype=torch.bool, device=self.device)
+        ref2_drop = torch.zeros(b, dtype=torch.bool, device=self.device)
+
+        for t in sched.timesteps:
             t_b = torch.full((b,), int(t), device=self.device, dtype=torch.long)
-            latent_in = self.scheduler.scale_model_input(latent, t)
+            latent_in = sched.scale_model_input(latent, t)
 
-            packed_cond, tgt_slot = self._pack_views(
+            # Pack views for both CFG branches (full/geo share the same packing)
+            packed_full, tgt_slot = self._pack_views(
                 ref1_lat, ref2_lat, latent_in, pl_ref1, pl_ref2, pl_tgt,
             )
-            eps_cond = self._predict_target_eps(packed_cond, t_b, text_cond, b, tgt_slot)
-
-            ref1_drop = torch.zeros(b, dtype=torch.bool, device=self.device)
-            ref2_drop = torch.zeros(b, dtype=torch.bool, device=self.device)
-            packed_uncond, tgt_slot_uc = self._pack_views(
+            packed_uncond, _ = self._pack_views(
                 ref1_lat, ref2_lat, latent_in, pl_ref1, pl_ref2, pl_tgt,
                 ref1_keep=ref1_drop, ref2_keep=ref2_drop,
+                keep_pluckers=False,
             )
-            eps_uncond = self._predict_target_eps(packed_uncond, t_b, text_uncond, b, tgt_slot_uc)
 
-            eps = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
-            latent = self.scheduler.step(eps, t, latent).prev_sample
+            # Batch all 3 CFG branches: [full, geo, uncond] → single UNet call
+            packed_cfg = torch.cat([packed_full, packed_full, packed_uncond], dim=0)
+            t_cfg = t_b.repeat_interleave(V).repeat(3)
+            text_cfg = torch.cat([
+                text_cond.repeat_interleave(V, dim=0),
+                text_uncond.repeat_interleave(V, dim=0),
+                text_uncond.repeat_interleave(V, dim=0),
+            ], dim=0)
+
+            pred_all = self.unet(packed_cfg, t_cfg, encoder_hidden_states=text_cfg).sample
+            pred_all = pred_all.view(3, b, V, *pred_all.shape[1:])
+
+            eps_full = pred_all[0, :, tgt_slot]
+            eps_geo = pred_all[1, :, tgt_slot]
+            eps_uncond = pred_all[2, :, tgt_slot]
+
+            eps = (eps_uncond
+                   + cfg_scale * (eps_geo - eps_uncond)
+                   + cfg_text * (eps_full - eps_geo))
+            latent = sched.step(eps, t, latent).prev_sample
 
         return self.decode_latent(latent)
