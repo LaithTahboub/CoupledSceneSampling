@@ -73,6 +73,10 @@ def _cleanup_distributed() -> None:
         dist.destroy_process_group()
 
 
+def _wandb_is_active() -> bool:
+    return _WANDB_AVAILABLE and getattr(wandb, "run", None) is not None
+
+
 # ---------------------------------------------------------------------------
 # Utilities (same as train_relight_sd.py)
 # ---------------------------------------------------------------------------
@@ -490,7 +494,7 @@ def _log_validation(
             compute_lpips=True,
         )
 
-        if not _WANDB_AVAILABLE:
+        if not _wandb_is_active():
             print(f"  Val step {global_step}: PSNR={metrics.psnr_mean:.2f} SSIM={metrics.ssim_mean:.4f} "
                   f"LPIPS={metrics.lpips_mean:.4f} CopyRatio={metrics.copy_ratio_mean:.3f}")
             return
@@ -634,6 +638,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wandb-project", type=str, default="CoupledSceneSampling")
     p.add_argument("--wandb-name", type=str, default=None)
     p.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
+    p.add_argument("--wandb-init-timeout", type=int, default=300)
 
     return p.parse_args()
 
@@ -694,12 +699,34 @@ def main() -> None:
     amp_dtype = dtype_map[cnfg.mixed_precision]
     use_amp = cnfg.mixed_precision != "no"
 
-    # W&B init
+    # W&B init: prefer the requested mode, but don't let network timeouts kill training.
     if is_main and _WANDB_AVAILABLE and cnfg.wandb_mode != "disabled":
-        wandb.init(
-            project=cnfg.wandb_project, name=cnfg.wandb_name, mode=cnfg.wandb_mode,
+        init_kwargs = dict(
+            project=cnfg.wandb_project,
+            name=cnfg.wandb_name,
             config=vars(args),
+            settings=wandb.Settings(init_timeout=args.wandb_init_timeout),
         )
+        try:
+            wandb.init(mode=cnfg.wandb_mode, **init_kwargs)
+        except Exception as exc:
+            if cnfg.wandb_mode == "online":
+                print(
+                    "[train_relight_flux] W&B online init failed "
+                    f"({type(exc).__name__}: {exc}). Falling back to offline mode."
+                )
+                try:
+                    wandb.init(mode="offline", **init_kwargs)
+                except Exception as offline_exc:
+                    print(
+                        "[train_relight_flux] W&B offline init also failed "
+                        f"({type(offline_exc).__name__}: {offline_exc}). Continuing without W&B."
+                    )
+            else:
+                print(
+                    "[train_relight_flux] W&B init failed "
+                    f"({type(exc).__name__}: {exc}). Continuing without W&B."
+                )
 
     # Scenes
     scenes = list(dict.fromkeys((cnfg.scenes or []) + _read_lines(cnfg.scenes_file)))
@@ -896,7 +923,7 @@ def main() -> None:
                         if isinstance(pbar, tqdm):
                             pbar.set_postfix(loss=f"{avg_loss:.4f}", step=global_step, lr=f"{lr_scheduler.get_last_lr()[0]:.2e}")
 
-                        if _WANDB_AVAILABLE and cnfg.wandb_mode != "disabled":
+                        if _wandb_is_active():
                             log_dict = {
                                 "train/loss": avg_loss,
                                 "train/lr": lr_scheduler.get_last_lr()[0],
@@ -964,7 +991,7 @@ def main() -> None:
             print(f"Training complete. Final step: {global_step}")
 
     finally:
-        if is_main and _WANDB_AVAILABLE:
+        if is_main and _wandb_is_active():
             wandb.finish()
         _cleanup_distributed()
 

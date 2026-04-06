@@ -85,6 +85,10 @@ VAL_SEEDS_PER_SAMPLE=${VAL_SEEDS_PER_SAMPLE:-3}
 # - EMA -
 EMA_DECAY=${EMA_DECAY:-0.9999}
 
+# - W&B -
+WANDB_MODE=${WANDB_MODE:-online}
+WANDB_INIT_TIMEOUT=${WANDB_INIT_TIMEOUT:-300}
+
 # - Multi-GPU -
 NUM_GPUS=${NUM_GPUS:-2}
 NUM_WORKERS=${NUM_WORKERS:-4}
@@ -145,6 +149,8 @@ ARGS=(
     --W "$W"
     --num-workers "$NUM_WORKERS"
     --mixed-precision bf16
+    --wandb-mode "$WANDB_MODE"
+    --wandb-init-timeout "$WANDB_INIT_TIMEOUT"
 )
 
 if [[ -n "$SCENES" ]]; then
