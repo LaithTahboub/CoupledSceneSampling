@@ -690,6 +690,10 @@ def main() -> None:
     if is_main:
         output_dir.mkdir(parents=True, exist_ok=True)
 
+    dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "no": torch.float32}
+    amp_dtype = dtype_map[cnfg.mixed_precision]
+    use_amp = cnfg.mixed_precision != "no"
+
     # W&B init
     if is_main and _WANDB_AVAILABLE and cnfg.wandb_mode != "disabled":
         wandb.init(
@@ -773,7 +777,11 @@ def main() -> None:
     # Model
     if is_main:
         print(f"Loading RelightFlux from {args.pretrained_model}...")
-    model = RelightFlux(pretrained_model=args.pretrained_model, device=str(device))
+    model = RelightFlux(
+        pretrained_model=args.pretrained_model,
+        device=str(device),
+        transformer_dtype=amp_dtype,
+    )
     model.configure_trainable(args.train_mode)
     model.configure_memory_optimizations(
         gradient_checkpointing=args.gradient_checkpointing,
@@ -827,11 +835,6 @@ def main() -> None:
         )
         global_step = resumed["global_step"]
         start_epoch = resumed["epoch"]
-
-    # AMP
-    dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "no": torch.float32}
-    amp_dtype = dtype_map[cnfg.mixed_precision]
-    use_amp = cnfg.mixed_precision != "no"
 
     # Training loop
     if is_main:

@@ -116,12 +116,14 @@ class RelightFlux(nn.Module):
         pretrained_model: str = "black-forest-labs/FLUX.1-dev",
         device: str = "cuda",
         text_max_length: int = 512,
+        transformer_dtype: torch.dtype = torch.float32,
     ):
         super().__init__()
         if device == "cuda" and not torch.cuda.is_available():
             device = "cpu"
         self.device = torch.device(device)
         self.text_max_length = text_max_length
+        self.transformer_dtype = transformer_dtype
 
         # --- Load Flux components ---
         self.vae = AutoencoderKL.from_pretrained(
@@ -130,6 +132,7 @@ class RelightFlux(nn.Module):
 
         self.transformer = FluxTransformer2DModel.from_pretrained(
             pretrained_model, subfolder="transformer",
+            torch_dtype=self.transformer_dtype,
         ).to(self.device)
 
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
@@ -445,14 +448,19 @@ class RelightFlux(nn.Module):
         ref1_img = batch["ref1_img"].to(self.device)
         ref2_img = batch["ref2_img"].to(self.device)
         target_img = batch["target_img"].to(self.device)
-        pl_ref1 = batch["plucker_ref1"].to(self.device)
-        pl_ref2 = batch["plucker_ref2"].to(self.device)
-        pl_tgt = batch["plucker_tgt"].to(self.device)
         b = target_img.shape[0]
+        model_dtype = self._conditioning_dtype()
+
+        pl_ref1 = batch["plucker_ref1"].to(self.device, dtype=model_dtype)
+        pl_ref2 = batch["plucker_ref2"].to(self.device, dtype=model_dtype)
+        pl_tgt = batch["plucker_tgt"].to(self.device, dtype=model_dtype)
 
         ref1_lat = self.encode_image(ref1_img)
         ref2_lat = self.encode_image(ref2_img)
         tgt_lat_clean = self.encode_image(target_img)
+        ref1_lat = ref1_lat.to(dtype=model_dtype)
+        ref2_lat = ref2_lat.to(dtype=model_dtype)
+        tgt_lat_clean = tgt_lat_clean.to(dtype=model_dtype)
 
         # Offload VAE to CPU — it's not needed during the forward/backward pass
         # and freeing it recovers ~300MB of VRAM for gradient computation.
@@ -568,9 +576,12 @@ class RelightFlux(nn.Module):
 
         ref1_lat = self.encode_image(ref1_img.to(self.device))
         ref2_lat = self.encode_image(ref2_img.to(self.device))
-        pl_ref1 = pl_ref1.to(self.device)
-        pl_ref2 = pl_ref2.to(self.device)
-        pl_tgt = pl_tgt.to(self.device)
+        model_dtype = self._conditioning_dtype()
+        ref1_lat = ref1_lat.to(dtype=model_dtype)
+        ref2_lat = ref2_lat.to(dtype=model_dtype)
+        pl_ref1 = pl_ref1.to(self.device, dtype=model_dtype)
+        pl_ref2 = pl_ref2.to(self.device, dtype=model_dtype)
+        pl_tgt = pl_tgt.to(self.device, dtype=model_dtype)
 
         if n_seeds > 1 and ref1_lat.shape[0] == 1:
             ref1_lat = ref1_lat.expand(n_seeds, -1, -1, -1)
