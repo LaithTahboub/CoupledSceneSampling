@@ -28,6 +28,12 @@ from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5Tokeniz
 
 from css.models.cross_view_attention_flux import inflate_flux_attention
 
+try:
+    from peft import LoraConfig, get_peft_model
+    _PEFT_AVAILABLE = True
+except ImportError:
+    _PEFT_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -182,10 +188,50 @@ class RelightFlux(nn.Module):
     # Training configuration
     # ------------------------------------------------------------------
 
-    def configure_trainable(self, train_mode: str = "full") -> None:
+    def configure_trainable(
+        self,
+        train_mode: str = "full",
+        lora_rank: int = 64,
+        lora_alpha: int = 64,
+        lora_dropout: float = 0.0,
+        lora_target_modules: list[str] | None = None,
+    ) -> None:
         if train_mode == "full":
             self.transformer.requires_grad_(True)
             return
+
+        if train_mode == "lora":
+            if not _PEFT_AVAILABLE:
+                raise ImportError("peft is required for LoRA training: uv pip install peft")
+            self.transformer.requires_grad_(False)
+
+            if lora_target_modules is None:
+                lora_target_modules = [
+                    "to_q", "to_k", "to_v", "to_out.0",
+                    "add_q_proj", "add_k_proj", "add_v_proj", "to_add_out",
+                    "proj_mlp", "proj_out",
+                ]
+
+            lora_config = LoraConfig(
+                r=lora_rank,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                target_modules=lora_target_modules,
+                init_lora_weights="gaussian",
+            )
+            self.transformer = get_peft_model(self.transformer, lora_config)
+
+            # x_embedder is always fully trained (new channels need full-rank updates).
+            # Must be set after get_peft_model wrapping.
+            for p in self.transformer.base_model.model.x_embedder.parameters():
+                p.requires_grad = True
+
+            trainable = sum(p.numel() for p in self.transformer.parameters() if p.requires_grad)
+            total = sum(p.numel() for p in self.transformer.parameters())
+            print(f"[relight-flux] LoRA: {trainable:,} trainable / {total:,} total "
+                  f"({100*trainable/total:.2f}%) rank={lora_rank} alpha={lora_alpha}")
+            return
+
         # "cond" mode: only x_embedder + attention layers
         self.transformer.requires_grad_(False)
         self.transformer.x_embedder.requires_grad_(True)
@@ -462,10 +508,11 @@ class RelightFlux(nn.Module):
         ref2_lat = ref2_lat.to(dtype=model_dtype)
         tgt_lat_clean = tgt_lat_clean.to(dtype=model_dtype)
 
-        # Offload VAE to CPU — it's not needed during the forward/backward pass
-        # and freeing it recovers ~300MB of VRAM for gradient computation.
-        vae_device = next(self.vae.parameters()).device
-        if vae_device.type == "cuda":
+        # Offload VAE to CPU for full fine-tune — it's not needed during the
+        # forward/backward pass and freeing it recovers ~300MB of VRAM.
+        # Skip for LoRA since memory pressure is much lower.
+        vae_was_on_gpu = next(self.vae.parameters()).device.type == "cuda"
+        if vae_was_on_gpu and not hasattr(self.transformer, "peft_config"):
             self.vae.to("cpu")
             torch.cuda.empty_cache()
 
@@ -519,8 +566,11 @@ class RelightFlux(nn.Module):
             keep_pluckers=True,
         )
 
+        # Flux transformer expects timesteps in [0, 1000] range (timestep = sigma * 1000)
+        timesteps_1000 = sigma * 1000.0
+
         pred = self._predict_target_velocity(
-            packed, sigma, clip_pooled, t5_hidden,
+            packed, timesteps_1000, clip_pooled, t5_hidden,
             batch_size=b, target_slot=target_slot,
             latent_h=h, latent_w=w,
         )
@@ -531,8 +581,8 @@ class RelightFlux(nn.Module):
         loss = F.mse_loss(pred_spatial.float(), velocity_target.float())
 
         # Move VAE back to GPU for next iteration's encode step
-        if vae_device.type == "cuda":
-            self.vae.to(vae_device)
+        if vae_was_on_gpu and not next(self.vae.parameters()).device.type == "cuda":
+            self.vae.to(self.device)
 
         meta = {
             "n_both_kept": int((ref1_keep & ref2_keep).sum()),
@@ -600,9 +650,20 @@ class RelightFlux(nn.Module):
         clip_uncond = self.null_clip_pooled.expand(b, -1)
         t5_uncond = self.null_t5_emb.expand(b, -1, -1)
 
-        # Set up scheduler
+        # Set up scheduler with dynamic shifting based on image sequence length
         sched = FlowMatchEulerDiscreteScheduler.from_config(self.scheduler.config)
-        sched.set_timesteps(num_steps)
+        packed_seq_len = (h // 2) * (w // 2)  # tokens per view after 2x2 packing
+        if sched.config.get("use_dynamic_shifting", False):
+            base_shift = sched.config.base_shift
+            max_shift = sched.config.max_shift
+            base_seq = sched.config.base_image_seq_len
+            max_seq = sched.config.max_image_seq_len
+            mu = base_shift + (max_shift - base_shift) * (
+                packed_seq_len - base_seq
+            ) / (max_seq - base_seq)
+            sched.set_timesteps(num_steps, mu=mu)
+        else:
+            sched.set_timesteps(num_steps)
 
         # Generate independent noise per seed
         latent_shape = (1, self.LATENT_CH, h, w)

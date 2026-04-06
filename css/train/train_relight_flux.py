@@ -292,9 +292,20 @@ def _build_split(
 # ---------------------------------------------------------------------------
 
 def _unwrap_transformer(model: RelightFlux):
-    """Get the raw transformer module, stripping DDP wrappers."""
+    """Get the raw transformer module, stripping DDP / PeftModel wrappers."""
     t = model.transformer
-    return t.module if hasattr(t, "module") else t
+    # Strip DDP
+    if hasattr(t, "module"):
+        t = t.module
+    return t
+
+
+def _is_lora_model(model: RelightFlux) -> bool:
+    """Check if the transformer is wrapped with PEFT LoRA."""
+    t = model.transformer
+    if hasattr(t, "module"):
+        t = t.module
+    return hasattr(t, "peft_config")
 
 
 def save_relight_flux_checkpoint(
@@ -306,12 +317,26 @@ def save_relight_flux_checkpoint(
     epoch: int = 0,
     global_step: int = 0,
 ) -> None:
+    transformer = _unwrap_transformer(model)
+    is_lora = _is_lora_model(model)
+
+    if is_lora:
+        # Save only LoRA adapter weights + x_embedder (much smaller)
+        lora_state = {
+            k: v.detach().cpu() for k, v in transformer.state_dict().items()
+            if "lora_" in k or "x_embedder" in k
+        }
+        t_state = lora_state
+    else:
+        t_state = transformer.state_dict()
+
     payload = {
         "format_version": 1,
         "backbone": "flux",
+        "is_lora": is_lora,
         "epoch": int(epoch),
         "global_step": int(global_step),
-        "transformer": _unwrap_transformer(model).state_dict(),
+        "transformer": t_state,
         "optimizer": optimizer.state_dict() if optimizer is not None else None,
         "lr_scheduler": lr_scheduler.state_dict() if lr_scheduler is not None else None,
         "ema": ema.state_dict() if ema is not None else None,
@@ -357,7 +382,13 @@ def load_relight_flux_checkpoint(
         t_state = raw
 
     t_state = _strip_module_prefix(t_state)
-    _unwrap_transformer(model).load_state_dict(t_state, strict=strict)
+
+    is_lora_ckpt = isinstance(raw, dict) and raw.get("is_lora", False)
+    if is_lora_ckpt:
+        # LoRA checkpoint: load only the adapter + x_embedder weights (non-strict)
+        _unwrap_transformer(model).load_state_dict(t_state, strict=False)
+    else:
+        _unwrap_transformer(model).load_state_dict(t_state, strict=strict)
 
     epoch, global_step = 0, 0
     if isinstance(raw, dict):
@@ -549,10 +580,15 @@ def parse_args() -> argparse.Namespace:
 
     # Model
     p.add_argument("--pretrained-model", type=str, default="black-forest-labs/FLUX.1-dev")
-    p.add_argument("--train-mode", choices=["cond", "full"], default="full")
+    p.add_argument("--train-mode", choices=["cond", "full", "lora"], default="full")
     p.add_argument("--gradient-checkpointing", action="store_true", default=True)
     p.add_argument("--compile-transformer", action="store_true",
                     help="Use torch.compile on the transformer")
+
+    # LoRA
+    p.add_argument("--lora-rank", type=int, default=64)
+    p.add_argument("--lora-alpha", type=int, default=64)
+    p.add_argument("--lora-dropout", type=float, default=0.0)
 
     # Data — resolution (512 for training; 1024 OOMs on backward pass with 12B + 3-view attn)
     p.add_argument("--H", type=int, default=512)
@@ -622,8 +658,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hard-ratio", type=float, default=0.15)
 
     # Checkpoints & validation
-    p.add_argument("--save-every-steps", type=int, default=5_000)
-    p.add_argument("--val-every-steps", type=int, default=3_000)
+    p.add_argument("--save-every-steps", type=int, default=500)
+    p.add_argument("--val-every-steps", type=int, default=200)
     p.add_argument("--keep-checkpoints", type=int, default=3)
     p.add_argument("--val-sample-steps", type=int, default=28)
     p.add_argument("--val-cfg-scale", type=float, default=3.0)
@@ -809,7 +845,12 @@ def main() -> None:
         device=str(device),
         transformer_dtype=amp_dtype,
     )
-    model.configure_trainable(args.train_mode)
+    model.configure_trainable(
+        args.train_mode,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+    )
     model.configure_memory_optimizations(
         gradient_checkpointing=args.gradient_checkpointing,
         compile_transformer=args.compile_transformer,
@@ -825,9 +866,12 @@ def main() -> None:
         print(f"Effective batch size: {eff_batch} "
               f"({cnfg.per_gpu_batch_size} x {_world_size()} GPUs x {cnfg.gradient_accumulation_steps} accum)")
 
-    # DDP wrapping
+    # DDP wrapping (LoRA needs find_unused_parameters since base model params are frozen)
     if dist.is_initialized():
-        model.transformer = DDP(model.transformer, device_ids=[_local_rank()], find_unused_parameters=False)
+        model.transformer = DDP(
+            model.transformer, device_ids=[_local_rank()],
+            find_unused_parameters=(args.train_mode == "lora"),
+        )
 
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -843,10 +887,13 @@ def main() -> None:
         optimizer, cnfg.warmup_steps, cnfg.total_steps, cnfg.lr_scheduler,
     )
 
-    # EMA
+    # EMA — use GPU EMA for LoRA (small param count), CPU EMA for full fine-tune
     ema = None
     if cnfg.ema_enabled:
-        ema = CPUEMAModel(trainable_params, decay=cnfg.ema_decay)
+        if args.train_mode == "lora":
+            ema = EMAModel(trainable_params, decay=cnfg.ema_decay)
+        else:
+            ema = CPUEMAModel(trainable_params, decay=cnfg.ema_decay)
 
     # Resume
     global_step = 0
