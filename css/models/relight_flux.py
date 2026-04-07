@@ -19,11 +19,15 @@ Supports:
 
 from __future__ import annotations
 
+import os
+from contextlib import nullcontext
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler
 from diffusers.models.transformers.transformer_flux import FluxTransformer2DModel
+from packaging.version import InvalidVersion, Version
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
 
 from css.models.cross_view_attention_flux import inflate_flux_attention
@@ -101,6 +105,34 @@ def _prepare_latent_image_ids(h: int, w: int, device: torch.device, dtype: torch
 def _prepare_text_ids(seq_len: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """Text IDs are all zeros (no spatial position for text tokens)."""
     return torch.zeros(seq_len, 3, device=device, dtype=dtype)
+
+
+def _calculate_flux_shift(
+    image_seq_len: int,
+    base_seq_len: int = 256,
+    max_seq_len: int = 4096,
+    base_shift: float = 0.5,
+    max_shift: float = 1.15,
+) -> float:
+    """Match the sequence-length dependent shift used by the reference Flux pipeline."""
+    slope = (max_shift - base_shift) / (max_seq_len - base_seq_len)
+    intercept = base_shift - slope * base_seq_len
+    return image_seq_len * slope + intercept
+
+
+def _env_flag(name: str) -> bool | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _torch_version_at_least(version: str) -> bool:
+    try:
+        current = Version(torch.__version__.split("+", 1)[0])
+        return current >= Version(version)
+    except InvalidVersion:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +291,37 @@ class RelightFlux(nn.Module):
 
     def _conditioning_dtype(self) -> torch.dtype:
         return next(self.transformer.parameters()).dtype
+
+    def _sample_attention_context(self):
+        """Use a conservative SDPA backend for Flux sampling when requested.
+
+        Community FLUX reports have linked latent-like/pixelated outputs to
+        newer torch SDPA kernels. Restricting sampling to the math backend is a
+        slower but safer fallback, while leaving training untouched.
+        """
+        force_math = _env_flag("CSS_FLUX_FORCE_MATH_SDP")
+        if force_math is None:
+            force_math = _torch_version_at_least("2.4.0")
+
+        if not force_math:
+            return nullcontext()
+
+        nn_attention = getattr(torch.nn, "attention", None)
+        sdpa_kernel = getattr(nn_attention, "sdpa_kernel", None)
+        sdp_backend = getattr(nn_attention, "SDPBackend", None)
+        if sdpa_kernel is not None and sdp_backend is not None:
+            return sdpa_kernel(sdp_backend.MATH)
+
+        cuda_backends = getattr(torch.backends, "cuda", None)
+        sdp_kernel = getattr(cuda_backends, "sdp_kernel", None)
+        if sdp_kernel is None:
+            return nullcontext()
+
+        return sdp_kernel(
+            enable_flash=False,
+            enable_mem_efficient=False,
+            enable_math=True,
+        )
 
     # ------------------------------------------------------------------
     # Text encoding
@@ -428,16 +491,17 @@ class RelightFlux(nn.Module):
             guidance = torch.full_like(timesteps, 3.5)
         guidance = guidance.repeat_interleave(V)
 
-        pred = self.transformer(
-            hidden_states=packed,
-            encoder_hidden_states=t5,
-            pooled_projections=pooled,
-            timestep=t,
-            img_ids=img_ids,
-            txt_ids=txt_ids,
-            guidance=guidance,
-            return_dict=False,
-        )[0]
+        with self._sample_attention_context() if not self.training else nullcontext():
+            pred = self.transformer(
+                hidden_states=packed,
+                encoder_hidden_states=t5,
+                pooled_projections=pooled,
+                timestep=t,
+                img_ids=img_ids,
+                txt_ids=txt_ids,
+                guidance=guidance,
+                return_dict=False,
+            )[0]
 
         # pred: (B*V, S, token_dim) → extract target slot
         pred = pred.view(batch_size, V, *pred.shape[1:])
@@ -651,17 +715,38 @@ class RelightFlux(nn.Module):
         # Set up scheduler with dynamic shifting based on image sequence length
         sched = FlowMatchEulerDiscreteScheduler.from_config(self.scheduler.config)
         packed_seq_len = (h // 2) * (w // 2)  # tokens per view after 2x2 packing
+        sigma_schedule = None
+        if not sched.config.get("use_flow_sigmas", False):
+            sigma_schedule = np.linspace(1.0, 1.0 / max(1, num_steps), num_steps, dtype=np.float32)
+        schedule_kwargs: dict[str, float] = {}
         if sched.config.get("use_dynamic_shifting", False):
-            base_shift = sched.config.base_shift
-            max_shift = sched.config.max_shift
-            base_seq = sched.config.base_image_seq_len
-            max_seq = sched.config.max_image_seq_len
-            mu = base_shift + (max_shift - base_shift) * (
-                packed_seq_len - base_seq
-            ) / (max_seq - base_seq)
-            sched.set_timesteps(num_steps, mu=mu)
+            schedule_kwargs["mu"] = _calculate_flux_shift(
+                packed_seq_len,
+                sched.config.get("base_image_seq_len", 256),
+                sched.config.get("max_image_seq_len", 4096),
+                sched.config.get("base_shift", 0.5),
+                sched.config.get("max_shift", 1.15),
+            )
+
+        # FluxPipeline uses an explicit sigma schedule instead of the generic
+        # scheduler default. Falling back to num_steps keeps compatibility with
+        # older diffusers versions that don't expose the sigmas argument.
+        if sigma_schedule is not None:
+            try:
+                sched.set_timesteps(sigmas=sigma_schedule, device=self.device, **schedule_kwargs)
+            except TypeError:
+                try:
+                    sched.set_timesteps(sigmas=sigma_schedule, **schedule_kwargs)
+                except TypeError:
+                    sched.set_timesteps(num_steps, device=self.device, **schedule_kwargs)
         else:
-            sched.set_timesteps(num_steps)
+            try:
+                sched.set_timesteps(num_steps, device=self.device, **schedule_kwargs)
+            except TypeError:
+                sched.set_timesteps(num_steps, **schedule_kwargs)
+
+        if hasattr(sched, "set_begin_index"):
+            sched.set_begin_index(0)
 
         # Generate independent noise per seed
         latent_shape = (1, self.LATENT_CH, h, w)
