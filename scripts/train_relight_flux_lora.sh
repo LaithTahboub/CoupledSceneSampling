@@ -23,7 +23,7 @@ SCENES=${SCENES:-}
 
 RUN_NAME=${RUN_NAME:-relight_flux_lora_v1}
 OUTPUT=${OUTPUT:-$ROOT/checkpoints/${RUN_NAME}}
-SEED=${SEED:-101}
+SEED=${SEED:-7}
 
 # - Training -
 # LoRA is much lighter — can use larger batch and fewer accum steps
@@ -73,18 +73,18 @@ MEDIUM_RATIO=${MEDIUM_RATIO:-0.60}
 HARD_RATIO=${HARD_RATIO:-0.20}
 
 # - Split -
-TEST_SCENES_PCT=${TEST_SCENES_PCT:-5.0}
+TEST_SCENES_PCT=${TEST_SCENES_PCT:-50.0}
 TEST_TARGETS_PER_SCENE=${TEST_TARGETS_PER_SCENE:-0}
 SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/${RUN_NAME}_seed${SEED}}
 
 # - Checkpoints & validation -
 # LoRA trains faster — validate and save more frequently
 SAVE_EVERY=${SAVE_EVERY:-1000}
-VAL_EVERY=${VAL_EVERY:-500}
+VAL_EVERY=${VAL_EVERY:-3}
 KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-5}
 VAL_SAMPLE_STEPS=${VAL_SAMPLE_STEPS:-28}
 VAL_CFG_SCALE=${VAL_CFG_SCALE:-3.0}
-VAL_CFG_TEXT=${VAL_CFG_TEXT:-3.0}
+VAL_CFG_TEXT=${VAL_CFG_TEXT:-5.0}
 VAL_SEEDS_PER_SAMPLE=${VAL_SEEDS_PER_SAMPLE:-2}
 
 # - EMA -

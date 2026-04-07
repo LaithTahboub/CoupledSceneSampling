@@ -313,17 +313,18 @@ class RelightFlux(nn.Module):
     @torch.no_grad()
     def encode_image(self, img: torch.Tensor) -> torch.Tensor:
         """Encode image to latent. Applies Flux VAE scaling + shift."""
-        latent_dist = self.vae.encode(img).latent_dist
+        vae_dtype = next(self.vae.parameters()).dtype
+        latent_dist = self.vae.encode(img.to(dtype=vae_dtype)).latent_dist
         latent = latent_dist.sample()
-        # Flux uses: encoded = (sample - shift) * scale  (inverted at decode)
         latent = (latent - self.vae.config.shift_factor) * self.vae.config.scaling_factor
         return latent
 
     @torch.no_grad()
     def decode_latent(self, latent: torch.Tensor) -> torch.Tensor:
         """Decode latent to image. Inverts Flux VAE scaling + shift."""
+        vae_dtype = next(self.vae.parameters()).dtype
         latent = (latent / self.vae.config.scaling_factor) + self.vae.config.shift_factor
-        return self.vae.decode(latent, return_dict=False)[0]
+        return self.vae.decode(latent.to(dtype=vae_dtype), return_dict=False)[0]
 
     # ------------------------------------------------------------------
     # View packing
@@ -566,11 +567,8 @@ class RelightFlux(nn.Module):
             keep_pluckers=True,
         )
 
-        # Flux transformer expects timesteps in [0, 1000] range (timestep = sigma * 1000)
-        timesteps_1000 = sigma * 1000.0
-
         pred = self._predict_target_velocity(
-            packed, timesteps_1000, clip_pooled, t5_hidden,
+            packed, sigma, clip_pooled, t5_hidden,
             batch_size=b, target_slot=target_slot,
             latent_h=h, latent_w=w,
         )
@@ -679,7 +677,9 @@ class RelightFlux(nn.Module):
         ref2_drop = torch.zeros(b, dtype=torch.bool, device=self.device)
 
         for t in sched.timesteps:
-            sigma = torch.full((b,), float(t), device=self.device, dtype=ref1_lat.dtype)
+            # Scheduler timesteps are in [0, 1000]; transformer expects [0, 1]
+            # (FluxPipeline does timestep/1000 before calling the transformer)
+            sigma = torch.full((b,), float(t) / 1000.0, device=self.device, dtype=ref1_lat.dtype)
 
             # Pack 3 CFG branches
             packed_full, tgt_slot = self._pack_views(

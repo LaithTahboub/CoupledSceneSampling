@@ -64,7 +64,8 @@ def _world_size() -> int:
 def _setup_distributed() -> None:
     if "RANK" not in os.environ:
         return
-    dist.init_process_group(backend="nccl")
+    from datetime import timedelta
+    dist.init_process_group(backend="nccl", timeout=timedelta(minutes=120))
     torch.cuda.set_device(_local_rank())
 
 
@@ -987,17 +988,22 @@ def main() -> None:
                             wandb.log(log_dict, step=global_step)
                             bucket_losses.clear()
 
-                    # Validation
-                    if global_step % cnfg.val_every_steps == 0 and is_main:
-                        if ema is not None:
-                            ema.apply_shadow(trainable_params)
-                        _log_validation(
-                            model, val_dataset,
-                            list(range(len(val_dataset))),
-                            global_step, cnfg,
-                        )
-                        if ema is not None:
-                            ema.restore(trainable_params)
+                    # Validation (barrier so other ranks don't race ahead during val)
+                    if global_step % cnfg.val_every_steps == 0:
+                        if dist.is_initialized():
+                            dist.barrier()
+                        if is_main:
+                            if ema is not None:
+                                ema.apply_shadow(trainable_params)
+                            _log_validation(
+                                model, val_dataset,
+                                list(range(len(val_dataset))),
+                                global_step, cnfg,
+                            )
+                            if ema is not None:
+                                ema.restore(trainable_params)
+                        if dist.is_initialized():
+                            dist.barrier()
                         model.train()
 
                     # Save checkpoint
