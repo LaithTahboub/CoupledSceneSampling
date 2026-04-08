@@ -382,7 +382,9 @@ class RelightSD(nn.Module):
             packed_uncond, _ = self._pack_views(
                 ref1_lat, ref2_lat, latent_in, pl_ref1, pl_ref2, pl_tgt,
                 ref1_keep=ref1_drop, ref2_keep=ref2_drop,
-                keep_pluckers=False,
+                # Match training-time dropout: remove reference image content,
+                # but preserve the geometric layout via Plucker rays.
+                keep_pluckers=True,
             )
 
             # Batch all 3 CFG branches: [full, geo, uncond] → single UNet call

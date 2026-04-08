@@ -292,7 +292,7 @@ class RelightFlux(nn.Module):
     def _conditioning_dtype(self) -> torch.dtype:
         return next(self.transformer.parameters()).dtype
 
-    def _sample_attention_context(self):
+    def _sample_attention_backend(self):
         """Use a conservative SDPA backend for Flux sampling when requested.
 
         Community FLUX reports have linked latent-like/pixelated outputs to
@@ -304,24 +304,27 @@ class RelightFlux(nn.Module):
             force_math = _torch_version_at_least("2.4.0")
 
         if not force_math:
-            return nullcontext()
+            return "default", nullcontext()
 
         nn_attention = getattr(torch.nn, "attention", None)
         sdpa_kernel = getattr(nn_attention, "sdpa_kernel", None)
         sdp_backend = getattr(nn_attention, "SDPBackend", None)
         if sdpa_kernel is not None and sdp_backend is not None:
-            return sdpa_kernel(sdp_backend.MATH)
+            return "math", sdpa_kernel(sdp_backend.MATH)
 
         cuda_backends = getattr(torch.backends, "cuda", None)
         sdp_kernel = getattr(cuda_backends, "sdp_kernel", None)
         if sdp_kernel is None:
-            return nullcontext()
+            return "default", nullcontext()
 
-        return sdp_kernel(
+        return "math", sdp_kernel(
             enable_flash=False,
             enable_mem_efficient=False,
             enable_math=True,
         )
+
+    def _sample_attention_context(self):
+        return self._sample_attention_backend()[1]
 
     # ------------------------------------------------------------------
     # Text encoding
@@ -667,7 +670,9 @@ class RelightFlux(nn.Module):
         prompt: str = "", num_steps: int = 28,
         cfg_scale: float = 3.0, cfg_text: float = 3.0,
         seed: int | list[int] = 42,
-    ) -> torch.Tensor:
+        return_debug: bool = False,
+        debug_collect_steps: int = 4,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, object]]:
         """Inference with dual CFG via true multi-pass guidance.
 
         Uses the same dual-CFG strategy as RelightSD:
@@ -758,10 +763,33 @@ class RelightFlux(nn.Module):
             )
         latent = torch.cat(noise_parts, dim=0)
 
+        debug_info: dict[str, object] | None = None
+        debug_capture: set[int] = set()
+        if return_debug:
+            attention_backend, _ = self._sample_attention_backend()
+            debug_count = max(1, min(int(debug_collect_steps), len(sched.timesteps)))
+            capture_indices = np.linspace(
+                0, max(0, len(sched.timesteps) - 1), num=debug_count, dtype=int,
+            ).tolist()
+            debug_capture = set(int(i) for i in capture_indices)
+            pack_unpack_err = (
+                _unpack_latents(_pack_latents(latent[:1], self.LATENT_CH), h, w, self.LATENT_CH)
+                - latent[:1]
+            ).abs().max().item()
+            debug_info = {
+                "attention_backend": attention_backend,
+                "num_steps": int(num_steps),
+                "cfg_scale": float(cfg_scale),
+                "cfg_text": float(cfg_text),
+                "scheduler_timesteps": [float(t.item()) for t in sched.timesteps],
+                "pack_unpack_max_abs_error": float(pack_unpack_err),
+                "decoded_steps": [],
+            }
+
         ref1_drop = torch.zeros(b, dtype=torch.bool, device=self.device)
         ref2_drop = torch.zeros(b, dtype=torch.bool, device=self.device)
 
-        for t in sched.timesteps:
+        for step_idx, t in enumerate(sched.timesteps):
             # Scheduler timesteps are in [0, 1000]; transformer expects [0, 1]
             # (FluxPipeline does timestep/1000 before calling the transformer)
             sigma = torch.full((b,), float(t) / 1000.0, device=self.device, dtype=ref1_lat.dtype)
@@ -773,7 +801,9 @@ class RelightFlux(nn.Module):
             packed_uncond, _ = self._pack_views(
                 ref1_lat, ref2_lat, latent, pl_ref1, pl_ref2, pl_tgt,
                 ref1_keep=ref1_drop, ref2_keep=ref2_drop,
-                keep_pluckers=False,
+                # Match training-time dropout: remove reference image content,
+                # but preserve the geometric layout via Plucker rays.
+                keep_pluckers=True,
             )
 
             # Batch all 3 CFG branches
@@ -802,4 +832,28 @@ class RelightFlux(nn.Module):
             # The scheduler handles this
             latent = sched.step(v, t, latent, return_dict=False)[0]
 
-        return self.decode_latent(latent)
+            if debug_info is not None and step_idx in debug_capture:
+                decoded_step = self.decode_latent(latent[:1])[0].detach().cpu()
+                debug_info["decoded_steps"].append({
+                    "step_index": int(step_idx),
+                    "timestep": float(t.item()),
+                    "latent_min": float(latent.min().item()),
+                    "latent_max": float(latent.max().item()),
+                    "latent_mean": float(latent.mean().item()),
+                    "latent_std": float(latent.std().item()),
+                    "decoded": decoded_step,
+                })
+
+        decoded = self.decode_latent(latent)
+        if debug_info is not None:
+            debug_info["final_latent_min"] = float(latent.min().item())
+            debug_info["final_latent_max"] = float(latent.max().item())
+            debug_info["final_latent_mean"] = float(latent.mean().item())
+            debug_info["final_latent_std"] = float(latent.std().item())
+            debug_info["final_image_min"] = float(decoded.min().item())
+            debug_info["final_image_max"] = float(decoded.max().item())
+            debug_info["final_image_mean"] = float(decoded.mean().item())
+            debug_info["final_image_std"] = float(decoded.std().item())
+            return decoded, debug_info
+
+        return decoded

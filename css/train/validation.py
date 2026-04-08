@@ -149,6 +149,7 @@ class ValMetrics:
     ssim_mean: float = 0.0
     lpips_mean: float = 0.0
     copy_ratio_mean: float = 0.0
+    grid_ratio_mean: float = 0.0
     count: int = 0
 
     # Per-bucket metrics
@@ -156,6 +157,7 @@ class ValMetrics:
     bucket_ssim: dict[str, float] | None = None
     bucket_lpips: dict[str, float] | None = None
     bucket_copy_ratio: dict[str, float] | None = None
+    bucket_grid_ratio: dict[str, float] | None = None
 
 
 @dataclass
@@ -167,6 +169,59 @@ class SeedResult:
     ssim: float = 0.0
     lpips: float = 0.0
     copy_ratio: float = 1.0
+    grid_ratio: float = 0.0
+
+
+def grid_artifact_score(image: torch.Tensor, cell_size: int = 8) -> dict[str, float]:
+    """Measure how strongly local differences spike on a fixed cell grid.
+
+    The reported ratio is:
+        mean difference on cell boundaries / mean difference elsewhere
+
+    Values noticeably above 1.0 indicate a suspicious fixed grid pattern.
+    """
+    img = ((image.detach().float().clamp(-1, 1) + 1.0) / 2.0).mean(dim=0)
+
+    dx = (img[:, 1:] - img[:, :-1]).abs()
+    dy = (img[1:, :] - img[:-1, :]).abs()
+
+    x_idx = torch.arange(1, img.shape[1], device=img.device)
+    y_idx = torch.arange(1, img.shape[0], device=img.device)
+    x_boundary = (x_idx % cell_size) == 0
+    y_boundary = (y_idx % cell_size) == 0
+
+    boundary_terms: list[torch.Tensor] = []
+    off_terms: list[torch.Tensor] = []
+
+    if dx.numel() > 0:
+        if x_boundary.any():
+            boundary_terms.append(dx[:, x_boundary].mean())
+        if (~x_boundary).any():
+            off_terms.append(dx[:, ~x_boundary].mean())
+
+    if dy.numel() > 0:
+        if y_boundary.any():
+            boundary_terms.append(dy[y_boundary, :].mean())
+        if (~y_boundary).any():
+            off_terms.append(dy[~y_boundary, :].mean())
+
+    if boundary_terms:
+        boundary_mean = torch.stack(boundary_terms).mean()
+    else:
+        boundary_mean = torch.tensor(0.0, device=img.device)
+
+    if off_terms:
+        off_mean = torch.stack(off_terms).mean()
+    else:
+        off_mean = torch.tensor(0.0, device=img.device)
+
+    ratio = boundary_mean / off_mean.clamp_min(1e-6)
+
+    return {
+        "grid_ratio": float(ratio.item()),
+        "boundary_diff": float(boundary_mean.item()),
+        "off_boundary_diff": float(off_mean.item()),
+    }
 
 
 @torch.inference_mode()
@@ -231,6 +286,7 @@ def run_validation(
             sr = SeedResult(seed=current_seed, generated=generated,
                             psnr=psnr(generated, target_gt),
                             ssim=ssim(generated, target_gt))
+            sr.grid_ratio = grid_artifact_score(generated)["grid_ratio"]
 
             if lpips_fn is not None:
                 sr.lpips = lpips_fn(generated, target_gt)
@@ -250,6 +306,7 @@ def run_validation(
             "target_name": item.get("target_name", ""),
             "difficulty": item.get("difficulty", "unknown"),
             "seeds": seed_results,
+            "grid_ratio": float(np.mean([s.grid_ratio for s in seed_results])),
             # Keep first seed's generated for backward compat
             "generated": seed_results[0].generated,
         }
@@ -276,18 +333,23 @@ def run_validation(
     if compute_lpips and "lpips" in per_sample[0]:
         agg.lpips_mean = float(np.mean([s["lpips"] for s in per_sample]))
         agg.copy_ratio_mean = float(np.mean([s.get("copy_ratio", 1.0) for s in per_sample]))
+    if "grid_ratio" in per_sample[0]:
+        agg.grid_ratio_mean = float(np.mean([s["grid_ratio"] for s in per_sample]))
 
     # Per-bucket aggregation
     agg.bucket_psnr = {}
     agg.bucket_ssim = {}
     agg.bucket_lpips = {}
     agg.bucket_copy_ratio = {}
+    agg.bucket_grid_ratio = {}
     for diff, samples in bucket_metrics.items():
         agg.bucket_psnr[diff] = float(np.mean([s["psnr"] for s in samples]))
         agg.bucket_ssim[diff] = float(np.mean([s["ssim"] for s in samples]))
         if compute_lpips and "lpips" in samples[0]:
             agg.bucket_lpips[diff] = float(np.mean([s["lpips"] for s in samples]))
             agg.bucket_copy_ratio[diff] = float(np.mean([s.get("copy_ratio", 1.0) for s in samples]))
+        if "grid_ratio" in samples[0]:
+            agg.bucket_grid_ratio[diff] = float(np.mean([s["grid_ratio"] for s in samples]))
 
     return agg, per_sample
 

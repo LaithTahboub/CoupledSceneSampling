@@ -75,10 +75,12 @@ SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/${RUN_NAME}_seed${SEED}}
 
 # - Checkpoints & validation -
 # Full fine-tune is slow (~5 min/step at 512x512 with batch=1, accum=8, 2 GPUs)
+# FLUX.1-dev previews need a real denoising schedule; very low step counts can
+# decode as coarse latent grids even when the model is otherwise learning.
 SAVE_EVERY=${SAVE_EVERY:-500}
 VAL_EVERY=${VAL_EVERY:-5}
 KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-3}
-VAL_SAMPLE_STEPS=${VAL_SAMPLE_STEPS:-4}
+VAL_SAMPLE_STEPS=${VAL_SAMPLE_STEPS:-28}
 VAL_CFG_SCALE=${VAL_CFG_SCALE:-3.0}
 VAL_CFG_TEXT=${VAL_CFG_TEXT:-5.0}
 VAL_SEEDS_PER_SAMPLE=${VAL_SEEDS_PER_SAMPLE:-1}

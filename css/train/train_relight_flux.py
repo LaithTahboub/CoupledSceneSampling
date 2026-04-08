@@ -36,7 +36,7 @@ from css.config import DataConfig, TrainConfig
 from css.data.MegaScenesDataset import Difficulty, MegaScenesDataset, SceneRecord
 from css.models.EMA import CPUEMAModel, EMAModel
 from css.models.relight_flux import RelightFlux
-from css.train.validation import ValMetrics, run_validation, to_uint8
+from css.train.validation import ValMetrics, grid_artifact_score, psnr, run_validation, ssim, to_uint8
 
 try:
     import wandb
@@ -477,6 +477,162 @@ def _build_val_grid(
     return grid
 
 
+def _sanitize_debug_name(text: str, limit: int = 80) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in text)
+    cleaned = cleaned.strip("._")
+    if not cleaned:
+        cleaned = "sample"
+    return cleaned[:limit]
+
+
+def _tensor_stats(t: torch.Tensor) -> dict[str, float | list[int]]:
+    t = t.detach().float().cpu()
+    return {
+        "shape": list(t.shape),
+        "min": float(t.min().item()),
+        "max": float(t.max().item()),
+        "mean": float(t.mean().item()),
+        "std": float(t.std().item()),
+    }
+
+
+def _save_tensor_png(path: Path, image: torch.Tensor) -> None:
+    PILImage.fromarray(to_uint8(image)).save(path)
+
+
+def _dump_flux_val_debug(
+    model: RelightFlux,
+    item: dict,
+    seed: int,
+    sample_idx: int,
+    global_step: int,
+    cfg: TrainConfig,
+    sample_metrics: dict,
+    target_grid: dict[str, float],
+) -> Path:
+    debug_root = Path(cfg.output_dir) / "val_debug"
+    debug_root.mkdir(parents=True, exist_ok=True)
+
+    scene_name = _sanitize_debug_name(item.get("scene_name", "scene"))
+    target_name = _sanitize_debug_name(item.get("target_name", f"sample_{sample_idx}"))
+    sample_dir = debug_root / f"step_{global_step:07d}_sample_{sample_idx}_{scene_name}_{target_name}"
+    sample_dir.mkdir(parents=True, exist_ok=True)
+
+    generated_dbg, sample_debug = model.sample(
+        ref1_img=item["ref1_img"].unsqueeze(0),
+        ref2_img=item["ref2_img"].unsqueeze(0),
+        pl_ref1=item["plucker_ref1"].unsqueeze(0),
+        pl_ref2=item["plucker_ref2"].unsqueeze(0),
+        pl_tgt=item["plucker_tgt"].unsqueeze(0),
+        prompt=item.get("prompt", ""),
+        num_steps=cfg.val_sample_steps,
+        cfg_scale=cfg.val_cfg_scale,
+        cfg_text=cfg.val_cfg_text,
+        seed=seed,
+        return_debug=True,
+    )
+    generated_dbg = generated_dbg[0].cpu()
+
+    target = item["target_img"]
+    ref1 = item["ref1_img"]
+    ref2 = item["ref2_img"]
+
+    target_recon = model.decode_latent(
+        model.encode_image(target.unsqueeze(0).to(model.device))
+    )[0].cpu()
+    ref1_recon = model.decode_latent(
+        model.encode_image(ref1.unsqueeze(0).to(model.device))
+    )[0].cpu()
+    ref2_recon = model.decode_latent(
+        model.encode_image(ref2.unsqueeze(0).to(model.device))
+    )[0].cpu()
+
+    comp = np.concatenate([
+        to_uint8(ref1), to_uint8(ref2), to_uint8(target), to_uint8(generated_dbg),
+    ], axis=1)
+    PILImage.fromarray(comp).save(sample_dir / "comparison.png")
+
+    vae_comp = np.concatenate([
+        to_uint8(target), to_uint8(target_recon),
+        to_uint8(ref1), to_uint8(ref1_recon),
+        to_uint8(ref2), to_uint8(ref2_recon),
+    ], axis=1)
+    PILImage.fromarray(vae_comp).save(sample_dir / "vae_roundtrip.png")
+
+    _save_tensor_png(sample_dir / "generated.png", generated_dbg)
+    _save_tensor_png(sample_dir / "target.png", target)
+    _save_tensor_png(sample_dir / "target_vae_recon.png", target_recon)
+
+    step_entries = []
+    for step_info in sample_debug.get("decoded_steps", []):
+        decoded = step_info["decoded"]
+        step_filename = (
+            f"denoise_{step_info['step_index']:02d}_"
+            f"t{int(round(step_info['timestep'])):04d}.png"
+        )
+        _save_tensor_png(sample_dir / step_filename, decoded)
+        step_entries.append({
+            "step_index": step_info["step_index"],
+            "timestep": step_info["timestep"],
+            "latent_min": step_info["latent_min"],
+            "latent_max": step_info["latent_max"],
+            "latent_mean": step_info["latent_mean"],
+            "latent_std": step_info["latent_std"],
+            "decoded_grid_ratio": grid_artifact_score(decoded)["grid_ratio"],
+            "file": step_filename,
+        })
+
+    payload = {
+        "global_step": int(global_step),
+        "sample_index": int(sample_idx),
+        "scene_name": item.get("scene_name", ""),
+        "target_name": item.get("target_name", ""),
+        "difficulty": item.get("difficulty", ""),
+        "prompt": item.get("prompt", ""),
+        "seed": int(seed),
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "attention_backend": sample_debug.get("attention_backend", "unknown"),
+        "pack_unpack_max_abs_error": sample_debug.get("pack_unpack_max_abs_error", None),
+        "sample_metrics": {
+            k: v for k, v in sample_metrics.items() if k not in {"generated", "seeds"}
+        },
+        "seed_metrics": [
+            {
+                "seed": int(sr.seed),
+                "psnr": float(sr.psnr),
+                "ssim": float(sr.ssim),
+                "lpips": float(sr.lpips),
+                "copy_ratio": float(sr.copy_ratio),
+                "grid_ratio": float(getattr(sr, "grid_ratio", 0.0)),
+            }
+            for sr in sample_metrics.get("seeds", [])
+        ],
+        "target_grid": target_grid,
+        "generated_grid": grid_artifact_score(generated_dbg),
+        "target_vae_grid": grid_artifact_score(target_recon),
+        "target_vae_psnr": psnr(target_recon, target),
+        "target_vae_ssim": ssim(target_recon, target),
+        "target_stats": _tensor_stats(target),
+        "generated_stats": _tensor_stats(generated_dbg),
+        "target_vae_stats": _tensor_stats(target_recon),
+        "ref1_vae_stats": _tensor_stats(ref1_recon),
+        "ref2_vae_stats": _tensor_stats(ref2_recon),
+        "scheduler_timesteps": sample_debug.get("scheduler_timesteps", []),
+        "decoded_steps": step_entries,
+    }
+    (sample_dir / "debug.json").write_text(json.dumps(payload, indent=2))
+
+    print(
+        f"  Flux debug bundle saved to {sample_dir} | "
+        f"grid={sample_metrics.get('grid_ratio', 0.0):.2f} "
+        f"target_grid={target_grid.get('grid_ratio', 0.0):.2f} "
+        f"pack/unpack_err={sample_debug.get('pack_unpack_max_abs_error', 0.0):.2e} "
+        f"attn={sample_debug.get('attention_backend', 'unknown')}"
+    )
+    return sample_dir
+
+
 @torch.inference_mode()
 def _log_validation(
     model: RelightFlux,
@@ -526,9 +682,64 @@ def _log_validation(
             compute_lpips=True,
         )
 
+        force_debug = os.environ.get("CSS_FLUX_VAL_DEBUG", "").strip().lower() not in {
+            "", "0", "false", "no", "off",
+        }
+        debug_budget = max(0, int(os.environ.get("CSS_FLUX_VAL_DEBUG_MAX", "1")))
+        debug_dumps = 0
+        sample_log_entries = []
+        sample_images = {}
+
+        for i, sample in enumerate(per_sample[:4]):
+            item = val_dataset[selected[i]]
+            target_grid = grid_artifact_score(item["target_img"])
+            suspicious_grid = sample.get("grid_ratio", 0.0) > max(
+                1.35, target_grid["grid_ratio"] + 0.15,
+            )
+
+            sample_log_entries.append(
+                f"{i}:{item['scene_name']}:{item.get('target_name', '')} "
+                f"grid={sample.get('grid_ratio', 0.0):.2f} "
+                f"target_grid={target_grid['grid_ratio']:.2f}"
+            )
+
+            diff = item.get("difficulty", "?")
+            caption = (f'{item["scene_name"]} | {diff} | '
+                       f'PSNR={sample["psnr"]:.1f} LPIPS={sample.get("lpips", 0):.3f} '
+                       f'CR={sample.get("copy_ratio", 0):.2f} '
+                       f'Grid={sample.get("grid_ratio", 0):.2f} '
+                       f'(avg {cfg.val_seeds_per_sample} seeds)')
+            if _wandb_is_active():
+                grid = _build_val_grid(item, sample["seeds"], to_uint8)
+                sample_images[f"val/sample_{i}"] = wandb.Image(grid, caption=caption)
+
+            print(
+                f"  Val sample {i}: scene={item['scene_name']} target={item.get('target_name', '')} "
+                f"grid={sample.get('grid_ratio', 0.0):.2f} "
+                f"target_grid={target_grid['grid_ratio']:.2f}"
+            )
+            if debug_dumps < debug_budget and (force_debug or suspicious_grid):
+                _dump_flux_val_debug(
+                    model=model,
+                    item=item,
+                    seed=sample["seeds"][0].seed,
+                    sample_idx=i,
+                    global_step=global_step,
+                    cfg=cfg,
+                    sample_metrics=sample,
+                    target_grid=target_grid,
+                )
+                debug_dumps += 1
+
+        print(
+            f"  Val step {global_step}: PSNR={metrics.psnr_mean:.2f} SSIM={metrics.ssim_mean:.4f} "
+            f"LPIPS={metrics.lpips_mean:.4f} CopyRatio={metrics.copy_ratio_mean:.3f} "
+            f"GridRatio={metrics.grid_ratio_mean:.3f}"
+        )
+        if sample_log_entries:
+            print("  " + " | ".join(sample_log_entries))
+
         if not _wandb_is_active():
-            print(f"  Val step {global_step}: PSNR={metrics.psnr_mean:.2f} SSIM={metrics.ssim_mean:.4f} "
-                  f"LPIPS={metrics.lpips_mean:.4f} CopyRatio={metrics.copy_ratio_mean:.3f}")
             return
 
         log_dict = {
@@ -536,6 +747,7 @@ def _log_validation(
             "val/ssim": metrics.ssim_mean,
             "val/lpips": metrics.lpips_mean,
             "val/copy_ratio": metrics.copy_ratio_mean,
+            "val/grid_ratio": metrics.grid_ratio_mean,
         }
 
         if metrics.bucket_psnr:
@@ -547,17 +759,10 @@ def _log_validation(
         if metrics.bucket_copy_ratio:
             for diff, val in metrics.bucket_copy_ratio.items():
                 log_dict[f"val/copy_ratio_{diff}"] = val
-
-        for i, sample in enumerate(per_sample[:4]):
-            item = val_dataset[selected[i]]
-            grid = _build_val_grid(item, sample["seeds"], to_uint8)
-
-            diff = item.get("difficulty", "?")
-            caption = (f'{item["scene_name"]} | {diff} | '
-                       f'PSNR={sample["psnr"]:.1f} LPIPS={sample.get("lpips", 0):.3f} '
-                       f'CR={sample.get("copy_ratio", 0):.2f} '
-                       f'(avg {cfg.val_seeds_per_sample} seeds)')
-            log_dict[f"val/sample_{i}"] = wandb.Image(grid, caption=caption)
+        if metrics.bucket_grid_ratio:
+            for diff, val in metrics.bucket_grid_ratio.items():
+                log_dict[f"val/grid_ratio_{diff}"] = val
+        log_dict.update(sample_images)
 
         wandb.log(log_dict, step=global_step)
 
@@ -714,6 +919,22 @@ def _args_to_train_config(args: argparse.Namespace) -> TrainConfig:
     )
 
 
+def _warn_if_low_flux_val_steps(args: argparse.Namespace, cfg: TrainConfig) -> None:
+    model_name = (args.pretrained_model or "").lower()
+    if "flux.1-dev" not in model_name:
+        return
+    if cfg.val_sample_steps >= 12:
+        return
+
+    print(
+        "[train_relight_flux] WARNING: "
+        f"--val-sample-steps={cfg.val_sample_steps} is very low for FLUX.1-dev. "
+        "That often yields blocky latent-grid previews because the VAE is "
+        "decoding an under-denoised latent rather than a fully sampled image. "
+        "Use roughly 28 steps for representative validation images."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main training loop
 # ---------------------------------------------------------------------------
@@ -727,6 +948,9 @@ def main() -> None:
 
     device = torch.device(f"cuda:{_local_rank()}")
     is_main = _is_main_process()
+
+    if is_main:
+        _warn_if_low_flux_val_steps(args, cnfg)
 
     output_dir = Path(cnfg.output_dir)
     if is_main:
