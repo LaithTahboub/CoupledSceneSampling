@@ -78,9 +78,12 @@ TEST_TARGETS_PER_SCENE=${TEST_TARGETS_PER_SCENE:-0}
 SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/${RUN_NAME}_seed${SEED}}
 
 # - Checkpoints & validation -
-# LoRA trains faster — validate and save more frequently
+# LoRA trains faster, but step-3 previews are misleading for this model:
+# they often show denoiser-path artifacts before the multi-view conditioning
+# has adapted at all. Start validation later so the default run surfaces
+# meaningful images instead of near-initialization samples.
 SAVE_EVERY=${SAVE_EVERY:-1000}
-VAL_EVERY=${VAL_EVERY:-3}
+VAL_EVERY=${VAL_EVERY:-250}
 KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-5}
 VAL_SAMPLE_STEPS=${VAL_SAMPLE_STEPS:-28}
 VAL_CFG_SCALE=${VAL_CFG_SCALE:-3.0}
