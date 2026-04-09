@@ -322,6 +322,92 @@ def _is_lora_model(model: RelightFlux) -> bool:
     return hasattr(t, "peft_config")
 
 
+def _group_trainable_named_params(model: RelightFlux) -> dict[str, dict[str, torch.nn.Parameter]]:
+    groups = {"x_embedder": {}, "lora": {}, "other": {}}
+    for name, param in _unwrap_transformer(model).named_parameters():
+        if not param.requires_grad:
+            continue
+        if "x_embedder" in name:
+            groups["x_embedder"][name] = param
+        elif "lora_" in name:
+            groups["lora"][name] = param
+        else:
+            groups["other"][name] = param
+    return groups
+
+
+def _snapshot_trainable_params(model: RelightFlux) -> dict[str, dict[str, torch.Tensor]]:
+    groups = _group_trainable_named_params(model)
+    return {
+        group: {
+            name: param.detach().float().cpu().clone()
+            for name, param in named.items()
+        }
+        for group, named in groups.items()
+    }
+
+
+def _compute_param_update_stats(
+    model: RelightFlux,
+    snapshot: dict[str, dict[str, torch.Tensor]] | None,
+) -> dict[str, float]:
+    if snapshot is None:
+        return {}
+
+    stats: dict[str, float] = {}
+    groups = _group_trainable_named_params(model)
+    for group, named in groups.items():
+        if not named:
+            continue
+        delta_sq = 0.0
+        base_sq = 0.0
+        current_sq = 0.0
+        count = 0
+        for name, param in named.items():
+            current = param.detach().float().cpu()
+            start = snapshot[group][name]
+            diff = current - start
+            delta_sq += float(diff.square().sum().item())
+            base_sq += float(start.square().sum().item())
+            current_sq += float(current.square().sum().item())
+            count += current.numel()
+        if count == 0:
+            continue
+        stats[f"param/{group}_delta_rms"] = math.sqrt(delta_sq / count)
+        stats[f"param/{group}_base_rms"] = math.sqrt(base_sq / count)
+        stats[f"param/{group}_current_rms"] = math.sqrt(current_sq / count)
+        stats[f"param/{group}_delta_rel"] = math.sqrt(delta_sq / max(base_sq, 1e-12))
+    return stats
+
+
+def _compute_grad_stats(model: RelightFlux) -> dict[str, float]:
+    stats: dict[str, float] = {}
+    groups = _group_trainable_named_params(model)
+    for group, named in groups.items():
+        grad_sq = 0.0
+        param_sq = 0.0
+        count = 0
+        with_grad = 0
+        for _, param in named.items():
+            if param.grad is None:
+                continue
+            grad = param.grad.detach().float()
+            cur = param.detach().float()
+            grad_sq += float(grad.square().sum().item())
+            param_sq += float(cur.square().sum().item())
+            count += grad.numel()
+            with_grad += 1
+        if count == 0:
+            stats[f"grad/{group}_rms"] = 0.0
+            stats[f"grad/{group}_rel"] = 0.0
+            stats[f"grad/{group}_params_with_grad"] = 0.0
+            continue
+        stats[f"grad/{group}_rms"] = math.sqrt(grad_sq / count)
+        stats[f"grad/{group}_rel"] = math.sqrt(grad_sq / max(param_sq, 1e-12))
+        stats[f"grad/{group}_params_with_grad"] = float(with_grad)
+    return stats
+
+
 def save_relight_flux_checkpoint(
     model: RelightFlux,
     ckpt_path: str | Path,
@@ -1095,6 +1181,7 @@ def main() -> None:
     )
 
     trainable_params = model.get_trainable_parameters()
+    trainable_snapshot = _snapshot_trainable_params(model) if is_main else None
     if is_main:
         total_params = sum(p.numel() for p in model.transformer.parameters())
         trainable_count = sum(p.numel() for p in trainable_params)
@@ -1103,6 +1190,12 @@ def main() -> None:
         eff_batch = cnfg.per_gpu_batch_size * _world_size() * cnfg.gradient_accumulation_steps
         print(f"Effective batch size: {eff_batch} "
               f"({cnfg.per_gpu_batch_size} x {_world_size()} GPUs x {cnfg.gradient_accumulation_steps} accum)")
+        update_stats = _compute_param_update_stats(model, trainable_snapshot)
+        if update_stats:
+            pretty = ", ".join(
+                f"{k.split('/', 1)[1]}={v:.3e}" for k, v in sorted(update_stats.items())
+            )
+            print(f"Initial parameter stats: {pretty}")
 
     # DDP wrapping (LoRA needs find_unused_parameters since base model params are frozen)
     if dist.is_initialized():
@@ -1191,6 +1284,7 @@ def main() -> None:
                         bucket_losses.setdefault(diff_val, []).append(loss.item() * cnfg.gradient_accumulation_steps)
 
                 if accum_steps % cnfg.gradient_accumulation_steps == 0:
+                    grad_stats = _compute_grad_stats(model) if is_main else {}
                     if cnfg.grad_clip > 0:
                         torch.nn.utils.clip_grad_norm_(trainable_params, cnfg.grad_clip)
                     optimizer.step()
@@ -1223,11 +1317,38 @@ def main() -> None:
                                 log_dict["train/ema_live_weight"] = _ema_live_weight(
                                     cnfg.ema_decay, global_step,
                                 )
+                            log_dict.update(grad_stats)
+                            log_dict.update(_compute_param_update_stats(model, trainable_snapshot))
                             for diff_key, losses in bucket_losses.items():
                                 if losses:
                                     log_dict[f"train/loss_{diff_key}"] = np.mean(losses)
                             wandb.log(log_dict, step=global_step)
                             bucket_losses.clear()
+                        elif global_step <= 5 or global_step % max(1, cnfg.val_every_steps) == 0:
+                            stats = {}
+                            stats.update(grad_stats)
+                            stats.update(_compute_param_update_stats(model, trainable_snapshot))
+                            if stats:
+                                pretty = ", ".join(
+                                    f"{k.split('/', 1)[1] if '/' in k else k}={v:.3e}"
+                                    for k, v in sorted(stats.items())
+                                )
+                                print(f"  Train stats step {global_step}: {pretty}")
+                                lora_grad = stats.get("grad/lora_rms", 0.0)
+                                xembed_grad = stats.get("grad/x_embedder_rms", 0.0)
+                                lora_delta = stats.get("param/lora_delta_rms", 0.0)
+                                xembed_delta = stats.get("param/x_embedder_delta_rms", 0.0)
+                                if global_step <= 10 and max(lora_grad, xembed_grad) < 1e-12:
+                                    print(
+                                        "[train_relight_flux] WARNING: trainable gradients are "
+                                        "effectively zero; LoRA/x_embedder may not be receiving "
+                                        "updates."
+                                    )
+                                elif global_step >= 10 and max(lora_delta, xembed_delta) < 1e-8:
+                                    print(
+                                        "[train_relight_flux] WARNING: trainable parameters have "
+                                        "barely moved from initialization."
+                                    )
 
                     # Validation (barrier so other ranks don't race ahead during val)
                     if global_step % cnfg.val_every_steps == 0:

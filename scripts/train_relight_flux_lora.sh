@@ -30,6 +30,7 @@ SEED=${SEED:-7}
 TOTAL_STEPS=${TOTAL_STEPS:-30000}
 PER_GPU_BATCH_SIZE=${PER_GPU_BATCH_SIZE:-2}
 GRAD_ACCUM=${GRAD_ACCUM:-4}
+GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-0}
 
 LR=${LR:-1e-4}
 TRAIN_MODE=${TRAIN_MODE:-lora}
@@ -129,7 +130,6 @@ ARGS=(
     --lora-rank "$LORA_RANK"
     --lora-alpha "$LORA_ALPHA"
     --lora-dropout "$LORA_DROPOUT"
-    --gradient-checkpointing
     --cond-both-kept "$COND_BOTH_KEPT"
     --cond-one-dropped "$COND_ONE_DROPPED"
     --cond-both-dropped "$COND_BOTH_DROPPED"
@@ -167,6 +167,10 @@ ARGS=(
 
 if [[ "$USE_EMA" == "0" ]]; then
     ARGS+=(--no-ema)
+fi
+
+if [[ "$GRADIENT_CHECKPOINTING" == "1" ]]; then
+    ARGS+=(--gradient-checkpointing)
 fi
 
 if [[ -n "$SCENES" ]]; then
