@@ -121,6 +121,19 @@ def _build_lr_scheduler(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
+def _ema_live_weight(decay: float, step: int) -> float:
+    step = max(0, int(step))
+    decay = float(decay)
+    return 1.0 - decay ** step
+
+
+def _should_use_ema_for_eval(cfg: TrainConfig, global_step: int) -> bool:
+    # Before the shadow has absorbed a meaningful fraction of live weights,
+    # EMA previews are mostly just the initialization and can be badly
+    # misleading for fast LoRA runs.
+    return _ema_live_weight(cfg.ema_decay, global_step) >= 0.25
+
+
 def _compute_bucket_weights(
     dataset: MegaScenesDataset,
     indices: list[int],
@@ -1206,6 +1219,10 @@ def main() -> None:
                                 "train/n_both_dropped": meta.get("n_both_dropped", 0),
                                 "train/n_text_dropped": meta.get("n_text_dropped", 0),
                             }
+                            if ema is not None:
+                                log_dict["train/ema_live_weight"] = _ema_live_weight(
+                                    cnfg.ema_decay, global_step,
+                                )
                             for diff_key, losses in bucket_losses.items():
                                 if losses:
                                     log_dict[f"train/loss_{diff_key}"] = np.mean(losses)
@@ -1217,14 +1234,22 @@ def main() -> None:
                         if dist.is_initialized():
                             dist.barrier()
                         if is_main:
-                            if ema is not None:
+                            use_ema_preview = ema is not None and _should_use_ema_for_eval(cnfg, global_step)
+                            if ema is not None and not use_ema_preview:
+                                live_weight = _ema_live_weight(cnfg.ema_decay, global_step)
+                                print(
+                                    "[train_relight_flux] Skipping EMA for validation at "
+                                    f"step {global_step}: shadow has only absorbed "
+                                    f"{100.0 * live_weight:.1f}% of live weights."
+                                )
+                            if use_ema_preview:
                                 ema.apply_shadow(trainable_params)
                             _log_validation(
                                 model, val_dataset,
                                 list(range(len(val_dataset))),
                                 global_step, cnfg,
                             )
-                            if ema is not None:
+                            if use_ema_preview:
                                 ema.restore(trainable_params)
                         if dist.is_initialized():
                             dist.barrier()
@@ -1232,14 +1257,22 @@ def main() -> None:
 
                     # Save checkpoint
                     if global_step % cnfg.save_every_steps == 0 and is_main:
-                        if ema is not None:
+                        use_ema_ckpt = ema is not None and _should_use_ema_for_eval(cnfg, global_step)
+                        if ema is not None and not use_ema_ckpt:
+                            live_weight = _ema_live_weight(cnfg.ema_decay, global_step)
+                            print(
+                                "[train_relight_flux] Saving raw weights at step "
+                                f"{global_step}: EMA shadow has only absorbed "
+                                f"{100.0 * live_weight:.1f}% of live weights."
+                            )
+                        if use_ema_ckpt:
                             ema.apply_shadow(trainable_params)
                         save_relight_flux_checkpoint(
                             model, output_dir / f"transformer_step_{global_step}.pt",
                             optimizer=optimizer, lr_scheduler=lr_scheduler,
                             ema=ema, epoch=epoch + 1, global_step=global_step,
                         )
-                        if ema is not None:
+                        if use_ema_ckpt:
                             ema.restore(trainable_params)
 
                         save_relight_flux_checkpoint(
@@ -1258,13 +1291,16 @@ def main() -> None:
 
         # Final save
         if is_main:
-            if ema is not None:
+            use_ema_final = ema is not None and _should_use_ema_for_eval(cnfg, global_step)
+            if use_ema_final:
                 ema.apply_shadow(trainable_params)
             save_relight_flux_checkpoint(
                 model, output_dir / "transformer_final.pt",
                 optimizer=optimizer, lr_scheduler=lr_scheduler,
                 ema=ema, epoch=epoch, global_step=global_step,
             )
+            if use_ema_final:
+                ema.restore(trainable_params)
             print(f"Training complete. Final step: {global_step}")
 
     finally:

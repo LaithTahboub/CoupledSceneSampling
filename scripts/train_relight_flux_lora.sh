@@ -91,7 +91,10 @@ VAL_CFG_TEXT=${VAL_CFG_TEXT:-5.0}
 VAL_SEEDS_PER_SAMPLE=${VAL_SEEDS_PER_SAMPLE:-2}
 
 # - EMA -
-EMA_DECAY=${EMA_DECAY:-0.9999}
+# LoRA adapts quickly; a very sticky EMA makes early previews/checkpoints look
+# almost identical to initialization. Use a faster shadow by default.
+EMA_DECAY=${EMA_DECAY:-0.995}
+USE_EMA=${USE_EMA:-1}
 
 # - W&B -
 WANDB_MODE=${WANDB_MODE:-online}
@@ -161,6 +164,10 @@ ARGS=(
     --wandb-mode "$WANDB_MODE"
     --wandb-init-timeout "$WANDB_INIT_TIMEOUT"
 )
+
+if [[ "$USE_EMA" == "0" ]]; then
+    ARGS+=(--no-ema)
+fi
 
 if [[ -n "$SCENES" ]]; then
     # shellcheck disable=SC2206
