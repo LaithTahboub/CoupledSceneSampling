@@ -8,7 +8,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=18
 #SBATCH --mem=256gb
-#SBATCH --gres=gpu:h200-sxm:2
+#SBATCH --gres=gpu:h200-sxm:1
 #SBATCH --account=vulcan-jbhuang
 #SBATCH --qos=vulcan-scavenger
 #SBATCH --time=3-00:00:00
@@ -82,9 +82,9 @@ SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/${RUN_NAME}_seed${SEED}}
 # they often show denoiser-path artifacts before the multi-view conditioning
 # has adapted at all. Start validation later so the default run surfaces
 # meaningful images instead of near-initialization samples.
-SAVE_EVERY=${SAVE_EVERY:-1000}
+SAVE_EVERY=${SAVE_EVERY:-250}
 VAL_EVERY=${VAL_EVERY:-250}
-KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-5}
+KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-2}
 VAL_SAMPLE_STEPS=${VAL_SAMPLE_STEPS:-28}
 VAL_CFG_SCALE=${VAL_CFG_SCALE:-3.0}
 VAL_CFG_TEXT=${VAL_CFG_TEXT:-5.0}
