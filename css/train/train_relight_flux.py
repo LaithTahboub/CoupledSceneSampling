@@ -719,6 +719,7 @@ def _dump_flux_val_debug(
         "ref2_vae_stats": _tensor_stats(ref2_recon),
         "scheduler_timesteps": sample_debug.get("scheduler_timesteps", []),
         "decoded_steps": step_entries,
+        "latest_train_stats": getattr(model, "_latest_train_debug_stats", None),
     }
     (sample_dir / "debug.json").write_text(json.dumps(payload, indent=2))
 
@@ -1302,6 +1303,13 @@ def main() -> None:
                         if isinstance(pbar, tqdm):
                             pbar.set_postfix(loss=f"{avg_loss:.4f}", step=global_step, lr=f"{lr_scheduler.get_last_lr()[0]:.2e}")
 
+                        current_debug_stats = {}
+                        current_debug_stats.update(grad_stats)
+                        current_debug_stats.update(_compute_param_update_stats(model, trainable_snapshot))
+                        current_debug_stats["train/step"] = float(global_step)
+                        current_debug_stats["train/loss"] = float(avg_loss)
+                        model._latest_train_debug_stats = current_debug_stats
+
                         if _wandb_is_active():
                             log_dict = {
                                 "train/loss": avg_loss,
@@ -1317,17 +1325,14 @@ def main() -> None:
                                 log_dict["train/ema_live_weight"] = _ema_live_weight(
                                     cnfg.ema_decay, global_step,
                                 )
-                            log_dict.update(grad_stats)
-                            log_dict.update(_compute_param_update_stats(model, trainable_snapshot))
+                            log_dict.update(current_debug_stats)
                             for diff_key, losses in bucket_losses.items():
                                 if losses:
                                     log_dict[f"train/loss_{diff_key}"] = np.mean(losses)
                             wandb.log(log_dict, step=global_step)
                             bucket_losses.clear()
                         elif global_step <= 5 or global_step % max(1, cnfg.val_every_steps) == 0:
-                            stats = {}
-                            stats.update(grad_stats)
-                            stats.update(_compute_param_update_stats(model, trainable_snapshot))
+                            stats = dict(current_debug_stats)
                             if stats:
                                 pretty = ", ".join(
                                     f"{k.split('/', 1)[1] if '/' in k else k}={v:.3e}"
